@@ -10238,10 +10238,12 @@ html.light .segment-shot-range { color: #9ca3af; }
 }
 
 .storyboard-row {
+  --storyboard-row-max-height: 460px;
   display: flex;
   align-items: flex-start;
   gap: 0;
   margin-bottom: 16px;
+  max-height: var(--storyboard-row-max-height);
   background: #1e1f28;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -10351,9 +10353,22 @@ html.light .sb-ctrl-config-btn.el-button:hover {
   border-right: 1px solid rgba(255,255,255,0.05);
   display: flex;
   flex-direction: column;
+  max-height: var(--storyboard-row-max-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
+.sb-panel::-webkit-scrollbar { width: 6px; }
+.sb-panel::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.32);
+  border-radius: 999px;
+}
+.sb-panel::-webkit-scrollbar-track { background: transparent; }
 html.light .sb-panel {
   border-right-color: rgba(139,92,246,0.08);
+}
+html.light .sb-panel::-webkit-scrollbar-thumb {
+  background: rgba(124, 58, 237, 0.18);
 }
 .sb-panel:last-child { border-right: none; }
 .sb-panel-title {
@@ -10617,8 +10632,14 @@ html.light .sb-universal-tooltip strong {
 }
 .sb-universal-textarea :deep(.el-textarea__inner) {
   min-height: 220px !important;
+  max-height: 320px;
+  overflow-y: auto;
   font-size: 13px;
   line-height: 1.55;
+}
+.sb-universal-textarea :deep(.omni-at-editor) {
+  min-height: 220px;
+  max-height: 320px;
 }
 .vp-mode-hint {
   font-size: 12px;
@@ -10996,12 +11017,21 @@ html.light .sb-video-placeholder {
   padding: 8px 0;
 }
 .sb-video-prompt-text--preview {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-all;
+  display: block;
+  max-height: 150px;
+  overflow-y: auto;
+  padding-right: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
 }
+.sb-video-prompt-text--preview::-webkit-scrollbar { width: 5px; }
+.sb-video-prompt-text--preview::-webkit-scrollbar-thumb {
+  background: rgba(161, 161, 170, 0.32);
+  border-radius: 999px;
+}
+.sb-video-prompt-text--preview::-webkit-scrollbar-track { background: transparent; }
 .sb-video-prompt-edit {
   margin-bottom: 8px;
 }
