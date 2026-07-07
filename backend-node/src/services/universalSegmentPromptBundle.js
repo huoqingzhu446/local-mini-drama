@@ -6,6 +6,8 @@
  * @param {{ universalSegmentOverride?: string | undefined }} opts 若传入则覆盖库中的 universal 写入 CURRENT_UNIVERSAL_SEGMENT
  * @returns {{ ok:true, userPrompt:string, durationLabel:string, durationSec:number, sbId:number, episodeId:number, storyboardNumber:number } | { ok:false, code:'not_found'|'bad_request', message:string }}
  */
+const promptStyleService = require('./promptStyleService');
+
 function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   const bodyIn = reqBody && typeof reqBody === 'object' ? reqBody : {};
   const forceWithoutReferenceImages = !!bodyIn.force_without_reference_images;
@@ -360,6 +362,9 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   ].join('\n');
 
   const assetLine = `ORDERED_CHARACTER_NAMES（仅剧情理解）: ${charNames || 'none'}\nORDERED_PROP_NAMES: ${propNames.join(', ') || 'none'}`;
+  const promptStyleBlock = promptStyleService.buildPromptStyleConstraintBlock(db, bodyIn.prompt_style_ids, {
+    heading: '【本次全能提示词附加提示词风格】',
+  });
 
   if (lines.length === 0 && !sceneBlock && !charNames && !propNames.length) {
     return { ok: false, code: 'bad_request', message: '分镜中暂无可用信息，请先填写动作、对白、视频提示词或绑定场景/角色等' };
@@ -484,6 +489,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     sceneLayoutBlock || null,
     charBindingBlock,
     styleHintBlock,
+    promptStyleBlock || null,
     refContract,
     assetLine,
     sceneBlock || null,

@@ -1304,41 +1304,61 @@
                       </el-icon>
                     </el-tooltip>
                   </div>
-                  <el-dropdown
-                    trigger="click"
-                    class="sb-universal-prompt-dd"
-                    @command="(cmd) => onUniversalSegmentPromptMenu(sb, cmd)"
-                  >
-                    <el-button
-                      type="primary"
-                      link
+                  <div class="sb-universal-label-actions">
+                    <el-select
+                      v-model="sbUniversalPromptStyleIds[sb.id]"
+                      multiple
+                      collapse-tags
+                      collapse-tags-tooltip
+                      clearable
+                      filterable
                       size="small"
-                      class="sb-universal-gen-btn"
-                      :loading="generatingUniversalSegmentIds.has(sb.id)"
+                      class="sb-universal-style-select"
+                      placeholder="提示词风格"
                     >
-                      全能提示词
-                      <el-icon class="sb-universal-dd-caret"><ArrowDown /></el-icon>
-                    </el-button>
-                    <template #dropdown>
-                      <el-dropdown-menu>
-                        <el-dropdown-item command="generate">生成全能提示词</el-dropdown-item>
-                        <el-dropdown-item command="generate-force">不查图片强制生成</el-dropdown-item>
-                        <el-dropdown-item command="polish" :disabled="!sbUniversalSegmentTrimmed(sb)">
-                          润色全能提示词
-                        </el-dropdown-item>
-                        <el-dropdown-item command="polish-force" :disabled="!sbUniversalSegmentTrimmed(sb)">
-                          不查图片强制润色
-                        </el-dropdown-item>
-                        <el-dropdown-item
-                          command="to-grok-video-tags"
-                          divided
-                          :disabled="!sbUniversalSegmentTrimmed(sb)"
-                        >
-                          改为 grok视频格式
-                        </el-dropdown-item>
-                      </el-dropdown-menu>
-                    </template>
-                  </el-dropdown>
+                      <el-option
+                        v-for="style in enabledPromptStyleOptions"
+                        :key="style.id"
+                        :label="style.name"
+                        :value="style.id"
+                      />
+                    </el-select>
+                    <el-dropdown
+                      trigger="click"
+                      class="sb-universal-prompt-dd"
+                      @command="(cmd) => onUniversalSegmentPromptMenu(sb, cmd)"
+                    >
+                      <el-button
+                        type="primary"
+                        link
+                        size="small"
+                        class="sb-universal-gen-btn"
+                        :loading="generatingUniversalSegmentIds.has(sb.id)"
+                      >
+                        全能提示词
+                        <el-icon class="sb-universal-dd-caret"><ArrowDown /></el-icon>
+                      </el-button>
+                      <template #dropdown>
+                        <el-dropdown-menu>
+                          <el-dropdown-item command="generate">生成全能提示词</el-dropdown-item>
+                          <el-dropdown-item command="generate-force">不查图片强制生成</el-dropdown-item>
+                          <el-dropdown-item command="polish" :disabled="!sbUniversalSegmentTrimmed(sb)">
+                            润色全能提示词
+                          </el-dropdown-item>
+                          <el-dropdown-item command="polish-force" :disabled="!sbUniversalSegmentTrimmed(sb)">
+                            不查图片强制润色
+                          </el-dropdown-item>
+                          <el-dropdown-item
+                            command="to-grok-video-tags"
+                            divided
+                            :disabled="!sbUniversalSegmentTrimmed(sb)"
+                          >
+                            改为 grok视频格式
+                          </el-dropdown-item>
+                        </el-dropdown-menu>
+                      </template>
+                    </el-dropdown>
+                  </div>
                 </div>
                 <UniversalSegmentOmniAtEditor
                   v-if="!generatingUniversalSegmentIds.has(sb.id)"
@@ -3073,6 +3093,11 @@ function pruneSelectedPromptStyleIds() {
     .filter((id) => enabledIds.has(id))
   sbPromptDialogStyleIds.value = normalizePromptStyleIds(sbPromptDialogStyleIds.value)
     .filter((id) => enabledIds.has(id))
+  const nextUniversal = {}
+  for (const [sbId, ids] of Object.entries(sbUniversalPromptStyleIds.value || {})) {
+    nextUniversal[sbId] = normalizePromptStyleIds(ids).filter((id) => enabledIds.has(id))
+  }
+  sbUniversalPromptStyleIds.value = nextUniversal
 }
 
 async function loadPromptStyles() {
@@ -3176,6 +3201,12 @@ async function deletePromptStyle(style) {
 
 function onStoryboardPromptStyleChange() {
   selectedStoryboardPromptStyleIds.value = normalizePromptStyleIds(selectedStoryboardPromptStyleIds.value)
+  const selected = getSelectedPromptStyleIdsForApi()
+  const nextUniversal = {}
+  for (const sb of store.currentEpisode?.storyboards || []) {
+    if (sb?.id) nextUniversal[sb.id] = [...selected]
+  }
+  sbUniversalPromptStyleIds.value = nextUniversal
   saveProjectSettings(false)
 }
 
@@ -3185,6 +3216,14 @@ function getSelectedPromptStyleIdsForApi() {
 
 function getDialogPromptStyleIdsForApi() {
   return normalizePromptStyleIds(sbPromptDialogStyleIds.value)
+}
+
+function getUniversalPromptStyleIdsForApi(sb) {
+  const rowStyleMap = sbUniversalPromptStyleIds.value || {}
+  if (sb?.id && Object.prototype.hasOwnProperty.call(rowStyleMap, sb.id)) {
+    return normalizePromptStyleIds(rowStyleMap[sb.id])
+  }
+  return getSelectedPromptStyleIdsForApi()
 }
 const storyInput = ref('')
 const storyStyle = ref('')
@@ -3892,6 +3931,8 @@ const regeneratingLayoutSbIds = reactive(new Set())  // 正在 AI 重新生成�
 const sbCreationMode = ref({})
 /** 全能模式片段描述（存库 universal_segment_text，与经典参考图字段独立） */
 const sbUniversalSegmentText = ref({})
+/** 单条全能提示词生成/润色时临时使用的提示词风格 */
+const sbUniversalPromptStyleIds = ref({})
 // 分镜图片/视频列表（由 /images?storyboard_id=xx 和 /videos?storyboard_id=xx 拉取）
 const sbImages = ref({})
 const sbVideos = ref({})
@@ -5240,6 +5281,8 @@ function syncStoryboardStateFromEpisode(ep) {
   const nextLayoutDescription = {}
   const nextCreationMode = {}
   const nextUniversalSegment = {}
+  const nextUniversalPromptStyleIds = {}
+  const prevUniversalPromptStyleIds = sbUniversalPromptStyleIds.value || {}
   for (const sb of boards) {
     nextScene[sb.id] = sb.scene_id ?? null
     nextDialogue[sb.id] = sb.dialogue ?? ''
@@ -5265,6 +5308,11 @@ function syncStoryboardStateFromEpisode(ep) {
     nextPropIds[sb.id] = Array.isArray(sb.prop_ids) ? sb.prop_ids : []
     nextCreationMode[sb.id] = sb.creation_mode === 'universal' ? 'universal' : 'classic'
     nextUniversalSegment[sb.id] = (sb.universal_segment_text ?? '').toString()
+    nextUniversalPromptStyleIds[sb.id] = normalizePromptStyleIds(
+      Array.isArray(prevUniversalPromptStyleIds[sb.id])
+        ? prevUniversalPromptStyleIds[sb.id]
+        : selectedStoryboardPromptStyleIds.value
+    )
   }
   sbCharacterIds.value = nextCharIds
   sbPropIds.value = nextPropIds
@@ -5289,6 +5337,7 @@ function syncStoryboardStateFromEpisode(ep) {
   sbLayoutDescription.value = nextLayoutDescription
   sbCreationMode.value = nextCreationMode
   sbUniversalSegmentText.value = nextUniversalSegment
+  sbUniversalPromptStyleIds.value = nextUniversalPromptStyleIds
 }
 
 function onEpisodeSelect(epId) {
@@ -6685,6 +6734,7 @@ async function onGenerateUniversalSegmentPrompt(sb, opts = {}) {
       {
         duration: durationSec,
         field_overrides: buildUniversalSegmentFieldOverrides(sb),
+        prompt_style_ids: getUniversalPromptStyleIdsForApi(sb),
         ...(force ? { force_without_reference_images: true } : {}),
       },
       (delta) => {
@@ -6730,6 +6780,7 @@ async function onPolishUniversalSegmentPromptStream(sb, opts = {}) {
         duration: durationSec,
         draft_universal_segment_text: draft,
         field_overrides: buildUniversalSegmentFieldOverrides(sb),
+        prompt_style_ids: getUniversalPromptStyleIdsForApi(sb),
         ...(force ? { force_without_reference_images: true } : {}),
       },
       (delta) => {
@@ -10749,6 +10800,18 @@ html.light .sb-image-area:hover {
 }
 .sb-universal-gen-btn {
   flex-shrink: 0;
+}
+.sb-universal-label-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+.sb-universal-style-select {
+  width: 180px;
+  max-width: 100%;
 }
 .sb-universal-prompt-dd {
   flex-shrink: 0;
