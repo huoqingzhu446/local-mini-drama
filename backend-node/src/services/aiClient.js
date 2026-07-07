@@ -254,7 +254,38 @@ function getConfigFromModelMap(db, sceneKey) {
   }
 }
 
+const NON_REASONING_SCENE_KEYS = new Set([
+  'image_polish',
+  'role_image_polish',
+  'prop_image_polish',
+  'scene_extraction',
+  'prop_extraction',
+  'identity_anchors',
+]);
+
+function hasExplicitDeepSeekThinkingOption(options = {}) {
+  const deepseek = options.deepseek && typeof options.deepseek === 'object' ? options.deepseek : null;
+  return (
+    options.deepseek_thinking != null ||
+    options.thinking != null ||
+    deepseek?.thinking != null ||
+    deepseek?.type != null
+  );
+}
+
+function applySceneKeyOptionDefaults(options = {}) {
+  const sceneKey = options.scene_key ? String(options.scene_key) : '';
+  if (!NON_REASONING_SCENE_KEYS.has(sceneKey) || hasExplicitDeepSeekThinkingOption(options)) {
+    return options;
+  }
+  return {
+    ...options,
+    deepseek_thinking: 'disabled',
+  };
+}
+
 async function generateText(db, log, serviceType, userPrompt, systemPrompt, options = {}) {
+  options = applySceneKeyOptionDefaults(options);
   const { model: preferredModel, temperature = 0.7, json_mode = false, min_max_tokens = null, streamCallback = null, scene_key = null } = options;
 
   // F2: 若传入 scene_key，优先从 ai_model_map 查找对应的模型路由配置
@@ -362,6 +393,7 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
  * @param {(delta: string) => void} onDelta 仅增量片段（UTF-8 字符串）
  */
 async function streamGenerateText(db, log, serviceType, userPrompt, systemPrompt, options = {}, onDelta) {
+  options = applySceneKeyOptionDefaults(options);
   const { model: preferredModel, temperature = 0.7, json_mode = false, min_max_tokens = null, scene_key = null } = options;
   let config = null;
   let routedModelOverride = null;
@@ -700,6 +732,7 @@ module.exports = {
   getDefaultConfig,
   getConfigForModel,
   getConfigFromModelMap,
+  applySceneKeyOptionDefaults,
   generateText,
   streamGenerateText,
   generateTextWithVision,

@@ -9647,7 +9647,7 @@ html.light .section-title { color: #1e1b4b; }
 .one-click-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 .one-click-label {
@@ -11048,7 +11048,7 @@ html.light .sb-video-area {
   color: #71717a;
   font-size: 0.9rem;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   text-align: center;
   padding: 16px;
 }

@@ -583,6 +583,20 @@ input_reference = (图片文件，可选)</pre>
         />
         <template v-if="form.service_type === 'video' && form.api_protocol === 'kling_omni'">
           <el-form-item>
+            <template #label>
+              <span class="form-label-tip">音画同出</span>
+            </template>
+            <el-switch
+              v-model="form.kling_omni_sound"
+              active-text="开启"
+              inactive-text="关闭"
+            />
+            <p class="field-tip">
+              开启后，可灵 Omni 请求将提交 <code>sound: "on"</code>；关闭时提交 <code>sound: "off"</code>。
+              适用于 <code>kling-v3-omni</code> 等支持原生声音的视频模型。
+            </p>
+          </el-form-item>
+          <el-form-item>
             <template #label><span class="form-label-tip">AccessKey</span></template>
             <el-input
               v-model="form.kling_access_key"
@@ -1190,6 +1204,7 @@ const form = ref({
   kling_access_key: '',
   kling_secret_key: '',
   kling_secret_key_base64: false,
+  kling_omni_sound: false,
   // TTS 专属字段
   voice_id: '',
   group_id: '',
@@ -1748,6 +1763,7 @@ function resetForm() {
     kling_access_key: '',
     kling_secret_key: '',
     kling_secret_key_base64: false,
+    kling_omni_sound: false,
   }
   formRef.value?.resetFields?.()
 }
@@ -1768,6 +1784,7 @@ function openEdit(row) {
   let kling_access_key = ''
   let kling_secret_key = ''
   let kling_secret_key_base64 = false
+  let kling_omni_sound = false
   const deepseekSettings = resolveDeepSeekFormSettings(row)
   if (row.settings) {
     try {
@@ -1780,6 +1797,8 @@ function openEdit(row) {
         kling_access_key = s.kling_access_key || ''
         kling_secret_key = s.kling_secret_key || ''
         kling_secret_key_base64 = !!s.kling_secret_key_base64
+        const sound = String(s.kling_omni_sound ?? s.kling_sound ?? s.sound ?? '').toLowerCase()
+        kling_omni_sound = s.kling_omni_sound === true || sound === 'on' || sound === 'true' || sound === '1'
       }
     } catch (_) {}
   }
@@ -1803,6 +1822,7 @@ function openEdit(row) {
     kling_access_key,
     kling_secret_key,
     kling_secret_key_base64,
+    kling_omni_sound,
   }
   dialogVisible.value = true
 }
@@ -1841,6 +1861,7 @@ async function submit() {
       else delete baseS.kling_secret_key
       if (form.value.kling_secret_key_base64) baseS.kling_secret_key_base64 = true
       else delete baseS.kling_secret_key_base64
+      baseS.kling_omni_sound = form.value.kling_omni_sound ? 'on' : 'off'
       settings = Object.keys(baseS).length ? JSON.stringify(baseS) : null
     } else if (isDeepSeekOfficialForm.value) {
       const prev = editingId.value ? list.value.find((r) => r.id === editingId.value) : null

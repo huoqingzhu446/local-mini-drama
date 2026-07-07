@@ -268,6 +268,28 @@ function resolveKlingOmniQueryPathTemplate(cfg, base) {
   return official ? KLING_OMNI_OFFICIAL_QUERY : KLING_OMNI_PROXY_QUERY;
 }
 
+function resolveKlingOmniSound(cfg) {
+  const settings = parseConfigSettingsJson(cfg);
+  const raw =
+    process.env.KLING_OMNI_SOUND ??
+    settings.kling_omni_sound ??
+    settings.kling_sound ??
+    settings.sound;
+  if (raw === true || raw === 1) return 'on';
+  const s = String(raw || '').trim().toLowerCase();
+  if (['on', 'true', '1', 'yes', 'enabled'].includes(s)) return 'on';
+  return 'off';
+}
+
+function resolveKlingOmniMode(cfg, resolutionOpt) {
+  const settings = parseConfigSettingsJson(cfg);
+  const configured = String(settings.kling_omni_mode || '').trim().toLowerCase();
+  if (['std', 'pro', '4k'].includes(configured)) return configured;
+  const resolution = String(resolutionOpt || '').trim().toLowerCase();
+  if (resolution === '1080p' || resolution === '1080') return 'pro';
+  return 'std';
+}
+
 function omniDurationString(modelName, durationNum) {
   const m = (modelName || '').toLowerCase();
   const d = Number(durationNum);
@@ -724,6 +746,7 @@ async function callKlingOmniVideoApi(config, log, opts) {
     model,
     duration,
     aspect_ratio,
+    resolution,
     image_url,
     reference_urls,
     files_base_url,
@@ -752,6 +775,8 @@ async function callKlingOmniVideoApi(config, log, opts) {
   const modelName = model || 'kling-video-o1';
   const durStr = omniDurationString(modelName, duration);
   const ratio = resolveKlingOmniAspectRatio(aspect_ratio, log, video_gen_id);
+  const mode = resolveKlingOmniMode(cfg, resolution);
+  const sound = resolveKlingOmniSound(cfg);
 
   const refList = Array.isArray(reference_urls) ? reference_urls.filter(Boolean) : [];
   const primary = (image_url || '').trim();
@@ -784,11 +809,11 @@ async function callKlingOmniVideoApi(config, log, opts) {
 
   const body = {
     model_name: modelName,
-    mode: 'std',
+    mode,
     duration: durStr,
     multi_shot: false,
     prompt: textPrompt,
-    sound: 'off',
+    sound,
     aspect_ratio: ratio,
   };
 
@@ -804,15 +829,19 @@ async function callKlingOmniVideoApi(config, log, opts) {
   log.info('[KlingOmni] 创建任务', {
     url: createUrl,
     model_name: modelName,
+    mode,
     duration: durStr,
     aspect_ratio: ratio,
+    sound,
     image_count: image_list.length,
     video_gen_id,
   });
   logVideoPostRequest(log, 'KlingOmni', createUrl, body, video_gen_id, {
     model_name: modelName,
+    mode,
     duration: durStr,
     aspect_ratio: ratio,
+    sound,
     image_count: image_list.length,
   });
 
@@ -3513,6 +3542,7 @@ async function callVideoApi(db, log, opts) {
       model,
       duration: opts.duration,
       aspect_ratio,
+      resolution: opts.resolution,
       image_url: opts.image_url,
       reference_urls: opts.reference_urls,
       files_base_url: opts.files_base_url,
