@@ -21,6 +21,7 @@ const assetRoutes = require('./assets');
 const audioRoutes = require('./audio');
 const promptOverridesRoutes = require('./promptOverrides');
 const sceneModelMapRoutes = require('./sceneModelMap');
+const codexImageJobRoutes = require('./codexImageJobs');
 
 function setupRouter(cfg, db, log) {
   const r = express.Router();
@@ -47,6 +48,7 @@ function setupRouter(cfg, db, log) {
   const assets = assetRoutes(db, log);
   const audio = audioRoutes(db, log, cfg);
   const promptOverrides = promptOverridesRoutes.routes(db, log);
+  const codexImageJobs = codexImageJobRoutes(db, cfg, log);
 
   // ---------- dramas ----------
   r.get('/dramas', drama.listDramas);
@@ -208,6 +210,15 @@ function setupRouter(cfg, db, log) {
 
   // ---------- upload ----------
   r.post('/upload/image', uploadModule.multerSingle, uploadHandlers.uploadImage);
+
+  // ---------- Codex image jobs (development assistant queue) ----------
+  r.get('/codex-image-jobs', codexImageJobs.list);
+  r.post('/codex-image-jobs', codexImageJobs.create);
+  r.get('/codex-image-jobs/pending-export', codexImageJobs.pendingExport);
+  r.post('/codex-image-jobs/import-results', codexImageJobs.importResults);
+  r.get('/codex-image-jobs/:id', codexImageJobs.get);
+  r.post('/codex-image-jobs/:id/use', codexImageJobs.use);
+  r.post('/codex-image-jobs/:id/cancel', codexImageJobs.cancel);
 
   // ---------- episodes ----------
   // 注意：drama.generateStoryboard 已处理所有逻辑（包括参数解析），这里统一使用 drama 模块的实现

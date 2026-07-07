@@ -220,6 +220,7 @@ function ensureAllColumns(database) {
     { name: 'time',             type: 'TEXT' },
     { name: 'prompt',           type: 'TEXT' },
     { name: 'polished_prompt',  type: 'TEXT' },  // 文字AI润色后的完整四视图图片提示词，生图时直接使用
+    { name: 'polished_prompt_single', type: 'TEXT' }, // 文字AI润色后的完整单图图片提示词，Codex/单图生图优先使用
     { name: 'image_url',        type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
     { name: 'extra_images',     type: 'TEXT' },
@@ -518,6 +519,61 @@ function ensureAllColumns(database) {
       updated_at TEXT NOT NULL DEFAULT ''
     )`);
   } catch (_) {}
+
+  // --- codex_image_jobs（Codex 开发辅助生图队列） ---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS codex_image_jobs (
+      id TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL DEFAULT '',
+      entity_id INTEGER NOT NULL DEFAULT 0,
+      drama_id INTEGER,
+      episode_id INTEGER,
+      frame_type TEXT DEFAULT 'main',
+      status TEXT NOT NULL DEFAULT 'pending',
+      prompt TEXT,
+      negative_prompt TEXT,
+      aspect_ratio TEXT,
+      style TEXT,
+      source_snapshot TEXT,
+      candidates TEXT,
+      selected_candidate_id TEXT,
+      applied_image_url TEXT,
+      applied_local_path TEXT,
+      error_msg TEXT,
+      manifest_path TEXT,
+      created_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT '',
+      completed_at TEXT,
+      used_at TEXT,
+      deleted_at TEXT
+    )`);
+    database.exec('CREATE INDEX IF NOT EXISTS idx_codex_image_jobs_entity ON codex_image_jobs(entity_type, entity_id, status)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_codex_image_jobs_drama ON codex_image_jobs(drama_id, status, updated_at)');
+  } catch (_) {}
+  ensureColumns(database, 'codex_image_jobs', [
+    { name: 'entity_type',           type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'entity_id',             type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'drama_id',              type: 'INTEGER' },
+    { name: 'episode_id',            type: 'INTEGER' },
+    { name: 'frame_type',            type: 'TEXT DEFAULT \'main\'' },
+    { name: 'status',                type: 'TEXT NOT NULL DEFAULT \'pending\'' },
+    { name: 'prompt',                type: 'TEXT' },
+    { name: 'negative_prompt',       type: 'TEXT' },
+    { name: 'aspect_ratio',          type: 'TEXT' },
+    { name: 'style',                 type: 'TEXT' },
+    { name: 'source_snapshot',       type: 'TEXT' },
+    { name: 'candidates',            type: 'TEXT' },
+    { name: 'selected_candidate_id', type: 'TEXT' },
+    { name: 'applied_image_url',     type: 'TEXT' },
+    { name: 'applied_local_path',    type: 'TEXT' },
+    { name: 'error_msg',             type: 'TEXT' },
+    { name: 'manifest_path',         type: 'TEXT' },
+    { name: 'created_at',            type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'updated_at',            type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'completed_at',          type: 'TEXT' },
+    { name: 'used_at',               type: 'TEXT' },
+    { name: 'deleted_at',            type: 'TEXT' },
+  ]);
 }
 
 /** 对已打开的 database 执行迁移与兜底补列（供 app 启动时调用） */

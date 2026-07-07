@@ -51,6 +51,7 @@ async function processPropExtraction(db, log, taskId, episodeId) {
       scene_key: 'prop_extraction',
       max_tokens: 2000,
       temperature: 0.3,
+      deepseek_thinking: 'disabled',
     });
   } catch (err) {
     log.error('Prop extraction AI failed', { error: err.message, task_id: taskId });

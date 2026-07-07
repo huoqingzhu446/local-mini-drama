@@ -334,7 +334,7 @@ async function generateText(db, log, serviceType, userPrompt, systemPrompt, opti
     ...(finalMaxTokens != null ? { max_tokens: finalMaxTokens } : {}),
     ...(json_mode ? { response_format: { type: 'json_object' } } : {}),
   };
-  body = applyDeepSeekChatOptions(config, body);
+  body = applyDeepSeekChatOptions(config, body, options);
   const startMs = Date.now();
   log.info('AI generateText request', { url: url.slice(0, 60), model, max_tokens: finalMaxTokens ?? '(model default)', json_mode, stream: true });
   const res = await postJSONStream(url, { Authorization: 'Bearer ' + (config.api_key || '') }, body, 60000, (receivedLen, event, accumulated) => {
@@ -430,7 +430,7 @@ async function streamGenerateText(db, log, serviceType, userPrompt, systemPrompt
     ...(finalMaxTokens != null ? { max_tokens: finalMaxTokens } : {}),
     ...(json_mode ? { response_format: { type: 'json_object' } } : {}),
   };
-  body = applyDeepSeekChatOptions(config, body);
+  body = applyDeepSeekChatOptions(config, body, options);
   const silenceMs = options.silence_timeout_ms != null ? Number(options.silence_timeout_ms) : 120000;
   const startMs = Date.now();
   log.info('AI streamGenerateText request', {

@@ -41,4 +41,5 @@ cd frontweb && npm run build
 - Migrations run automatically on backend startup (`ensureColumns()`); explicit `npm run migrate` only needed for first-time setup or after adding new migration SQL files.
 - Config file at `backend-node/configs/config.yaml` already exists in the repo — no need to copy from example.
 - AI content generation requires external API keys (configured via the app's "AI 配置" page), but the app fully functions without them for development/testing purposes.
+- Codex-only image generation workflow is documented in `docs/codex-image-workflow.md`; read it before changing Codex image queue, candidate import, character/prop/scene image buttons, or storyboard main/first/last frame buttons.
 - The backend also serves the built frontend from `frontweb/dist/` at port 5679 when the dist folder exists; during development, use the Vite dev server at port 3013 instead.

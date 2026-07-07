@@ -62,3 +62,23 @@ test('applies explicit DeepSeek thinking settings for V4 models', () => {
   assert.equal(body.reasoning_effort, 'max');
   assert.equal(body.temperature, undefined);
 });
+
+test('allows per-call DeepSeek thinking override for extraction tasks', () => {
+  const body = applyDeepSeekChatOptions(
+    {
+      provider: 'deepseek',
+      base_url: 'https://api.deepseek.com',
+      settings: JSON.stringify({
+        deepseek_thinking: 'enabled',
+        deepseek_reasoning_effort: 'max',
+      }),
+    },
+    baseBody('deepseek-v4-flash'),
+    { deepseek_thinking: 'disabled' }
+  );
+
+  assert.equal(body.model, 'deepseek-v4-flash');
+  assert.deepEqual(body.thinking, { type: 'disabled' });
+  assert.equal(body.reasoning_effort, undefined);
+  assert.equal(body.temperature, 0.7);
+});

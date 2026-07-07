@@ -448,6 +448,18 @@
           <el-icon class="collapse-icon"><ArrowUp v-if="!resourcePanelCollapsed" /><ArrowDown v-else /></el-icon>
         </div>
         <div v-show="!resourcePanelCollapsed" class="resource-panel-body">
+          <div class="asset-actions resource-global-actions">
+            <el-button
+              size="small"
+              type="warning"
+              plain
+              :loading="codexMissingBatchSubmitting"
+              :disabled="!currentEpisodeId || codexMissingBatchSubmitting"
+              @click="onBatchCreateMissingAssetCodexJobs"
+            >
+              本集缺图入 Codex
+            </el-button>
+          </div>
           <!-- 角色生成 -->
           <div id="anchor-characters" class="resource-block card">
             <div class="collapse-header resource-block-header" @click="charactersBlockCollapsed = !charactersBlockCollapsed">
@@ -461,6 +473,7 @@
                 </el-button>
                 <el-button size="small" :disabled="!dramaId" @click="openAddCharacter">添加角色</el-button>
                 <el-button size="small" @click="showCharLibrary = true">本剧角色库</el-button>
+                <el-button size="small" type="warning" plain :loading="codexBatchSubmitting.character" :disabled="!dramaId" @click="onBatchCreateCodexJobs('character')">Codex 批量</el-button>
               </div>
               <div class="asset-list asset-list-two">
                 <div v-for="char in characters" :key="char.id" class="asset-item asset-item-left-right">
@@ -585,6 +598,16 @@
                         <el-icon v-if="!generatingCharIds.has(char.id)"><MagicStick /></el-icon>
                         AI 生成
                       </el-button>
+                      <CodexImageJobButton
+                        entity-type="character"
+                        :entity-id="char.id"
+                        :drama-id="dramaId"
+                        :episode-id="currentEpisodeId"
+                        :style="getSelectedStyle()"
+                        :aspect-ratio="projectAspectRatio"
+                        @used="onCodexImageUsed"
+                        @preview="openImagePreview"
+                      />
                       <el-button type="success" size="small" :loading="uploadingResourceId === 'char-' + char.id" @click="onUploadResourceClick('character', char.id)">
                         <el-icon v-if="uploadingResourceId !== 'char-' + char.id"><Upload /></el-icon>
                         上传
@@ -608,6 +631,7 @@
                 <el-button type="primary" size="small" :loading="propsExtracting" :disabled="!currentEpisodeId" @click="onExtractProps">从剧本提取道具</el-button>
                 <el-button size="small" :disabled="!dramaId" @click="showAddProp = true">添加道具</el-button>
                 <el-button size="small" @click="showPropLibrary = true">本剧道具库</el-button>
+                <el-button size="small" type="warning" plain :loading="codexBatchSubmitting.prop" :disabled="!dramaId" @click="onBatchCreateCodexJobs('prop')">Codex 批量</el-button>
               </div>
               <div class="prop-gen-mode" style="margin: 8px 0; font-size: 13px;">
                 <el-checkbox v-model="propUseQuadGrid">生成四视图道具（默认单图，纯色无缝背景）</el-checkbox>
@@ -684,6 +708,16 @@
                           AI 生成
                         </el-button>
                       </el-tooltip>
+                      <CodexImageJobButton
+                        entity-type="prop"
+                        :entity-id="prop.id"
+                        :drama-id="dramaId"
+                        :episode-id="currentEpisodeId"
+                        :style="getSelectedStyle()"
+                        :aspect-ratio="projectAspectRatio"
+                        @used="onCodexImageUsed"
+                        @preview="openImagePreview"
+                      />
                       <el-button type="success" size="small" :loading="uploadingResourceId === 'prop-' + prop.id" @click="onUploadResourceClick('prop', prop.id)">
                         <el-icon v-if="uploadingResourceId !== 'prop-' + prop.id"><Upload /></el-icon>
                         上传
@@ -709,6 +743,7 @@
                 </el-button>
                 <el-button size="small" :disabled="!dramaId" @click="openAddScene">添加场景</el-button>
                 <el-button size="small" @click="showSceneLibrary = true">本剧场景库</el-button>
+                <el-button size="small" type="warning" plain :loading="codexBatchSubmitting.scene" :disabled="!dramaId" @click="onBatchCreateCodexJobs('scene')">Codex 批量</el-button>
               </div>
               <div class="scene-gen-mode" style="margin: 8px 0; font-size: 13px;">
                 <el-checkbox v-model="sceneUseQuadGrid">生成四宫格场景（默认单图）</el-checkbox>
@@ -785,6 +820,16 @@
                           AI 生成
                         </el-button>
                       </el-tooltip>
+                      <CodexImageJobButton
+                        entity-type="scene"
+                        :entity-id="scene.id"
+                        :drama-id="dramaId"
+                        :episode-id="currentEpisodeId"
+                        :style="getSelectedStyle()"
+                        :aspect-ratio="projectAspectRatio"
+                        @used="onCodexImageUsed"
+                        @preview="openImagePreview"
+                      />
                       <el-button type="success" size="small" :loading="uploadingResourceId === 'scene-' + scene.id" @click="onUploadResourceClick('scene', scene.id)">
                         <el-icon v-if="uploadingResourceId !== 'scene-' + scene.id"><Upload /></el-icon>
                         上传
@@ -888,6 +933,16 @@
                 @click="startBatchImageGeneration"
               >
                 批量生成分镜图
+              </el-button>
+              <el-button
+                type="warning"
+                plain
+                size="large"
+                :loading="codexStoryboardBatchSubmitting"
+                :disabled="!currentEpisodeId || codexStoryboardBatchSubmitting || batchImageRunning || batchVideoRunning || pipelineRunning || storyboardGenerating || universalOmniPolishRunning"
+                @click="onBatchCreateStoryboardCodexJobs"
+              >
+                Codex 批量分镜图
               </el-button>
               <el-button
                 type="warning"
@@ -1297,6 +1352,18 @@
                       </div>
                       <div class="sb-fl-slot-actions">
                         <el-button type="primary" size="small" :loading="generatingSbFirstImageIds.has(sb.id)" @click="onGenerateSbFrameImage(sb, 'first')">生成</el-button>
+                        <CodexImageJobButton
+                          class="sb-codex-action"
+                          entity-type="storyboard"
+                          :entity-id="sb.id"
+                          :drama-id="dramaId"
+                          :episode-id="currentEpisodeId"
+                          frame-type="first"
+                          :style="getSelectedStyle()"
+                          :aspect-ratio="projectAspectRatio"
+                          @used="onCodexStoryboardImageUsed($event, sb, 'first')"
+                          @preview="openImagePreview"
+                        />
                         <el-tooltip v-if="canUsePrevTailAsFirst(sb)" content="直接使用上一分镜的尾帧图片（高清原图）替换本首帧，画面更清晰" placement="top">
                           <el-button size="small" :loading="usingPrevTailAsFirstIds.has(sb.id)" @click="onUsePrevTailAsFirst(sb)">上镜尾帧</el-button>
                         </el-tooltip>
@@ -1326,6 +1393,18 @@
                       </div>
                       <div class="sb-fl-slot-actions">
                         <el-button type="primary" size="small" :loading="generatingSbLastImageIds.has(sb.id)" @click="onGenerateSbFrameImage(sb, 'last')">生成</el-button>
+                        <CodexImageJobButton
+                          class="sb-codex-action"
+                          entity-type="storyboard"
+                          :entity-id="sb.id"
+                          :drama-id="dramaId"
+                          :episode-id="currentEpisodeId"
+                          frame-type="last"
+                          :style="getSelectedStyle()"
+                          :aspect-ratio="projectAspectRatio"
+                          @used="onCodexStoryboardImageUsed($event, sb, 'last')"
+                          @preview="openImagePreview"
+                        />
                         <el-checkbox
                           v-model="lastFrameUseFirstLayoutLock"
                           class="sb-fl-first-lock-opt"
@@ -1387,6 +1466,18 @@
                       <el-icon><Refresh /></el-icon>
                       重试
                     </el-button>
+                    <CodexImageJobButton
+                      class="sb-codex-action"
+                      entity-type="storyboard"
+                      :entity-id="sb.id"
+                      :drama-id="dramaId"
+                      :episode-id="currentEpisodeId"
+                      frame-type="main"
+                      :style="getSelectedStyle()"
+                      :aspect-ratio="projectAspectRatio"
+                      @used="onCodexStoryboardImageUsed($event, sb, 'main')"
+                      @preview="openImagePreview"
+                    />
                     <el-button size="small" :loading="uploadingSbImageId === sb.id" @click="onUploadSbImageClick(sb)">上传</el-button>
                   </template>
                   <template v-else>
@@ -1394,6 +1485,18 @@
                       <el-icon><MagicStick /></el-icon>
                       生成分镜参考图
                     </el-button>
+                    <CodexImageJobButton
+                      class="sb-codex-action"
+                      entity-type="storyboard"
+                      :entity-id="sb.id"
+                      :drama-id="dramaId"
+                      :episode-id="currentEpisodeId"
+                      frame-type="main"
+                      :style="getSelectedStyle()"
+                      :aspect-ratio="projectAspectRatio"
+                      @used="onCodexStoryboardImageUsed($event, sb, 'main')"
+                      @preview="openImagePreview"
+                    />
                     <el-button size="small" :loading="uploadingSbImageId === sb.id" @click="onUploadSbImageClick(sb)">上传</el-button>
                   </template>
                 </div>
@@ -1430,6 +1533,18 @@
                 </template>
                 <template v-else>
                 <el-button size="small" :loading="generatingSbImageIds.has(sb.id)" @click="onGenerateSbImage(sb)">重新生成</el-button>
+                <CodexImageJobButton
+                  class="sb-codex-action"
+                  entity-type="storyboard"
+                  :entity-id="sb.id"
+                  :drama-id="dramaId"
+                  :episode-id="currentEpisodeId"
+                  frame-type="main"
+                  :style="getSelectedStyle()"
+                  :aspect-ratio="projectAspectRatio"
+                  @used="onCodexStoryboardImageUsed($event, sb, 'main')"
+                  @preview="openImagePreview"
+                />
                 <el-button size="small" :loading="uploadingSbImageId === sb.id" @click="onUploadSbImageClick(sb)">上传</el-button>
                 <el-tooltip content="高清放大（2x超分辨率）" placement="top">
                   <el-button
@@ -2626,6 +2741,7 @@ import { imagesAPI } from '@/api/images'
 import { videosAPI } from '@/api/videos'
 import { storyboardsAPI } from '@/api/storyboards'
 import { uploadAPI } from '@/api/upload'
+import { codexImageJobAPI } from '@/api/codexImageJobs'
 import { characterLibraryAPI } from '@/api/characterLibrary'
 import { sceneLibraryAPI } from '@/api/sceneLibrary'
 import { propLibraryAPI } from '@/api/propLibrary'
@@ -2635,6 +2751,7 @@ import { exportStoryboardSheet } from '@/utils/exportStoryboardSheet'
 import StylePickerButton from '@/components/StylePickerButton.vue'
 import AIConfigContent from '@/components/AIConfigContent.vue'
 import UniversalSegmentOmniAtEditor from '@/components/UniversalSegmentOmniAtEditor.vue'
+import CodexImageJobButton from '@/components/CodexImageJobButton.vue'
 import {
   generationStyleOptions,
   getStylePromptEn,
@@ -2774,9 +2891,215 @@ const currentEpisode = computed(() => store.currentEpisode)
 const currentEpisodeId = computed(() => store.currentEpisode?.id ?? null)
 const videoProgress = computed(() => store.videoProgress)
 const videoStatus = computed(() => store.videoStatus)
+const codexBatchSubmitting = reactive({
+  character: false,
+  prop: false,
+  scene: false,
+})
+const codexMissingBatchSubmitting = ref(false)
+const codexStoryboardBatchSubmitting = ref(false)
 
 function trackFilmCreateAction(_action, _payload = {}) {
   // 单机版：无埋点上报
+}
+
+function codexBatchList(type) {
+  if (type === 'character') return characters.value || []
+  if (type === 'prop') return props.value || []
+  if (type === 'scene') return scenes.value || []
+  return []
+}
+
+function codexBatchLabel(type) {
+  if (type === 'character') return '角色'
+  if (type === 'prop') return '道具'
+  if (type === 'scene') return '场景'
+  return '资源'
+}
+
+function currentMissingCodexAssetEntries() {
+  const types = ['character', 'prop', 'scene']
+  const entries = []
+  for (const type of types) {
+    for (const item of codexBatchList(type)) {
+      if (item?.id && !hasAssetImage(item)) {
+        entries.push({ type, item, label: codexBatchLabel(type) })
+      }
+    }
+  }
+  return entries
+}
+
+async function onBatchCreateMissingAssetCodexJobs() {
+  if (!currentEpisodeId.value) {
+    ElMessage.warning('请先选择剧集')
+    return
+  }
+  const entries = currentMissingCodexAssetEntries()
+  if (!entries.length) {
+    const total = ['character', 'prop', 'scene']
+      .reduce((sum, type) => sum + codexBatchList(type).filter((item) => item?.id).length, 0)
+    if (total > 0) ElMessage.info('本集角色、道具、场景均已有主图')
+    else ElMessage.warning('本集暂无角色、道具、场景')
+    return
+  }
+  codexMissingBatchSubmitting.value = true
+  let created = 0
+  let reused = 0
+  let failed = 0
+  const counts = { character: 0, prop: 0, scene: 0 }
+  try {
+    for (const { type, item } of entries) {
+      try {
+        const res = await codexImageJobAPI.create({
+          entity_type: type,
+          entity_id: item.id,
+          drama_id: dramaId.value || undefined,
+          episode_id: currentEpisodeId.value || undefined,
+          frame_type: 'main',
+          style: getSelectedStyle() || undefined,
+          aspect_ratio: projectAspectRatio.value || undefined,
+        })
+        if (res?.reused) reused += 1
+        else created += 1
+        counts[type] += 1
+      } catch (_) {
+        failed += 1
+      }
+    }
+    const parts = [
+      counts.character ? `${counts.character} 个角色` : '',
+      counts.prop ? `${counts.prop} 个道具` : '',
+      counts.scene ? `${counts.scene} 个场景` : '',
+    ].filter(Boolean)
+    const reusedText = reused ? `，其中 ${reused} 个已在队列中` : ''
+    if (created + reused > 0 && failed === 0) {
+      ElMessage.success(`已加入本集缺图资源：${parts.join('、')}${reusedText}`)
+    } else if (created + reused > 0) {
+      ElMessage.warning(`已加入 ${created + reused} 个缺图资源，${failed} 个失败${reusedText}`)
+    } else {
+      ElMessage.error('缺图资源加入 Codex 队列失败')
+    }
+  } finally {
+    codexMissingBatchSubmitting.value = false
+  }
+}
+
+async function onBatchCreateCodexJobs(type) {
+  const list = codexBatchList(type).filter((item) => item?.id)
+  const label = codexBatchLabel(type)
+  if (!list.length) {
+    ElMessage.warning(`暂无${label}，请先从剧本提取或手动添加`)
+    return
+  }
+  codexBatchSubmitting[type] = true
+  let ok = 0
+  let failed = 0
+  try {
+    for (const item of list) {
+      try {
+        await codexImageJobAPI.create({
+          entity_type: type,
+          entity_id: item.id,
+          drama_id: dramaId.value || undefined,
+          episode_id: currentEpisodeId.value || undefined,
+          frame_type: 'main',
+          style: getSelectedStyle() || undefined,
+          aspect_ratio: projectAspectRatio.value || undefined,
+        })
+        ok += 1
+      } catch (_) {
+        failed += 1
+      }
+    }
+    if (ok > 0 && failed === 0) ElMessage.success(`已加入 ${ok} 个${label}到 Codex 队列`)
+    else if (ok > 0) ElMessage.warning(`已加入 ${ok} 个${label}，${failed} 个失败`)
+    else ElMessage.error(`加入 Codex 队列失败`)
+  } finally {
+    codexBatchSubmitting[type] = false
+  }
+}
+
+function storyboardCodexFrameLabel(frameType) {
+  if (frameType === 'first') return '首帧'
+  if (frameType === 'last') return '尾帧'
+  return '主图'
+}
+
+function storyboardCodexBatchTargets() {
+  const boards = store.storyboards || []
+  const targets = []
+  for (const sb of boards) {
+    if (!sb?.id) continue
+    const useFirstLast = storyboardUseFirstLastFrame.value && !isSbUniversalMode(sb.id)
+    if (useFirstLast) {
+      if (!getSbFirstImage(sb.id) && !(sb.image_url || sb.composed_image)) {
+        targets.push({ sb, frameType: 'first' })
+      }
+      if (!getSbLastImage(sb.id)) {
+        targets.push({ sb, frameType: 'last' })
+      }
+    } else if (!hasSbImage(sb)) {
+      targets.push({ sb, frameType: 'main' })
+    }
+  }
+  return targets
+}
+
+async function onBatchCreateStoryboardCodexJobs() {
+  if (!currentEpisodeId.value) {
+    ElMessage.warning('请先选择剧集')
+    return
+  }
+  if (codexStoryboardBatchSubmitting.value) return
+  codexStoryboardBatchSubmitting.value = true
+  batchImageErrors.value = []
+  try {
+    await loadStoryboardMedia()
+    const targets = storyboardCodexBatchTargets()
+    if (!targets.length) {
+      ElMessage.info(storyboardUseFirstLastFrame.value ? '所有分镜首尾帧均已有图片' : '所有分镜均已有图片')
+      return
+    }
+    let created = 0
+    let reused = 0
+    let failed = 0
+    const counts = { main: 0, first: 0, last: 0 }
+    for (const { sb, frameType } of targets) {
+      try {
+        const res = await codexImageJobAPI.create({
+          entity_type: 'storyboard',
+          entity_id: sb.id,
+          drama_id: dramaId.value || undefined,
+          episode_id: currentEpisodeId.value || undefined,
+          frame_type: frameType,
+          style: getSelectedStyle() || undefined,
+          aspect_ratio: projectAspectRatio.value || undefined,
+        })
+        if (res?.reused) reused += 1
+        else created += 1
+        counts[frameType] += 1
+      } catch (e) {
+        failed += 1
+        batchImageErrors.value.push(`#${sb.storyboard_number ?? sb.id} ${storyboardCodexFrameLabel(frameType)}: ${e.message || '加入 Codex 队列失败'}`)
+      }
+    }
+    const parts = [
+      counts.main ? `${counts.main} 张主图` : '',
+      counts.first ? `${counts.first} 张首帧` : '',
+      counts.last ? `${counts.last} 张尾帧` : '',
+    ].filter(Boolean)
+    const reusedText = reused ? `，其中 ${reused} 个已在队列中` : ''
+    if (created + reused > 0 && failed === 0) {
+      ElMessage.success(`已加入 Codex 分镜图队列：${parts.join('、')}${reusedText}`)
+    } else if (created + reused > 0) {
+      ElMessage.warning(`已加入 ${created + reused} 个分镜图任务，${failed} 个失败${reusedText}`)
+    } else {
+      ElMessage.error('分镜图加入 Codex 队列失败')
+    }
+  } finally {
+    codexStoryboardBatchSubmitting.value = false
+  }
 }
 /** 当前集合成视频的播放地址（用于按钮下方预览） */
 const currentEpisodeVideoUrl = computed(() => {
@@ -4530,6 +4853,35 @@ function onEpisodeSelect(epId) {
   syncStoryboardStateFromEpisode(ep)
   loadStoryboardMedia()
   recoverAndSyncEpisodeTasks(epId)
+}
+
+async function onCodexImageUsed() {
+  await loadDrama()
+}
+
+function clearStoryboardCodexSelection(sbId, slot = 'main') {
+  if (!sbId) return
+  if (slot === 'last') {
+    const next = { ...sbSelectedLastImgId.value }
+    delete next[sbId]
+    sbSelectedLastImgId.value = next
+    return
+  }
+  const next = { ...sbSelectedImgId.value }
+  delete next[sbId]
+  sbSelectedImgId.value = next
+}
+
+async function onCodexStoryboardImageUsed(_payload, sb, slot = 'main') {
+  const sbId = sb?.id
+  if (!sbId) {
+    await onCodexImageUsed()
+    return
+  }
+  clearStoryboardCodexSelection(sbId, slot)
+  await loadDrama()
+  await loadSingleStoryboardMedia(sbId)
+  restoreSelectionsFromBackend()
 }
 
 async function loadDrama() {
@@ -10019,6 +10371,22 @@ html.light .sb-ctrl-mode-btn.el-button:hover {
   gap: 6px;
   justify-content: center;
   align-items: center;
+}
+.resource-global-actions {
+  margin-bottom: 10px;
+}
+.sb-fl-slot-actions > .sb-codex-action,
+.sb-image-actions > .sb-codex-action,
+.sb-main-image-wrap > .sb-codex-action {
+  flex: 0 0 auto;
+  min-width: 80px;
+}
+.sb-codex-action :deep(.codex-image-job__button) {
+  min-width: 74px;
+}
+.sb-codex-action :deep(.codex-candidate-picker) {
+  width: 180px;
+  padding: 6px 0 0;
 }
 .sb-fl-first-lock-opt {
   margin: 0 2px;

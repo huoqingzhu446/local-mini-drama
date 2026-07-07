@@ -47,20 +47,29 @@ function normalizeReasoningEffort(value) {
   return null;
 }
 
-function resolveDeepSeekOptions(config = {}, model) {
+function resolveDeepSeekOptions(config = {}, model, overrides = {}) {
   const modelName = String(model || '').trim();
   const legacy = LEGACY_MODEL_OPTIONS[modelName.toLowerCase()] || null;
   const settings = parseSettings(config.settings);
   const nested = settings.deepseek && typeof settings.deepseek === 'object' ? settings.deepseek : {};
+  const overrideNested = overrides.deepseek && typeof overrides.deepseek === 'object' ? overrides.deepseek : {};
 
   const explicitThinking = normalizeThinking(
-    settings.deepseek_thinking
+    overrides.deepseek_thinking
+      ?? overrides.thinking
+      ?? overrideNested.thinking
+      ?? overrideNested.type
+      ?? settings.deepseek_thinking
       ?? settings.thinking
       ?? nested.thinking
       ?? nested.type
   );
   const reasoningEffort = normalizeReasoningEffort(
-    settings.deepseek_reasoning_effort
+    overrides.deepseek_reasoning_effort
+      ?? overrides.reasoning_effort
+      ?? overrideNested.reasoning_effort
+      ?? overrideNested.effort
+      ?? settings.deepseek_reasoning_effort
       ?? settings.reasoning_effort
       ?? nested.reasoning_effort
       ?? nested.effort
@@ -73,10 +82,10 @@ function resolveDeepSeekOptions(config = {}, model) {
   };
 }
 
-function applyDeepSeekChatOptions(config, body) {
+function applyDeepSeekChatOptions(config, body, overrides = {}) {
   if (!isDeepSeekOfficialConfig(config)) return body;
 
-  const opts = resolveDeepSeekOptions(config, body?.model);
+  const opts = resolveDeepSeekOptions(config, body?.model, overrides);
   const next = {
     ...body,
     model: opts.model || body.model,

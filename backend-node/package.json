@@ -7,7 +7,9 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "migrate": "node src/db/migrate.js",
-    "migrate:07": "node scripts/run-migration-07.js"
+    "migrate:07": "node scripts/run-migration-07.js",
+    "codex:export-image-jobs": "node scripts/codex-export-image-jobs.js",
+    "codex:import-image-results": "node scripts/codex-import-image-results.js"
   },
   "engines": {
     "node": ">=18"
