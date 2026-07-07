@@ -1246,6 +1246,11 @@
                       @click="openImagePreview(assetImageUrl(getSbStoryboardImageReference(sb)))"
                     >
                       <img :src="assetImageUrl(getSbStoryboardImageReference(sb))" alt="" />
+                      <button
+                        class="extra-thumb-remove sb-thumb-remove"
+                        title="删除分镜图"
+                        @click.stop="onRemoveSbStoryboardImageReference(sb)"
+                      >×</button>
                     </div>
                   </div>
                 </div>
@@ -4486,10 +4491,11 @@ function getSbImage(storyboardId) {
 function getSbStoryboardImageReference(sb) {
   if (!sb?.id || !isSbUniversalMode(sb.id)) return null
   const img = getSbImage(sb.id)
-  if (img && (img.image_url || img.local_path)) return img
+  if (img && (img.image_url || img.local_path)) return { ...img, source: 'image_generation' }
   if (sb.local_path || sb.image_url || sb.composed_image) {
     return {
-      id: sb.first_frame_image_id || sb.id,
+      id: null,
+      source: 'storyboard',
       image_url: sb.composed_image || sb.image_url || '',
       local_path: sb.local_path || '',
       prompt: sb.polished_prompt || sb.image_prompt || '',
@@ -4885,6 +4891,56 @@ async function onRemoveSbHistoryImage(storyboardId, imageGenId) {
     await imagesAPI.delete(imageGenId)
     await loadSingleStoryboardMedia(storyboardId)
     ElMessage.success('历史图已删除')
+  } catch (err) {
+    if (err !== 'cancel' && err !== 'close') {
+      ElMessage.error(err?.message || '删除失败')
+    }
+  }
+}
+
+async function onRemoveSbStoryboardImageReference(sb) {
+  if (!sb?.id) return
+  const ref = getSbStoryboardImageReference(sb)
+  if (!ref) return
+  try {
+    await ElMessageBox.confirm(
+      '确定删除这张分镜图？删除后将不再作为全能视频参考图。',
+      '删除分镜图',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+        distinguishCancelAndClose: true,
+      }
+    )
+    if (ref.source === 'image_generation' && ref.id) {
+      await imagesAPI.delete(ref.id)
+      const current = Array.isArray(sbImages.value[sb.id]) ? sbImages.value[sb.id] : []
+      sbImages.value = {
+        ...sbImages.value,
+        [sb.id]: current.filter((img) => Number(img.id) !== Number(ref.id)),
+      }
+    }
+    const patch = {
+      image_url: null,
+      local_path: null,
+      composed_image: null,
+      first_frame_image_id: null,
+      main_panel_idx: null,
+    }
+    const updated = await storyboardsAPI.update(sb.id, patch)
+    const list = store.currentEpisode?.storyboards
+    if (Array.isArray(list)) {
+      const row = list.find((x) => Number(x.id) === Number(sb.id))
+      if (row) Object.assign(row, updated || patch)
+    }
+    if (sbSelectedImgId.value[sb.id] != null) {
+      const nextSelected = { ...sbSelectedImgId.value }
+      delete nextSelected[sb.id]
+      sbSelectedImgId.value = nextSelected
+    }
+    await loadSingleStoryboardMedia(sb.id)
+    ElMessage.success('分镜图已删除')
   } catch (err) {
     if (err !== 'cancel' && err !== 'close') {
       ElMessage.error(err?.message || '删除失败')
@@ -10336,6 +10392,7 @@ html.light .asset-cover-actions { border-top-color: rgba(139,92,246,0.1); }
 .extra-thumb:hover .extra-thumb-remove,
 .extra-thumb:hover .thumb-preview-btn { opacity: 1; }
 .sb-img-thumb:hover .extra-thumb-remove,
+.sb-thumb-item:hover .extra-thumb-remove,
 .sb-img-thumb:hover .thumb-preview-btn { opacity: 1; }
 html.light .extra-images-strip { background: rgba(139,92,246,0.05); }
 .empty-tip {
@@ -10635,6 +10692,7 @@ html.light .sb-panel::-webkit-scrollbar-thumb {
   align-items: center;
 }
 .sb-thumb-item {
+  position: relative;
   flex-shrink: 0;
   border-radius: 6px;
   overflow: hidden;

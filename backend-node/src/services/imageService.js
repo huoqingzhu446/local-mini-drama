@@ -1559,10 +1559,25 @@ function deleteById(db, log, id) {
   const now = new Date().toISOString();
   // 若该图当前绑定为某分镜的首/尾帧，解除绑定（避免悬空引用）
   try {
-    const row = db.prepare('SELECT storyboard_id FROM image_generations WHERE id = ? AND deleted_at IS NULL').get(numId);
+    const row = db.prepare('SELECT storyboard_id, image_url, local_path FROM image_generations WHERE id = ? AND deleted_at IS NULL').get(numId);
     if (row && row.storyboard_id != null) {
       const sid = Number(row.storyboard_id);
-      db.prepare(`UPDATE storyboards SET first_frame_image_id = NULL, image_url = NULL, local_path = NULL, updated_at = ? WHERE id = ? AND first_frame_image_id = ?`).run(now, sid, numId);
+      const mainClauses = ['first_frame_image_id = ?'];
+      const mainParams = [numId];
+      if (row.local_path) {
+        mainClauses.push('local_path = ?');
+        mainParams.push(row.local_path);
+      }
+      if (row.image_url) {
+        mainClauses.push('image_url = ?');
+        mainParams.push(row.image_url);
+      }
+      db.prepare(
+        `UPDATE storyboards
+         SET first_frame_image_id = NULL, image_url = NULL, local_path = NULL,
+             composed_image = NULL, main_panel_idx = NULL, updated_at = ?
+         WHERE id = ? AND (${mainClauses.join(' OR ')})`
+      ).run(now, sid, ...mainParams);
       db.prepare(`UPDATE storyboards SET last_frame_image_id = NULL, last_frame_image_url = NULL, last_frame_local_path = NULL, updated_at = ? WHERE id = ? AND last_frame_image_id = ?`).run(now, sid, numId);
     }
   } catch (e) {
