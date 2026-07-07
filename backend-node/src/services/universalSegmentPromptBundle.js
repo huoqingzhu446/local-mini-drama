@@ -15,7 +15,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
       action, dialogue, narration, result, atmosphere,
       image_prompt, polished_prompt, video_prompt, universal_segment_text,
       shot_type, angle, angle_h, angle_v, angle_s, movement, lighting_style, depth_of_field,
-      characters, local_path, duration, segment_index, segment_title
+      characters, image_url, local_path, duration, segment_index, segment_title
      FROM storyboards WHERE id = ? AND deleted_at IS NULL`
   ).get(sbId);
   if (!sb) return { ok: false, code: 'not_found', message: '分镜不存在' };
@@ -229,6 +229,31 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     if (!hasMediaRef(pr)) continue;
     pushSlot('道具', String(pr.name || '道具').trim());
   }
+  let storyboardMainRef = null;
+  if (hasMediaRef(sb)) {
+    storyboardMainRef = { image_url: sb.image_url, local_path: sb.local_path };
+  } else {
+    try {
+      storyboardMainRef = db
+        .prepare(
+          `SELECT image_url, local_path
+           FROM image_generations
+           WHERE storyboard_id = ?
+             AND deleted_at IS NULL
+             AND status = 'completed'
+             AND (image_url IS NOT NULL OR local_path IS NOT NULL)
+             AND (frame_type IS NULL OR frame_type = '' OR frame_type = 'main')
+           ORDER BY updated_at DESC, created_at DESC, id DESC
+           LIMIT 1`
+        )
+        .get(sbId) || null;
+    } catch (_) {
+      storyboardMainRef = null;
+    }
+  }
+  if (hasMediaRef(storyboardMainRef)) {
+    pushSlot('分镜图', `分镜${sb.storyboard_number != null ? `#${sb.storyboard_number}` : ''}整体画面锚点`);
+  }
 
   const charSlots = slots.filter((s) => s.kind === '角色');
   const sceneFirst = slots.length > 0 && slots[0].kind === '场景';
@@ -327,6 +352,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
           '- 禁止用 @场景、@姓名、@林薇、@道具名 等形式指代参考图；需要指图时一律 @图片N。',
           '- 若 @图片1 为「场景」：只写环境/光影/陈设；人物外貌与动作按 CHARACTER_IMAGE_BINDING 从 @图片2 起。若首张参考图即角色，则以 MAP 为准。',
           '- 场景参考若为四宫格/九宫格等拼图：见 SCENE_REFERENCE_LAYOUT；成片须单镜头连续画面，禁止模仿拼图布局。',
+          '- 若存在「分镜图」槽位：它是本镜整体构图/画面气质锚点，可辅助视频起始画面与运镜，不要当作新增角色或独立场景。',
         ]),
     '- 每个 @图片N 与后随的中/英文字之间保留一个半角空格（后处理也会修正，但模型应直接写对）。',
     '- ORDERED_CHARACTER_NAMES 仅供理解剧情，不得当作图占位符。',

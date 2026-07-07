@@ -1160,7 +1160,7 @@
                 </el-select>
               </div>
               <!-- 当前选中：场景 / 角色 / 物品缩略图 -->
-              <div v-if="getSbSelectedScene(sb.id) || getSbSelectedCharacters(sb.id).length || getSbSelectedProps(sb.id).length || (characters || []).length" class="sb-selected-thumbs">
+              <div v-if="getSbSelectedScene(sb.id) || getSbSelectedCharacters(sb.id).length || getSbSelectedProps(sb.id).length || getSbStoryboardImageReference(sb) || (characters || []).length" class="sb-selected-thumbs">
                 <div v-if="getSbSelectedScene(sb.id)" class="sb-thumb-row">
                   <span class="sb-thumb-label">场景</span>
                   <div class="sb-thumb-list">
@@ -1236,6 +1236,19 @@
                     </div>
                   </div>
                 </div>
+                <div v-if="getSbStoryboardImageReference(sb)" class="sb-thumb-row">
+                  <span class="sb-thumb-label">分镜图</span>
+                  <div class="sb-thumb-list">
+                    <div
+                      class="sb-thumb-item sb-thumb-storyboard sb-thumb-clickable"
+                      :title="getSbStoryboardImageReference(sb)?.prompt || '分镜图：作为全能视频的附加画面参考'"
+                      role="button"
+                      @click="openImagePreview(assetImageUrl(getSbStoryboardImageReference(sb)))"
+                    >
+                      <img :src="assetImageUrl(getSbStoryboardImageReference(sb))" alt="" />
+                    </div>
+                  </div>
+                </div>
               </div>
               <!-- 首尾帧模式下隐藏“图片提示词”入口，统一收敛到首/尾帧槽位的“查看提示词” -->
               <div v-if="!storyboardUseFirstLastFrame" class="sb-prompt-label">
@@ -1283,7 +1296,7 @@
                     <el-tooltip placement="top" :show-after="280" :show-arrow="false" popper-class="sb-universal-tooltip-popper">
                       <template #content>
                         <div class="sb-universal-tooltip">
-                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考；模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等以控制台为准）：此处为提交主提示词；只要本框有内容，生视频时<strong>只</strong>发送这段，不会拼接下方「视频提示词」里的动作/对话/旁白。参考图顺序一般为：场景 → 角色（多张）→ 物品（<strong>不含</strong>经典分镜中间主图）；请用 <strong>@图片1</strong>、<strong>@图片2</strong>…（<strong>@图片N 后建议加半角空格</strong>）对应参考图，勿用 @姓名 指图；有场景图时 <strong>@图片1</strong> 只表环境，人物从 <strong>@图片2</strong> 起。若场景参考是<strong>四宫格/多视角拼图</strong>，仅借空间与氛围，须在文案中写明<strong>单镜头完整画幅、禁止分屏宫格</strong>，避免成片模仿拼图布局。全能提示词下拉中「生成」会按<strong>本条分镜总时长</strong>与本集剧本、镜序、邻镜信息，自动决定子分镜数 M（第2行「由以下M个分镜…」），第4行起为「分镜1：T1秒:」…多行，且各段秒数之和等于本镜时长；第3行仍为环境/参考图约束；「生成」与「润色」均为<strong>流式输出</strong>到本框；「润色」在此基础上增强。若本框留空，则退回仅用「视频提示词」。
+                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考；模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等以控制台为准）：此处为提交主提示词；只要本框有内容，生视频时<strong>只</strong>发送这段，不会拼接下方「视频提示词」里的动作/对话/旁白。参考图顺序一般为：场景 → 角色（多张）→ 物品 → 分镜图（若已生成，追加在最后，不改变前面编号）；请用 <strong>@图片1</strong>、<strong>@图片2</strong>…（<strong>@图片N 后建议加半角空格</strong>）对应参考图，勿用 @姓名 指图；有场景图时 <strong>@图片1</strong> 只表环境，人物从 <strong>@图片2</strong> 起。若场景参考是<strong>四宫格/多视角拼图</strong>，仅借空间与氛围，须在文案中写明<strong>单镜头完整画幅、禁止分屏宫格</strong>，避免成片模仿拼图布局。全能提示词下拉中「生成」会按<strong>本条分镜总时长</strong>与本集剧本、镜序、邻镜信息，自动决定子分镜数 M（第2行「由以下M个分镜…」），第4行起为「分镜1：T1秒:」…多行，且各段秒数之和等于本镜时长；第3行仍为环境/参考图约束；「生成」与「润色」均为<strong>流式输出</strong>到本框；「润色」在此基础上增强。若本框留空，则退回仅用「视频提示词」。
                         </div>
                       </template>
                       <el-icon class="sb-universal-hint-icon" tabindex="0" role="img" aria-label="片段说明">
@@ -1628,16 +1641,71 @@
                   <div v-if="getSbVideoError(sb.id)" class="sb-video-error">
                     {{ getSbVideoError(sb.id) }}
                   </div>
-                  <el-button
-                    type="primary"
-                    size="small"
-                    class="sb-generate-video-btn"
-                    :loading="isSbVideoGenerating(sb.id)"
-                    :disabled="!sbCanSubmitVideo(sb) || isSbVideoGenerating(sb.id)"
-                    @click="onGenerateSbVideo(sb)"
-                  >
-                    生成分镜视频
-                  </el-button>
+                  <div class="sb-video-image-actions sb-video-primary-actions">
+                    <el-button
+                      type="primary"
+                      size="small"
+                      class="sb-generate-video-btn"
+                      :loading="isSbVideoGenerating(sb.id)"
+                      :disabled="!sbCanSubmitVideo(sb) || isSbVideoGenerating(sb.id)"
+                      @click="onGenerateSbVideo(sb)"
+                    >
+                      生成分镜视频
+                    </el-button>
+                    <template v-if="shouldShowSbVideoImageActions(sb)">
+                      <el-button
+                        type="success"
+                        plain
+                        size="small"
+                        class="sb-generate-image-btn"
+                        :loading="isSbQuickImageGenerating(sb)"
+                        :disabled="isSbQuickImageGenerating(sb)"
+                        @click="onGenerateSbQuickImage(sb)"
+                      >
+                        <el-icon><MagicStick /></el-icon>
+                        {{ sbQuickImageButtonText(sb) }}
+                      </el-button>
+                      <CodexImageJobButton
+                        v-if="!shouldUseSbFirstLastQuickImage(sb)"
+                        class="sb-codex-action sb-video-codex-action"
+                        entity-type="storyboard"
+                        :entity-id="sb.id"
+                        :drama-id="dramaId"
+                        :episode-id="currentEpisodeId"
+                        frame-type="main"
+                        :style="getSelectedStyle()"
+                        :aspect-ratio="projectAspectRatio"
+                        @used="onCodexStoryboardImageUsed($event, sb, 'main')"
+                        @preview="openImagePreview"
+                      />
+                      <template v-else>
+                        <CodexImageJobButton
+                          class="sb-codex-action sb-video-codex-action"
+                          entity-type="storyboard"
+                          :entity-id="sb.id"
+                          :drama-id="dramaId"
+                          :episode-id="currentEpisodeId"
+                          frame-type="first"
+                          :style="getSelectedStyle()"
+                          :aspect-ratio="projectAspectRatio"
+                          @used="onCodexStoryboardImageUsed($event, sb, 'first')"
+                          @preview="openImagePreview"
+                        />
+                        <CodexImageJobButton
+                          class="sb-codex-action sb-video-codex-action"
+                          entity-type="storyboard"
+                          :entity-id="sb.id"
+                          :drama-id="dramaId"
+                          :episode-id="currentEpisodeId"
+                          frame-type="last"
+                          :style="getSelectedStyle()"
+                          :aspect-ratio="projectAspectRatio"
+                          @used="onCodexStoryboardImageUsed($event, sb, 'last')"
+                          @preview="openImagePreview"
+                        />
+                      </template>
+                    </template>
+                  </div>
                 </template>
               </div>
               <!-- 视频历史条：有多条历史时显示，点击可切换 -->
@@ -1657,6 +1725,29 @@
                 </div>
               </div>
               <div v-if="getSbVideo(sb.id)" class="sb-video-actions">
+                <template v-if="shouldShowSbVideoImageActions(sb)">
+                  <el-button
+                    size="small"
+                    :loading="isSbQuickImageGenerating(sb)"
+                    :disabled="isSbQuickImageGenerating(sb)"
+                    @click="onGenerateSbQuickImage(sb)"
+                  >
+                    {{ sbQuickImageButtonText(sb) }}
+                  </el-button>
+                  <CodexImageJobButton
+                    v-if="!shouldUseSbFirstLastQuickImage(sb)"
+                    class="sb-codex-action sb-video-codex-action"
+                    entity-type="storyboard"
+                    :entity-id="sb.id"
+                    :drama-id="dramaId"
+                    :episode-id="currentEpisodeId"
+                    frame-type="main"
+                    :style="getSelectedStyle()"
+                    :aspect-ratio="projectAspectRatio"
+                    @used="onCodexStoryboardImageUsed($event, sb, 'main')"
+                    @preview="openImagePreview"
+                  />
+                </template>
                 <el-button size="small" :loading="isSbVideoGenerating(sb.id)" :disabled="!sbCanSubmitVideo(sb) || isSbVideoGenerating(sb.id)" @click="onGenerateSbVideo(sb)">重新生成</el-button>
                 <el-tooltip v-if="getNextStoryboard(sb.id)" content="提取本视频尾帧，设为下一个分镜的首帧" placement="top">
                   <el-button size="small" :loading="linkingTailFrameIds.has(sb.id)" @click="onLinkTailFrameToNext(sb)">尾帧衔接</el-button>
@@ -2511,7 +2602,7 @@
             <el-radio-button value="classic">经典分镜</el-radio-button>
             <el-radio-button value="universal">全能模式</el-radio-button>
           </el-radio-group>
-          <div class="vp-mode-hint">全能模式：中间为片段描述；生视频时使用 <strong>AI 配置里当前启用的视频</strong>（接口规范 <code>kling_omni</code> 或 <code>volcengine_omni</code>，模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等）并合并场景/角色/道具等参考图（不含经典分镜主图）。经典字段保留，可随时切回。</div>
+          <div class="vp-mode-hint">全能模式：中间为片段描述；生视频时使用 <strong>AI 配置里当前启用的视频</strong>（接口规范 <code>kling_omni</code> 或 <code>volcengine_omni</code>，模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等）并合并场景/角色/道具/分镜图参考。经典字段保留，可随时切回。</div>
         </el-form-item>
         <el-row :gutter="12">
           <el-col :span="12">
@@ -4293,6 +4384,45 @@ function hasSbImage(sb) {
 function hasSbFirstLastPair(sb) {
   return !!(getSbFirstImage(sb.id) && getSbLastImage(sb.id))
 }
+
+function shouldUseSbFirstLastQuickImage(sb) {
+  return !!(sb?.id && storyboardUseFirstLastFrame.value && !isSbUniversalMode(sb.id))
+}
+
+function shouldShowSbVideoImageActions(sb) {
+  if (!sb?.id) return false
+  if (isSbUniversalMode(sb.id)) return true
+  if (shouldUseSbFirstLastQuickImage(sb)) return !hasSbFirstLastPair(sb)
+  return !hasSbImage(sb)
+}
+
+function isSbQuickImageGenerating(sb) {
+  if (!sb?.id) return false
+  if (shouldUseSbFirstLastQuickImage(sb)) {
+    return generatingSbFirstImageIds.has(sb.id) || generatingSbLastImageIds.has(sb.id)
+  }
+  return generatingSbImageIds.has(sb.id)
+}
+
+function sbQuickImageButtonText(sb) {
+  if (!shouldUseSbFirstLastQuickImage(sb)) {
+    return hasSbImage(sb) ? '重新生成分镜图' : '生成分镜图'
+  }
+  const hasFirst = !!(getSbFirstImage(sb.id) || (sb && (sb.composed_image || sb.image_url)))
+  const hasLast = !!getSbLastImage(sb.id)
+  if (!hasFirst) return '生成首尾帧'
+  if (!hasLast) return '生成尾帧'
+  return '重新生成尾帧'
+}
+
+async function onGenerateSbQuickImage(sb) {
+  if (!sb?.id) return
+  if (shouldUseSbFirstLastQuickImage(sb)) {
+    await onGenerateSbFramePair(sb)
+    return
+  }
+  await onGenerateSbImage(sb)
+}
 /** 取该分镜下所有已完成的非四宫格图片列表 */
 function getSbAllImages(storyboardId) {
   const list = sbImages.value[storyboardId]
@@ -4301,7 +4431,7 @@ function getSbAllImages(storyboardId) {
 }
 /** 取当前主图（首尾帧模式下等同首帧） */
 function getSbImage(storyboardId) {
-  if (storyboardUseFirstLastFrame.value) return getSbFirstImage(storyboardId)
+  if (storyboardUseFirstLastFrame.value && !isSbUniversalMode(storyboardId)) return getSbFirstImage(storyboardId)
   const images = getSbAllImages(storyboardId)
   if (!images.length) return null
   const selectedId = sbSelectedImgId.value[storyboardId]
@@ -4309,7 +4439,27 @@ function getSbImage(storyboardId) {
     const found = images.find((i) => i.id === selectedId)
     if (found) return found
   }
-  return images[0]
+  return images.find((i) => !i.frame_type || i.frame_type === 'main') || images[0]
+}
+
+function getSbStoryboardImageReference(sb) {
+  if (!sb?.id || !isSbUniversalMode(sb.id)) return null
+  const img = getSbImage(sb.id)
+  if (img && (img.image_url || img.local_path)) return img
+  if (sb.local_path || sb.image_url || sb.composed_image) {
+    return {
+      id: sb.first_frame_image_id || sb.id,
+      image_url: sb.composed_image || sb.image_url || '',
+      local_path: sb.local_path || '',
+      prompt: sb.polished_prompt || sb.image_prompt || '',
+    }
+  }
+  return null
+}
+
+function getSbStoryboardImageReferenceUrl(sb) {
+  const ref = getSbStoryboardImageReference(sb)
+  return ref ? assetImageUrl(ref) : ''
 }
 /** 取该分镜下的四宫格整图记录 */
 /** 取该分镜下的四宫格整图记录 */
@@ -6756,10 +6906,19 @@ function getSbUniversalOmniRefSlots(sb) {
       })
     }
   }
+  const storyboardRef = getSbStoryboardImageReference(sb)
+  if (storyboardRef) {
+    out.push({
+      index: idx++,
+      kind: 'storyboard',
+      name: '分镜图',
+      thumbUrl: assetImageUrl(storyboardRef),
+    })
+  }
   return out
 }
 
-/** 全能模式：场景/角色/物品 → 绝对 URL 列表（不含经典分镜中间主图；供可灵 Omni / 火山多图参考，最多 10，方舟侧最多取 9 张） */
+/** 全能模式：场景/角色/物品/分镜图 → 绝对 URL 列表（分镜图追加在最后，避免改变既有 @图片N 顺序） */
 function collectSbOmniReferenceAbsoluteUrls(sb) {
   if (!sb?.id) return []
   const urls = []
@@ -6778,6 +6937,8 @@ function collectSbOmniReferenceAbsoluteUrls(sb) {
   for (const p of getSbSelectedProps(sb.id)) {
     if (hasAssetImage(p)) pushAbs(assetImageUrl(p))
   }
+  const storyboardRefUrl = getSbStoryboardImageReferenceUrl(sb)
+  if (storyboardRefUrl) pushAbs(storyboardRefUrl)
   return urls.slice(0, 10)
 }
 
@@ -7165,7 +7326,7 @@ async function onGenerateSbVideo(sb) {
     try {
       await ElMessageBox.confirm(
         universalOmniApi
-          ? '当前没有可用的参考图（场景/角色/道具等；不含经典分镜主图），将按纯文案提交 Omni-Video（模型以 AI 配置为准），效果可能不稳定。确认继续？'
+          ? '当前没有可用的参考图（场景/角色/道具/分镜图），将按纯文案提交 Omni-Video（模型以 AI 配置为准），效果可能不稳定。确认继续？'
           : '当前没有分镜主图且无场景参考图，将仅按文字提示词生成视频，效果可能不稳定。确认继续？',
         universalOmniApi ? '全能模式无参考图' : '全能降级无参考图',
         { confirmButtonText: '继续生成', cancelButtonText: '取消', type: 'warning' }
@@ -7546,7 +7707,7 @@ async function startBatchVideoGeneration() {
       await loadStoryboardMedia()
     }
     const boards = store.storyboards || []
-    // 只处理：有参考图（经典=分镜主图；全能=场景/角色/道具，不含经典主图）且 还没有已完成视频 的分镜
+    // 只处理：有参考图（经典=分镜主图；全能=场景/角色/道具/分镜图）且还没有已完成视频的分镜
     const todo = boards.filter((sb) => {
       const vidList = sbVideos.value[sb.id] || []
       if (vidList.some((v) => v.status === 'completed' && recordHasPlayableVideoUrl(v))) return false
@@ -9486,7 +9647,7 @@ html.light .section-title { color: #1e1b4b; }
 .one-click-actions {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 .one-click-label {
@@ -10461,7 +10622,8 @@ html.light .sb-thumb-add-char:hover {
   background: #f4f4f5;
 }
 .sb-thumb-prop,
-.sb-thumb-scene {
+.sb-thumb-scene,
+.sb-thumb-storyboard {
   width: 36px;
   height: 36px;
 }
@@ -10733,7 +10895,9 @@ html.light .sb-ctrl-mode-btn.el-button:hover {
 }
 .sb-fl-slot-actions > .sb-codex-action,
 .sb-image-actions > .sb-codex-action,
-.sb-main-image-wrap > .sb-codex-action {
+.sb-main-image-wrap > .sb-codex-action,
+.sb-video-image-actions > .sb-codex-action,
+.sb-video-actions > .sb-codex-action {
   flex: 0 0 auto;
   min-width: 80px;
 }
@@ -10922,6 +11086,32 @@ html.light .sb-video-placeholder {
   margin-top: 8px;
   flex-shrink: 0;
   padding-top: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.sb-video-image-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+.sb-video-codex-action {
+  max-width: 190px;
+}
+.sb-video-codex-action :deep(.codex-image-job__row) {
+  justify-content: center;
+}
+.sb-video-codex-action :deep(.codex-candidate-picker) {
+  width: 180px;
+  margin: 4px auto 0;
+}
+.sb-generate-image-btn {
+  flex: 0 0 auto;
+}
+.sb-video-primary-actions .sb-generate-video-btn {
+  margin-top: 0;
 }
 .sb-video-regenerating-overlay {
   display: flex;

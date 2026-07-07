@@ -41,6 +41,7 @@
   - 角色生成、道具生成、场景生成、分镜图片区域接入 Codex 按钮和候选图组件。
   - 资源管理顶部提供“本集缺图入 Codex”，只把当前集缺主图的角色、道具、场景加入队列。
   - 分镜生成区域提供“Codex 批量分镜图”，批量把当前集缺图分镜加入队列。
+  - 全能模式下分镜中间栏显示“片段描述”，右侧视频栏提供单条“生成分镜图”和 `Codex` 入队入口；生成后的分镜图会显示在左侧参考图区域，并作为全能视频的追加参考图。
 
 ## 数据文件
 
@@ -79,6 +80,7 @@ backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboard
    分镜区域也可以入队：
 
    - 单主图模式：分镜参考图位置的 `Codex` 使用 `entity_type=storyboard`、`frame_type=main`。
+   - 全能模式：右侧视频栏的单条 `Codex` 使用 `entity_type=storyboard`、`frame_type=main`；候选图使用后会进入左侧“分镜图”参考位，并追加到全能视频参考图列表末尾。
    - 首尾帧模式：首帧按钮使用 `frame_type=first`，尾帧按钮使用 `frame_type=last`。
    - 分镜批量：点击“Codex 批量分镜图”，普通模式只入队缺主图分镜；首尾帧模式会分别入队缺首帧、缺尾帧的分镜。
 
