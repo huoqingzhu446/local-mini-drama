@@ -89,8 +89,8 @@ export const storyboardsAPI = {
   saveFramePrompt(id, frameType, data) {
     return request.put(`/storyboards/${id}/frame-prompts/${frameType}`, data || {})
   },
-  polishPrompt(id) {
-    return request.post(`/storyboards/${id}/polish-prompt`, {})
+  polishPrompt(id, data = {}) {
+    return request.post(`/storyboards/${id}/polish-prompt`, data || {})
   },
   /** 全能模式：根据分镜内容 AI 生成片段描述（非流式，兼容旧调用） */
   generateUniversalSegmentPrompt(id, body = {}) {

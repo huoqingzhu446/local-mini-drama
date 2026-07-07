@@ -501,6 +501,49 @@ function ensureAllColumns(database) {
     { name: 'updated_at',     type: 'TEXT NOT NULL DEFAULT \'\'' },
   ]);
 
+  // --- prompt_styles（用户自定义提示词风格约束） ---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS prompt_styles (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL DEFAULT '',
+      content     TEXT NOT NULL DEFAULT '',
+      description TEXT,
+      enabled     INTEGER DEFAULT 1,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  TEXT,
+      updated_at  TEXT,
+      deleted_at  TEXT
+    )`);
+  } catch (_) {}
+  ensureColumns(database, 'prompt_styles', [
+    { name: 'name',        type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'content',     type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'description', type: 'TEXT' },
+    { name: 'enabled',     type: 'INTEGER DEFAULT 1' },
+    { name: 'sort_order',  type: 'INTEGER DEFAULT 0' },
+    { name: 'created_at',  type: 'TEXT' },
+    { name: 'updated_at',  type: 'TEXT' },
+    { name: 'deleted_at',  type: 'TEXT' },
+  ]);
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS prompt_style_tags (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      style_id   INTEGER NOT NULL,
+      tag        TEXT NOT NULL DEFAULT '',
+      created_at TEXT
+    )`);
+  } catch (_) {}
+  ensureColumns(database, 'prompt_style_tags', [
+    { name: 'style_id',   type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'tag',        type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'created_at', type: 'TEXT' },
+  ]);
+  try {
+    database.exec('CREATE INDEX IF NOT EXISTS idx_prompt_styles_deleted_enabled ON prompt_styles(deleted_at, enabled)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_prompt_style_tags_style ON prompt_style_tags(style_id)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_prompt_style_tags_tag ON prompt_style_tags(tag)');
+  } catch (_) {}
+
   // --- storyboard_characters（分镜与角色库的关联表） ---
   try {
     database.exec(`CREATE TABLE IF NOT EXISTS storyboard_characters (

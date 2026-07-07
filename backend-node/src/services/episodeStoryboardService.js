@@ -7,6 +7,7 @@ const safeJson = require('../utils/safeJson');
 const { safeParseAIJSON, extractJsonCandidate, repairTruncatedJsonArray, extractFirstArray } = safeJson;
 const loadConfig = require('../config').loadConfig;
 const angleService = require('./angleService');
+const promptStyleService = require('./promptStyleService');
 
 /**
  * 分镜专用 generateText 包装：
@@ -1096,7 +1097,7 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
   }
 }
 
-function generateStoryboard(db, log, episodeId, model, style, storyboardCount, videoDuration, aspectRatio, includeNarration, universalOmni) {
+function generateStoryboard(db, log, episodeId, model, style, storyboardCount, videoDuration, aspectRatio, includeNarration, universalOmni, promptStyleIds = []) {
   const cfg = loadConfig();
   const episode = db.prepare(
     'SELECT id, script_content, description, drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL'
@@ -1236,6 +1237,13 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
     userPrompt += promptI18n.getStoryboardNarrationExtraInstructions(cfg);
   }
 
+  const promptStyleBlock = promptStyleService.buildPromptStyleConstraintBlock(db, promptStyleIds, {
+    heading: '【本次分镜生成附加提示词风格】',
+  });
+  if (promptStyleBlock) {
+    userPrompt += `\n\n${promptStyleBlock}`;
+  }
+
   let systemPrompt = promptI18n.getStoryboardSystemPrompt(cfg);
 
   // 当用户指定了分镜数量时，在系统提示词后追加最高优先级覆盖指令，
@@ -1289,6 +1297,7 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
     storyboard_count: storyboardCount,
     video_duration: videoDuration,
     universal_omni_storyboard: wantUniversalOmni,
+    prompt_style_count: promptStyleService.normalizeIds(promptStyleIds).length,
   });
 
   setImmediate(() => {

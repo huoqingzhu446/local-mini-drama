@@ -20,6 +20,7 @@ const videoMergeRoutes = require('./videoMerges');
 const assetRoutes = require('./assets');
 const audioRoutes = require('./audio');
 const promptOverridesRoutes = require('./promptOverrides');
+const promptStylesRoutes = require('./promptStyles');
 const sceneModelMapRoutes = require('./sceneModelMap');
 const codexImageJobRoutes = require('./codexImageJobs');
 
@@ -48,6 +49,7 @@ function setupRouter(cfg, db, log) {
   const assets = assetRoutes(db, log);
   const audio = audioRoutes(db, log, cfg);
   const promptOverrides = promptOverridesRoutes.routes(db, log);
+  const promptStyles = promptStylesRoutes.routes(db, log);
   const codexImageJobs = codexImageJobRoutes(db, cfg, log);
 
   // ---------- dramas ----------
@@ -319,6 +321,14 @@ function setupRouter(cfg, db, log) {
   r.get('/settings/prompts', promptOverrides.list);
   r.put('/settings/prompts/:key', promptOverrides.update);
   r.delete('/settings/prompts/:key', promptOverrides.reset);
+
+  // ---------- prompt styles ----------
+  r.get('/prompt-styles/tags', promptStyles.tags);
+  r.get('/prompt-styles', promptStyles.list);
+  r.post('/prompt-styles', promptStyles.create);
+  r.get('/prompt-styles/:id', promptStyles.get);
+  r.put('/prompt-styles/:id', promptStyles.update);
+  r.delete('/prompt-styles/:id', promptStyles.delete);
 
   // ---------- scene model map ----------
   r.get('/scene-model-map', sceneModelMap.list);

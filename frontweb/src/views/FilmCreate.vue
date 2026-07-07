@@ -35,6 +35,10 @@
           画布模式
         </el-button>
         <div class="header-actions">
+          <el-button class="btn-prompt-style" @click="openPromptStyleManager">
+            <el-icon><MagicStick /></el-icon>
+            提示词风格
+          </el-button>
           <el-button class="btn-theme" :title="isDark ? '切换到浅色模式' : '切换到暗色模式'" @click="toggleTheme">
             <el-icon><Sunny v-if="isDark" /><Moon v-else /></el-icon>
             {{ isDark ? '浅色' : '暗色' }}
@@ -906,6 +910,38 @@
           >
             导出解说 SRT
           </el-button>
+        </div>
+        <div class="sb-config-row prompt-style-select-row">
+          <span class="sb-config-label">提示词风格</span>
+          <el-select
+            v-model="selectedStoryboardPromptStyleIds"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            clearable
+            filterable
+            size="small"
+            class="prompt-style-select"
+            placeholder="选择生成分镜时附加的提示词风格"
+            @change="onStoryboardPromptStyleChange"
+          >
+            <el-option
+              v-for="style in enabledPromptStyleOptions"
+              :key="style.id"
+              :label="style.name"
+              :value="style.id"
+            >
+              <div class="prompt-style-option">
+                <span>{{ style.name }}</span>
+                <span v-if="style.tags?.length" class="prompt-style-option-tags">{{ style.tags.join(' / ') }}</span>
+              </div>
+            </el-option>
+          </el-select>
+          <el-button size="small" plain @click="openPromptStyleManager">
+            <el-icon><Setting /></el-icon>
+            管理
+          </el-button>
+          <span class="sb-config-hint">会作为附加约束喂给 AI</span>
         </div>
         <div class="asset-actions sb-batch-actions">
           <div class="flex">
@@ -2379,6 +2415,24 @@
                 :loading="sbPromptPolishing"
                 @click="onPolishSbPrompt"
               >{{ sbPromptPolishedText ? '重新生成' : '立即生成' }}</el-button>
+              <el-select
+                v-model="sbPromptDialogStyleIds"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                clearable
+                filterable
+                size="small"
+                class="sb-prompt-style-select"
+                placeholder="提示词风格"
+              >
+                <el-option
+                  v-for="style in enabledPromptStyleOptions"
+                  :key="style.id"
+                  :label="style.name"
+                  :value="style.id"
+                />
+              </el-select>
             </div>
             <el-input
               v-model="sbPromptPolishedText"
@@ -2703,6 +2757,108 @@
     </el-dialog>
 
     <!-- AI 配置弹窗（不跳转，避免本页内容丢失） -->
+    <el-drawer
+      v-model="showPromptStyleDrawer"
+      title="提示词风格管理"
+      size="760px"
+      class="prompt-style-drawer"
+    >
+      <div class="prompt-style-toolbar">
+        <el-input
+          v-model="promptStyleKeyword"
+          clearable
+          size="small"
+          placeholder="搜索名称、标签或内容"
+          class="prompt-style-search"
+          @keyup.enter="loadPromptStyles"
+          @clear="loadPromptStyles"
+        />
+        <el-select
+          v-model="promptStyleTagFilter"
+          clearable
+          filterable
+          size="small"
+          placeholder="标签筛选"
+          class="prompt-style-tag-filter"
+          @change="loadPromptStyles"
+        >
+          <el-option v-for="tag in promptStyleTags" :key="tag" :label="tag" :value="tag" />
+        </el-select>
+        <el-button size="small" @click="loadPromptStyles">查询</el-button>
+        <el-button size="small" type="primary" @click="startCreatePromptStyle">
+          <el-icon><Plus /></el-icon>
+          新增
+        </el-button>
+      </div>
+
+      <div v-if="promptStyleFormVisible" class="prompt-style-editor">
+        <el-form label-width="76px">
+          <el-form-item label="名称">
+            <el-input v-model="promptStyleForm.name" maxlength="50" show-word-limit placeholder="如：去 AI 风" />
+          </el-form-item>
+          <el-form-item label="标签">
+            <el-select
+              v-model="promptStyleForm.tags"
+              multiple
+              filterable
+              allow-create
+              default-first-option
+              clearable
+              placeholder="输入后回车创建标签"
+              style="width: 100%"
+            >
+              <el-option v-for="tag in promptStyleTags" :key="tag" :label="tag" :value="tag" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="备注">
+            <el-input v-model="promptStyleForm.description" maxlength="120" show-word-limit placeholder="可选，用于说明用途" />
+          </el-form-item>
+          <el-form-item label="提示词">
+            <el-input
+              v-model="promptStyleForm.content"
+              type="textarea"
+              :rows="7"
+              maxlength="4000"
+              show-word-limit
+              placeholder="写入生成场景/分镜提示词时需要附加的约束或扩展说明"
+            />
+          </el-form-item>
+          <el-form-item label="启用">
+            <el-switch v-model="promptStyleForm.enabled" />
+            <el-input-number v-model="promptStyleForm.sort_order" :min="0" :step="10" size="small" class="prompt-style-sort" />
+            <span class="prompt-style-sort-hint">排序</span>
+          </el-form-item>
+        </el-form>
+        <div class="prompt-style-editor-actions">
+          <el-button size="small" @click="cancelPromptStyleEdit">取消</el-button>
+          <el-button size="small" type="primary" :loading="promptStyleSaving" @click="submitPromptStyleForm">保存</el-button>
+        </div>
+      </div>
+
+      <div v-loading="promptStyleLoading" class="prompt-style-list">
+        <div v-if="!promptStyleLoading && promptStyleList.length === 0" class="prompt-style-empty">
+          暂无提示词风格
+        </div>
+        <div v-for="style in promptStyleList" :key="style.id" class="prompt-style-item">
+          <div class="prompt-style-item-main">
+            <div class="prompt-style-item-head">
+              <strong>{{ style.name }}</strong>
+              <el-tag size="small" :type="style.enabled ? 'success' : 'info'" effect="plain">
+                {{ style.enabled ? '启用' : '停用' }}
+              </el-tag>
+              <el-tag v-for="tag in style.tags" :key="tag" size="small" effect="plain">{{ tag }}</el-tag>
+            </div>
+            <div v-if="style.description" class="prompt-style-desc">{{ style.description }}</div>
+            <div class="prompt-style-content-preview">{{ style.content }}</div>
+          </div>
+          <div class="prompt-style-item-actions">
+            <el-button size="small" plain @click="startEditPromptStyle(style)">编辑</el-button>
+            <el-button size="small" type="danger" plain @click="deletePromptStyle(style)">删除</el-button>
+          </div>
+        </div>
+      </div>
+    </el-drawer>
+
     <el-dialog v-model="showAiConfigDialog" title="AI 配置" width="90%" destroy-on-close class="ai-config-dialog">
       <AIConfigContent v-if="showAiConfigDialog" />
     </el-dialog>
@@ -2745,6 +2901,7 @@ import { codexImageJobAPI } from '@/api/codexImageJobs'
 import { characterLibraryAPI } from '@/api/characterLibrary'
 import { sceneLibraryAPI } from '@/api/sceneLibrary'
 import { propLibraryAPI } from '@/api/propLibrary'
+import { promptStylesAPI } from '@/api/promptStyles'
 import { generationSettingsAPI } from '@/api/prompts'
 import { parseScriptIntoEpisodes, episodesListToPlainScript } from '@/utils/scriptEpisodes'
 import { exportStoryboardSheet } from '@/utils/exportStoryboardSheet'
@@ -2790,6 +2947,154 @@ const showAiConfigDialog = ref(false)
 watch(showAiConfigDialog, (open) => {
   if (!open) invalidateActiveVideoAiConfigCache()
 })
+const showPromptStyleDrawer = ref(false)
+const promptStyleLoading = ref(false)
+const promptStyleSaving = ref(false)
+const promptStyleList = ref([])
+const promptStyleTags = ref([])
+const promptStyleKeyword = ref('')
+const promptStyleTagFilter = ref('')
+const promptStyleFormVisible = ref(false)
+const promptStyleForm = reactive({
+  id: null,
+  name: '',
+  tags: [],
+  description: '',
+  content: '',
+  enabled: true,
+  sort_order: 0,
+})
+const selectedStoryboardPromptStyleIds = ref([])
+const sbPromptDialogStyleIds = ref([])
+const enabledPromptStyleOptions = computed(() => (promptStyleList.value || []).filter((style) => style.enabled))
+
+function normalizePromptStyleIds(ids) {
+  const arr = Array.isArray(ids) ? ids : []
+  const seen = new Set()
+  return arr
+    .map((id) => Number(id))
+    .filter((id) => Number.isFinite(id) && id > 0 && !seen.has(id) && seen.add(id))
+}
+
+function pruneSelectedPromptStyleIds() {
+  const enabledIds = new Set(enabledPromptStyleOptions.value.map((style) => Number(style.id)))
+  selectedStoryboardPromptStyleIds.value = normalizePromptStyleIds(selectedStoryboardPromptStyleIds.value)
+    .filter((id) => enabledIds.has(id))
+  sbPromptDialogStyleIds.value = normalizePromptStyleIds(sbPromptDialogStyleIds.value)
+    .filter((id) => enabledIds.has(id))
+}
+
+async function loadPromptStyles() {
+  promptStyleLoading.value = true
+  try {
+    const [listRes, tagRes] = await Promise.all([
+      promptStylesAPI.list({
+        keyword: promptStyleKeyword.value || undefined,
+        tag: promptStyleTagFilter.value || undefined,
+      }),
+      promptStylesAPI.tags(),
+    ])
+    promptStyleList.value = Array.isArray(listRes?.styles) ? listRes.styles : []
+    promptStyleTags.value = Array.isArray(tagRes?.tags) ? tagRes.tags : []
+    pruneSelectedPromptStyleIds()
+  } catch (e) {
+    ElMessage.error(e.message || '加载提示词风格失败')
+  } finally {
+    promptStyleLoading.value = false
+  }
+}
+
+async function openPromptStyleManager() {
+  showPromptStyleDrawer.value = true
+  await loadPromptStyles()
+}
+
+function resetPromptStyleForm() {
+  promptStyleForm.id = null
+  promptStyleForm.name = ''
+  promptStyleForm.tags = []
+  promptStyleForm.description = ''
+  promptStyleForm.content = ''
+  promptStyleForm.enabled = true
+  promptStyleForm.sort_order = 0
+}
+
+function startCreatePromptStyle() {
+  resetPromptStyleForm()
+  promptStyleFormVisible.value = true
+}
+
+function startEditPromptStyle(style) {
+  promptStyleForm.id = style.id
+  promptStyleForm.name = style.name || ''
+  promptStyleForm.tags = Array.isArray(style.tags) ? [...style.tags] : []
+  promptStyleForm.description = style.description || ''
+  promptStyleForm.content = style.content || ''
+  promptStyleForm.enabled = !!style.enabled
+  promptStyleForm.sort_order = Number(style.sort_order) || 0
+  promptStyleFormVisible.value = true
+}
+
+function cancelPromptStyleEdit() {
+  promptStyleFormVisible.value = false
+  resetPromptStyleForm()
+}
+
+async function submitPromptStyleForm() {
+  const body = {
+    name: promptStyleForm.name.trim(),
+    tags: Array.isArray(promptStyleForm.tags) ? promptStyleForm.tags : [],
+    description: promptStyleForm.description.trim(),
+    content: promptStyleForm.content.trim(),
+    enabled: !!promptStyleForm.enabled,
+    sort_order: Number(promptStyleForm.sort_order) || 0,
+  }
+  if (!body.name) return ElMessage.warning('请填写名称')
+  if (!body.content) return ElMessage.warning('请填写提示词内容')
+  promptStyleSaving.value = true
+  try {
+    if (promptStyleForm.id) await promptStylesAPI.update(promptStyleForm.id, body)
+    else await promptStylesAPI.create(body)
+    ElMessage.success('提示词风格已保存')
+    promptStyleFormVisible.value = false
+    resetPromptStyleForm()
+    await loadPromptStyles()
+  } catch (e) {
+    ElMessage.error(e.message || '保存失败')
+  } finally {
+    promptStyleSaving.value = false
+  }
+}
+
+async function deletePromptStyle(style) {
+  if (!style?.id) return
+  try {
+    await ElMessageBox.confirm(`确定删除「${style.name}」吗？`, '删除提示词风格', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+    await promptStylesAPI.delete(style.id)
+    ElMessage.success('已删除')
+    await loadPromptStyles()
+  } catch (e) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '删除失败')
+  }
+}
+
+function onStoryboardPromptStyleChange() {
+  selectedStoryboardPromptStyleIds.value = normalizePromptStyleIds(selectedStoryboardPromptStyleIds.value)
+  saveProjectSettings(false)
+}
+
+function getSelectedPromptStyleIdsForApi() {
+  return normalizePromptStyleIds(selectedStoryboardPromptStyleIds.value)
+}
+
+function getDialogPromptStyleIdsForApi() {
+  return normalizePromptStyleIds(sbPromptDialogStyleIds.value)
+}
 const storyInput = ref('')
 const storyStyle = ref('')
 const storyType = ref('')
@@ -4900,6 +5205,10 @@ async function loadDrama() {
     storyboardIncludeNarration.value = !!(d.metadata && d.metadata.storyboard_include_narration)
     storyboardUniversalOmni.value = !!(d.metadata && d.metadata.storyboard_universal_omni)
     storyboardUseFirstLastFrame.value = !!(d.metadata && d.metadata.storyboard_use_first_last_frame)
+    selectedStoryboardPromptStyleIds.value = normalizePromptStyleIds(
+      Array.isArray(d.metadata?.storyboard_prompt_style_ids) ? d.metadata.storyboard_prompt_style_ids : []
+    )
+    if (promptStyleList.value.length > 0) pruneSelectedPromptStyleIds()
     lastFrameUseFirstLayoutLock.value = d.metadata?.last_frame_use_first_layout_lock !== false
     if (storyboardUseFirstLastFrame.value && gridMode.value !== 'single') {
       gridMode.value = 'single'
@@ -5298,6 +5607,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     storyboard_include_narration: !!storyboardIncludeNarration.value,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
     storyboard_use_first_last_frame: !!storyboardUseFirstLastFrame.value,
+    storyboard_prompt_style_ids: getSelectedPromptStyleIdsForApi(),
     last_frame_use_first_layout_lock: !!lastFrameUseFirstLayoutLock.value,
   }
   if (includeGenerationStyle) {
@@ -6559,6 +6869,7 @@ async function onOpenSbPromptDialog(sb) {
   sbPromptTarget.value = sb
   sbPromptImageText.value = (sb.image_prompt || '').toString()
   sbPromptPolishedText.value = (sb.polished_prompt || '').toString()
+  sbPromptDialogStyleIds.value = getSelectedPromptStyleIdsForApi()
   const rawVideo = (sb.video_prompt || '').toString()
   sbPromptVideoText.value = formatVideoPromptForEdit(rawVideo)
   showSbPromptDialog.value = true
@@ -6586,7 +6897,9 @@ async function onPolishSbPrompt() {
   if (!sb?.id) return
   sbPromptPolishing.value = true
   try {
-    const res = await storyboardsAPI.polishPrompt(sb.id)
+    const res = await storyboardsAPI.polishPrompt(sb.id, {
+      prompt_style_ids: getDialogPromptStyleIdsForApi(),
+    })
     if (res?.polished_prompt) {
       sbPromptPolishedText.value = res.polished_prompt
       ElMessage.success('通用优化提示词已生成')
@@ -7058,6 +7371,7 @@ async function onGenerateStoryboard() {
       aspect_ratio: projectAspectRatio.value || '16:9',
       include_narration: !!storyboardIncludeNarration.value,
       universal_omni_storyboard: !!storyboardUniversalOmni.value,
+      prompt_style_ids: getSelectedPromptStyleIdsForApi(),
     })
     const taskId = res?.task_id ?? (typeof res === 'string' ? res : null)
     if (taskId) {
@@ -7741,6 +8055,7 @@ async function runOneClickPipeline(textOnly = false) {
           video_duration: getVideoDurationForApi(),
           include_narration: !!storyboardIncludeNarration.value,
           universal_omni_storyboard: !!storyboardUniversalOmni.value,
+          prompt_style_ids: getSelectedPromptStyleIdsForApi(),
         })
         const taskId = res?.task_id ?? (typeof res === 'string' ? res : null)
         if (taskId) {
@@ -8252,6 +8567,7 @@ async function runRepairPipeline() {
           video_duration: getVideoDurationForApi(),
           include_narration: !!storyboardIncludeNarration.value,
           universal_omni_storyboard: !!storyboardUniversalOmni.value,
+          prompt_style_ids: getSelectedPromptStyleIdsForApi(),
         })
         const taskId = res?.task_id ?? (typeof res === 'string' ? res : null)
         if (taskId) {
@@ -8419,11 +8735,14 @@ function applyRouteToStore() {
     scriptLanguage.value = 'zh'
     scriptStoryboardStyle.value = ''
     generationStyle.value = ''
+    selectedStoryboardPromptStyleIds.value = []
+    sbPromptDialogStyleIds.value = []
   }
 }
 
 onMounted(async () => {
   loadPipelineConcurrency()
+  loadPromptStyles()
   applyRouteToStore()
 })
 
@@ -8708,6 +9027,22 @@ html.light .btn-theme {
   --el-button-hover-bg-color: rgba(99, 102, 241, 0.08);
   --el-button-hover-border-color: rgba(99, 102, 241, 0.3);
   --el-button-hover-text-color: #4f46e5;
+}
+.btn-prompt-style {
+  --el-button-bg-color: rgba(124, 58, 237, 0.08);
+  --el-button-border-color: rgba(124, 58, 237, 0.24);
+  --el-button-text-color: #a78bfa;
+  --el-button-hover-bg-color: rgba(124, 58, 237, 0.14);
+  --el-button-hover-border-color: rgba(124, 58, 237, 0.42);
+  --el-button-hover-text-color: #c4b5fd;
+}
+html.light .btn-prompt-style {
+  --el-button-bg-color: rgba(124, 58, 237, 0.06);
+  --el-button-border-color: rgba(124, 58, 237, 0.18);
+  --el-button-text-color: #6d28d9;
+  --el-button-hover-bg-color: rgba(124, 58, 237, 0.1);
+  --el-button-hover-border-color: rgba(124, 58, 237, 0.32);
+  --el-button-hover-text-color: #5b21b6;
 }
 /* ===== 左侧固定侧边栏 ===== */
 .quick-nav {
@@ -10813,6 +11148,30 @@ html.light .sb-video-placeholder {
   font-size: 0.85rem;
   margin: 0 4px;
 }
+.prompt-style-select-row {
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+.prompt-style-select {
+  width: min(420px, 100%);
+}
+.prompt-style-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.prompt-style-option-tags {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.sb-prompt-style-select {
+  width: 190px;
+}
 /* 解说导出行：避免浅色主题下勾选文案与卡片背景对比度不足 */
 .sb-narration-export-row :deep(.el-checkbox__label) {
   color: #e4e4e7;
@@ -11004,6 +11363,92 @@ html.light .sb-prompt-pre {
 }
 html.light .sb-prompt-meta-line {
   color: #64748b;
+}
+
+.prompt-style-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.prompt-style-search {
+  flex: 1;
+  min-width: 220px;
+}
+.prompt-style-tag-filter {
+  width: 150px;
+}
+.prompt-style-editor {
+  padding: 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  background: rgba(124, 58, 237, 0.04);
+}
+.prompt-style-sort {
+  margin-left: 12px;
+  width: 110px;
+}
+.prompt-style-sort-hint {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.prompt-style-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.prompt-style-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 160px;
+}
+.prompt-style-empty {
+  padding: 36px 0;
+  text-align: center;
+  color: var(--el-text-color-secondary);
+}
+.prompt-style-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  background: var(--el-bg-color);
+}
+.prompt-style-item-main {
+  flex: 1;
+  min-width: 0;
+}
+.prompt-style-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.prompt-style-desc {
+  margin-bottom: 6px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.prompt-style-content-preview {
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 92px;
+  overflow: hidden;
+}
+.prompt-style-item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 /* 首尾帧提示词编辑器 */

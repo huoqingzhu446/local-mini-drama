@@ -7,6 +7,7 @@ const framePromptService = require('../services/framePromptService');
 const aiClient = require('../services/aiClient');
 const promptI18n = require('../services/promptI18n');
 const angleService = require('../services/angleService');
+const promptStyleService = require('../services/promptStyleService');
 const { buildUniversalSegmentUserPromptBundle } = require('../services/universalSegmentPromptBundle');
 const { normalizeUniversalSegmentShotDurations } = require('../services/universalSegmentDurationNormalize');
 
@@ -448,6 +449,9 @@ function routes(db, log) {
         if (styleEn && styleEn !== styleZh) styleBlockLines.push(`MANDATORY ART STYLE: ${styleEn}.`);
         else if (styleEn && !styleZh) styleBlockLines.push(`MANDATORY ART STYLE: ${styleEn}.`);
         else if (!styleZh && !styleEn) styleBlockLines.push(`MANDATORY ART STYLE: ${styleForTokens}.`);
+        const promptStyleBlock = promptStyleService.buildPromptStyleConstraintBlock(db, req.body?.prompt_style_ids, {
+          heading: '【本次通用优化提示词附加提示词风格】',
+        });
 
         // 获取前后镜头上下文（含上一镜头连戏状态快照）
         let prevDesc = '(first shot)';
@@ -503,6 +507,7 @@ function routes(db, log) {
           sb.atmosphere    ? `ATMOSPHERE: ${sb.atmosphere}`  : null,
           sb.shot_type     ? `SHOT_TYPE: ${sb.shot_type}`    : null,
           `STYLE_TOKENS (repeat in output): ${styleForTokens}`,
+          promptStyleBlock ? `USER_PROMPT_STYLE_CONSTRAINTS:\n${promptStyleBlock}` : null,
           `ASSETS: ${assetNames || 'none'}`,
           prevContinuityState ? `PREV_CONTINUITY_STATE: ${JSON.stringify(prevContinuityState)}` : null,
           `CONTEXT_PREV: ${prevDesc}`,
