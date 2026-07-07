@@ -44,6 +44,7 @@
 - 🆕 **Agnes AI 接入**：文本 / 图片 / 视频一键配置，一个 Key 覆盖全流程
 - 🆕 **画布模式增强**：剧本节点、右键菜单、浮动工具栏、画布内新建/删除/整集生成
 - 🆕 **ModelArk 私有资产库**：SD2 角色认证对接火山方舟资产组，AK/SK 与 Bearer 双鉴权
+- 🧪 **Codex 生图辅助模式**：角色/道具/场景/分镜图可加入 Codex 队列，由 Codex 生成候选图后回写项目
 - 🔧 **图床可配置**：`upload_url` / 超时（默认 180s）/ 重试次数写入 `config.yaml`；缓存 URL 失效自动重传
 - 🔧 **提示词优化** · **分镜图片数量上限修复**
 
@@ -55,6 +56,7 @@
 
 - [界面预览](#-界面预览)
 - [核心功能](#-核心功能)
+- [Codex 生图辅助模式](#-codex-生图辅助模式开发辅助)
 - [快速开始](#-快速开始)
 - [AI 服务商](#-ai-服务商支持)
 - [项目架构](#-项目架构)
@@ -134,7 +136,7 @@
 | 4 | **场景生成** | 从剧本自动提取场景，生成场景背景图 |
 | 5 | **道具生成** | 从剧本提取/手动添加道具，生成道具图 |
 | 6 | **分镜生成** | 按集自动生成分镜脚本（含景别/运镜/台词） |
-| 7 | **图片/视频生成** | 逐镜生成静帧图与视频片段 |
+| 7 | **图片/视频生成** | 逐镜生成静帧图与视频片段；开发时也可用 Codex 生成图片候选 |
 | 8 | **合成视频** | 所有分镜视频自动合成为完整剧集文件 |
 
 </details>
@@ -168,6 +170,84 @@
 ### 🤖 AI 配置 · 🌓 亮/暗主题 · 自定义提示词
 
 三类模型独立配置（图/视频/文本）；一键配置通义/火山；9 类提示词可自定义覆盖。
+
+---
+
+## 🧪 Codex 生图辅助模式（开发辅助）
+
+当你在源码开发环境里使用 Codex 时，可以不配置后端图片模型，直接把项目里的图片需求加入本地 Codex 队列，让 Codex 用内置图片生成能力出图，再由页面人工确认使用。
+
+适合：
+
+- 快速给短剧项目做样片资产。
+- 后端图片模型暂未配置、配置失败，或只想先用 Codex 试出一版概念图。
+- 批量生成角色、道具、场景、分镜主图、分镜首帧/尾帧的候选图。
+
+### 页面入口
+
+在制作页可以看到这些 Codex 入口：
+
+| 位置 | 按钮 | 作用 |
+|------|------|------|
+| 角色/道具/场景卡片 | `Codex` | 单个资源加入 Codex 生图队列 |
+| 资源管理顶部 | `本集缺图入 Codex` | 当前集缺主图的角色、道具、场景一键入队 |
+| 角色/道具/场景分区 | `Codex 批量` | 当前分区资源批量入队 |
+| 分镜主图/首帧/尾帧 | `Codex` | 单个分镜帧入队 |
+| 分镜生成区域 | `Codex 批量分镜图` | 当前集缺图分镜批量入队；首尾帧模式下会分别检查首帧和尾帧 |
+
+> Codex 目前用于生成图片候选图，不直接生成真正的视频 MP4。分镜视频仍需要配置视频模型；Codex 可以先补齐主图/首帧/尾帧等视频素材。
+
+### 标准流程
+
+1. 在页面点击 Codex 按钮入队。
+2. 后端写入 `codex_image_jobs` 表，并刷新：
+
+   ```bash
+   backend-node/data/codex-image-jobs/jobs.json
+   ```
+
+3. 在 Codex 中说：
+
+   ```text
+   生成当前 jobs.json 里的所有图片，已经生成不要生成了
+   ```
+
+4. Codex 会读取 `jobs.json`，跳过已生成、已完成、已使用、或业务实体已有正式图片的任务，只对剩余任务调用内置图片生成。
+5. Codex 生成后写入：
+
+   ```bash
+   backend-node/data/codex-image-jobs/results.json
+   ```
+
+6. 导入结果：
+
+   ```bash
+   cd backend-node
+   npm run codex:import-image-results -- --file data/codex-image-jobs/results.json
+   ```
+
+7. 回到页面，在候选图上点击 `使用`，图片才会正式写回项目。
+
+### 数据落点
+
+候选图导入到：
+
+```bash
+backend-node/data/storage/projects/<project>/codex-candidates/<characters|props|scenes|storyboards>/
+```
+
+点击 `使用` 后会复制到正式目录：
+
+```bash
+backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboards>/
+```
+
+写回规则：
+
+- 角色/道具/场景：更新对应业务表的 `image_url`、`local_path`、`extra_images`。
+- 分镜主图/首帧/尾帧：创建 `image_generations` 记录，并绑定到 `storyboards.image_url/local_path/first_frame_image_id` 或 `storyboards.last_frame_*`。
+
+完整开发细节见 [Codex 生图队列工作流](docs/codex-image-workflow.md)。
 
 ---
 
