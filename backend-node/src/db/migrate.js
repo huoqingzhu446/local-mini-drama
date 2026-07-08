@@ -168,6 +168,7 @@ function ensureAllColumns(database) {
     { name: 'lighting_style',    type: 'TEXT' },               // 灯光风格（natural/side/dramatic/golden_hour 等）
     { name: 'depth_of_field',    type: 'TEXT' },               // 景深（shallow/medium/deep/extreme_shallow）
     { name: 'polished_prompt',        type: 'TEXT' },               // 文字AI润色后的图片生成提示词（可编辑，生图时优先使用）
+    { name: 'polished_prompt_style_signature', type: 'TEXT' },      // polished_prompt 对应的统一视觉风格签名
     { name: 'continuity_snapshot',   type: 'TEXT' },               // JSON: 连戏状态快照 {characters:{name:{position,clothing,expression,props}},lighting}
     { name: 'audio_local_path',      type: 'TEXT' },               // 对白 TTS 本地路径
     { name: 'narration_audio_local_path', type: 'TEXT' },         // 解说旁白 TTS 本地路径
@@ -202,6 +203,7 @@ function ensureAllColumns(database) {
     { name: 'color_palette',     type: 'TEXT' },   // JSON: Hex 色值数组
     { name: 'four_view_image_url', type: 'TEXT' }, // 四视图参考图 URL
     { name: 'polished_prompt',   type: 'TEXT' },   // 文字AI润色后的完整图片生成提示词（可编辑，生图时直接使用）
+    { name: 'polished_prompt_style_signature', type: 'TEXT' }, // polished_prompt 对应的统一视觉风格签名
     { name: 'ref_image',         type: 'TEXT' },   // 用户上传的参考图（本地相对路径或 URL），独立于 AI 生成的主图
     { name: 'stages',            type: 'TEXT' },   // JSON: 多阶段造型 [{episode_range:[1,3], appearance:"..."}]
     { name: 'seedance2_asset', type: 'TEXT' },   // JSON: 即梦/Seedance2 素材库认证 hub_asset_id / asset_url 等
@@ -220,7 +222,9 @@ function ensureAllColumns(database) {
     { name: 'time',             type: 'TEXT' },
     { name: 'prompt',           type: 'TEXT' },
     { name: 'polished_prompt',  type: 'TEXT' },  // 文字AI润色后的完整四视图图片提示词，生图时直接使用
+    { name: 'polished_prompt_style_signature', type: 'TEXT' }, // polished_prompt 对应的统一视觉风格签名
     { name: 'polished_prompt_single', type: 'TEXT' }, // 文字AI润色后的完整单图图片提示词，Codex/单图生图优先使用
+    { name: 'polished_prompt_single_style_signature', type: 'TEXT' }, // polished_prompt_single 对应的统一视觉风格签名
     { name: 'image_url',        type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
     { name: 'extra_images',     type: 'TEXT' },
@@ -242,6 +246,7 @@ function ensureAllColumns(database) {
     { name: 'type',        type: 'TEXT' },
     { name: 'description', type: 'TEXT' },
     { name: 'prompt',      type: 'TEXT' },
+    { name: 'prompt_style_signature', type: 'TEXT' }, // prompt 对应的统一视觉风格签名
     { name: 'image_url',    type: 'TEXT' },
     { name: 'local_path',   type: 'TEXT' },
     { name: 'extra_images', type: 'TEXT' },

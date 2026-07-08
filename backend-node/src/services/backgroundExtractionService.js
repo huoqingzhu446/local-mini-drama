@@ -80,24 +80,26 @@ async function processBackgroundExtraction(db, cfg, log, taskID, episodeId, mode
   let effectiveCfg = cfg;
   try {
     const dramaRow = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(episode.drama_id);
-    const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+    const { mergeCfgStyleWithDrama, refreshCfgVisualStyleMetadata } = require('../utils/dramaStyleMerge');
     const paramStyle = (style && String(style).trim()) || '';
     let next = { ...cfg, style: { ...(cfg?.style || {}) } };
     if (dramaRow?.metadata) {
       const meta = typeof dramaRow.metadata === 'string' ? JSON.parse(dramaRow.metadata) : dramaRow.metadata;
       if (meta?.aspect_ratio) next.style.default_image_ratio = meta.aspect_ratio;
     }
+    next = mergeCfgStyleWithDrama(next, dramaRow || {});
     if (paramStyle) {
-      next.style = {
-        ...next.style,
-        default_style_zh: paramStyle,
-        default_style_en: paramStyle,
-        default_style: paramStyle,
-      };
-      effectiveCfg = next;
-    } else {
-      effectiveCfg = mergeCfgStyleWithDrama(next, dramaRow);
+      next = refreshCfgVisualStyleMetadata({
+        ...next,
+        style: {
+          ...next.style,
+          default_style_zh: paramStyle,
+          default_style_en: paramStyle,
+          default_style: paramStyle,
+        },
+      });
     }
+    effectiveCfg = next;
     style = paramStyle || effectiveCfg?.style?.default_style_en || effectiveCfg?.style?.default_style || style;
   } catch (_) {}
 

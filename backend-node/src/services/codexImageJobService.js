@@ -3,7 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const storageLayout = require('./storageLayout');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
-const { mergeCfgStyleWithDrama, parseDramaMetadata } = require('../utils/dramaStyleMerge');
+const {
+  mergeCfgStyleWithDrama,
+  parseDramaMetadata,
+  refreshCfgVisualStyleMetadata,
+  buildVisualStyleConstraintBlock,
+} = require('../utils/dramaStyleMerge');
 
 const ENABLED_ENTITY_TYPES = new Set(['character', 'prop', 'scene', 'storyboard']);
 const ACTIVE_STATUSES = new Set(['pending', 'generating', 'completed']);
@@ -27,6 +32,7 @@ function ensureCodexImageJobsTable(db) {
     negative_prompt TEXT,
     aspect_ratio TEXT,
     style TEXT,
+    style_signature TEXT,
     source_snapshot TEXT,
     candidates TEXT,
     selected_candidate_id TEXT,
@@ -40,6 +46,12 @@ function ensureCodexImageJobsTable(db) {
     used_at TEXT,
     deleted_at TEXT
   )`);
+  try {
+    const cols = new Set(db.prepare('PRAGMA table_info(codex_image_jobs)').all().map((row) => row.name));
+    if (!cols.has('style_signature')) {
+      db.exec('ALTER TABLE codex_image_jobs ADD COLUMN style_signature TEXT');
+    }
+  } catch (_) {}
   db.exec('CREATE INDEX IF NOT EXISTS idx_codex_image_jobs_entity ON codex_image_jobs(entity_type, entity_id, status)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_codex_image_jobs_drama ON codex_image_jobs(drama_id, status, updated_at)');
 }
@@ -159,6 +171,7 @@ function rowToJob(row) {
     negative_prompt: row.negative_prompt || '',
     aspect_ratio: row.aspect_ratio || '',
     style: row.style || '',
+    style_signature: row.style_signature || '',
     source_snapshot: sourceSnapshot,
     candidates: candidateList,
     selected_candidate_id: row.selected_candidate_id || null,
@@ -239,6 +252,28 @@ function styleFromDrama(cfg, dramaRow, styleOverride) {
     merged?.style?.default_style_zh ||
     ''
   ).toString().trim();
+}
+
+function cfgWithStyleOverride(cfg, styleOverride) {
+  const explicit = styleOverride != null ? String(styleOverride).trim() : '';
+  if (!explicit) return cfg;
+  return refreshCfgVisualStyleMetadata({
+    ...cfg,
+    style: {
+      ...(cfg?.style || {}),
+      default_style_zh: explicit,
+      default_style_en: explicit,
+      default_style: explicit,
+    },
+  });
+}
+
+function mergedDramaStyleCfg(cfg, dramaRow, styleOverride) {
+  return cfgWithStyleOverride(mergeCfgStyleWithDrama(cfg, dramaRow || {}), styleOverride);
+}
+
+function styleSignatureFromDrama(cfg, dramaRow, styleOverride) {
+  return (mergedDramaStyleCfg(cfg, dramaRow, styleOverride)?.style?.style_signature || '').toString().trim();
 }
 
 function aspectRatioFromDrama(cfg, dramaRow) {
@@ -390,6 +425,8 @@ function pickPromptSource(entityType, row, opts = {}) {
 function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
   const source = pickPromptSource(entityType, row, opts);
   const style = styleFromDrama(cfg, dramaRow, opts.style);
+  const styleCfg = mergedDramaStyleCfg(cfg, dramaRow, opts.style);
+  const visualBibleBlock = buildVisualStyleConstraintBlock(styleCfg, { language: 'en', heading: 'Visual bible (must follow exactly):' });
   const aspectRatio = opts.aspect_ratio || aspectRatioFromDrama(cfg, dramaRow);
   const name = entityDisplayName(entityType, row);
   const frameType = normalizeFrameType(opts.frame_type);
@@ -404,6 +441,7 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
     entityType === 'storyboard' ? `Storyboard frame type: ${frameType}` : '',
     dramaRow?.title ? `Drama title: ${dramaRow.title}` : '',
     style ? `Visual style: ${style}` : '',
+    visualBibleBlock || '',
     `Aspect ratio: ${aspectRatio}`,
     '',
     'Primary request:',
@@ -420,18 +458,21 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
     prompt: lines.join('\n'),
     prompt_source: source.key,
     style,
+    style_signature: (styleCfg?.style?.style_signature || '').toString().trim(),
     aspect_ratio: aspectRatio,
   };
 }
 
-function activeJobForEntity(db, entityType, entityId, frameType) {
+function activeJobForEntity(db, entityType, entityId, frameType, styleSignature) {
+  const styleSig = String(styleSignature || '').trim();
   const row = db.prepare(
     `SELECT * FROM codex_image_jobs
      WHERE entity_type = ? AND entity_id = ? AND frame_type = ? AND deleted_at IS NULL
        AND status IN ('pending', 'generating', 'completed')
+       ${styleSig ? 'AND style_signature = ?' : ''}
      ORDER BY updated_at DESC, created_at DESC
      LIMIT 1`
-  ).get(entityType, Number(entityId), normalizeFrameType(frameType));
+  ).get(...[entityType, Number(entityId), normalizeFrameType(frameType)].concat(styleSig ? [styleSig] : []));
   return rowToJob(row);
 }
 
@@ -447,6 +488,7 @@ function jobManifestItem(job) {
     negative_prompt: job.negative_prompt || undefined,
     aspect_ratio: job.aspect_ratio || undefined,
     style: job.style || undefined,
+    style_signature: job.style_signature || undefined,
     target_category: CATEGORY_BY_ENTITY[job.entity_type] || job.entity_type,
     status: job.status,
   };
@@ -491,13 +533,6 @@ function createJob(db, log, cfg, req = {}) {
   const entityId = Number(req.entity_id);
   if (!entityId) return { ok: false, error: 'entity_id is required' };
   const frameType = normalizeFrameType(req.frame_type);
-  if (!req.force) {
-    const existing = activeJobForEntity(db, entityType, entityId, frameType);
-    if (existing) {
-      const manifest = writeJobsManifest(db, cfg);
-      return { ok: true, job: existing, reused: true, manifest };
-    }
-  }
   const row = loadEntity(db, entityType, entityId);
   if (!row) return { ok: false, error: `${entityType} not found` };
   const dramaId = Number(req.drama_id || row.drama_id || 0) || null;
@@ -508,18 +543,27 @@ function createJob(db, log, cfg, req = {}) {
     aspect_ratio: req.aspect_ratio,
     frame_type: frameType,
   });
+  const styleSignature = built.style_signature || '';
+  if (!req.force) {
+    const existing = activeJobForEntity(db, entityType, entityId, frameType, styleSignature);
+    if (existing) {
+      const manifest = writeJobsManifest(db, cfg);
+      return { ok: true, job: existing, reused: true, manifest };
+    }
+  }
   const now = new Date().toISOString();
   const id = `cij_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   const sourceSnapshot = {
     entity: row,
     drama: dramaRow ? { id: dramaRow.id, title: dramaRow.title, style: dramaRow.style, metadata: parseDramaMetadata(dramaRow) } : null,
     prompt_source: built.prompt_source,
+    style_signature: styleSignature,
   };
   db.prepare(
     `INSERT INTO codex_image_jobs
      (id, entity_type, entity_id, drama_id, episode_id, frame_type, status, prompt, negative_prompt,
-      aspect_ratio, style, source_snapshot, candidates, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, '[]', ?, ?)`
+      aspect_ratio, style, style_signature, source_snapshot, candidates, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, '[]', ?, ?)`
   ).run(
     id,
     entityType,
@@ -531,6 +575,7 @@ function createJob(db, log, cfg, req = {}) {
     row.negative_prompt || null,
     built.aspect_ratio,
     built.style || null,
+    styleSignature || null,
     stringifyJson(sourceSnapshot),
     now,
     now
@@ -539,6 +584,23 @@ function createJob(db, log, cfg, req = {}) {
   const manifest = writeJobsManifest(db, cfg);
   log?.info?.('[Codex生图] 任务已加入队列', { id, entity_type: entityType, entity_id: entityId });
   return { ok: true, job, reused: false, manifest };
+}
+
+function invalidateJobsForDrama(db, log, cfg, dramaId, reason) {
+  ensureCodexImageJobsTable(db);
+  const why = String(reason || '项目视觉风格已变更，请重新生成').trim();
+  const now = new Date().toISOString();
+  const result = db.prepare(
+    `UPDATE codex_image_jobs
+     SET status = 'cancelled', error_msg = ?, updated_at = ?
+     WHERE drama_id = ? AND deleted_at IS NULL
+       AND status IN ('pending', 'generating', 'completed')`
+  ).run(why, now, Number(dramaId));
+  if (result.changes > 0) {
+    writeJobsManifest(db, cfg);
+    log?.info?.('[Codex生图] 已失效旧风格任务', { drama_id: dramaId, count: result.changes });
+  }
+  return result.changes;
 }
 
 function candidateStorageDir(db, cfg, job, category) {
@@ -785,6 +847,7 @@ module.exports = {
   listJobs,
   getJobById,
   createJob,
+  invalidateJobsForDrama,
   importResults,
   useCandidate,
   cancelJob,

@@ -1108,8 +1108,13 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
 
   // 获取剧集风格和比例（如果未指定，则从 drama metadata / style 中获取完整提示词）
   const drama = db.prepare('SELECT style, metadata FROM dramas WHERE id = ?').get(episode.drama_id);
-  const { resolvedStreamStyleFromDrama } = require('../utils/dramaStyleMerge');
+  const { resolvedStreamStyleFromDrama, mergeCfgStyleWithDrama, buildVisualStyleConstraintBlock } = require('../utils/dramaStyleMerge');
   const finalStyle = resolvedStreamStyleFromDrama(style, drama);
+  const styleCfg = mergeCfgStyleWithDrama(cfg, drama || {});
+  const visualBibleBlock = buildVisualStyleConstraintBlock(styleCfg, {
+    language: promptI18n.isEnglish(cfg) ? 'en' : 'zh',
+    heading: promptI18n.isEnglish(cfg) ? 'VISUAL BIBLE (must stay consistent across characters, props, scenes, and storyboard images)' : '【统一视觉风格圣经（人物/道具/场景/分镜必须一致）】',
+  });
 
   // 图片比例 + 每镜时长：优先用传入值，再从 drama.metadata 读，最后兜底全局配置
   let dramaAspectRatio = null;
@@ -1231,6 +1236,9 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
 
   let userPrompt =
     `${scriptLabel}\n${scriptContent}\n\n${taskLabel}\n${taskInstruction}${extraConstraint}\n\n${charListLabel}\n${characterList}\n\n${charConstraint}\n\n${sceneListLabel}\n${sceneList}\n\n${sceneConstraint}\n\n${propListLabel}\n${propList}\n\n${propConstraint}\n\n${suffix}`;
+  if (visualBibleBlock) {
+    userPrompt += `\n\n${visualBibleBlock}`;
+  }
 
   const wantNarration = includeNarration === true || includeNarration === 1 || String(includeNarration).toLowerCase() === 'true';
   if (wantNarration) {

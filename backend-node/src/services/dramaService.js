@@ -3,6 +3,10 @@
 const storageLayout = require('./storageLayout');
 const { resolveStylePreset } = require('../constants/generationStylePresets');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
+const {
+  normalizeVisualBible,
+  visualStyleStateFromDramaRow,
+} = require('../utils/dramaStyleMerge');
 
 /**
  * 清理 image_url：如果数据库中存储的是 base64 data URL，则返回 null。
@@ -40,6 +44,18 @@ function createDrama(db, log, req) {
   if (!meta.storage_folder_label) {
     meta.storage_folder_label = storageLayout.sanitizeFolderLabel(req.title || '');
   }
+  if (req.style) {
+    const preset = resolveStylePreset(String(req.style).trim());
+    if (preset) {
+      if (!meta.style_prompt_zh) meta.style_prompt_zh = preset.zh;
+      if (!meta.style_prompt_en) meta.style_prompt_en = preset.en;
+    }
+  }
+  const normalizedBible = normalizeVisualBible(meta.visual_bible || meta.visual_bible_text || '');
+  if (normalizedBible) meta.visual_bible = normalizedBible;
+  else delete meta.visual_bible;
+  delete meta.visual_bible_text;
+  if (!meta.style_version) meta.style_version = 1;
   const metadataStr = Object.keys(meta).length ? JSON.stringify(meta) : null;
   const stmt = db.prepare(`
     INSERT INTO dramas (title, description, genre, style, metadata, status, created_at, updated_at)
@@ -470,6 +486,7 @@ function saveOutline(db, log, dramaId, req) {
   if (!drama) return false;
   const now = new Date().toISOString();
   const tagsStr = Array.isArray(req.tags) ? JSON.stringify(req.tags) : null;
+  const prevVisualState = visualStyleStateFromDramaRow(drama);
   // Merge new metadata with existing metadata
   let existingMetadata = {};
   if (drama.metadata) {
@@ -488,6 +505,10 @@ function saveOutline(db, log, dramaId, req) {
     }
   }
   const mergedMetadata = { ...existingMetadata, ...newMetadata };
+  const normalizedBible = normalizeVisualBible(mergedMetadata.visual_bible || mergedMetadata.visual_bible_text || '');
+  if (normalizedBible) mergedMetadata.visual_bible = normalizedBible;
+  else delete mergedMetadata.visual_bible;
+  delete mergedMetadata.visual_bible_text;
 
   // 与 mergeCfgStyleWithDrama 一致：提示词优先读 metadata.style_prompt_*。仅改 dramas.style 而不带画风长文案时，
   // 若仍保留旧的 metadata 画风，会出现「列表/首页 badge 已是新 style，角色提示词却仍用旧画风」。
@@ -507,6 +528,16 @@ function saveOutline(db, log, dramaId, req) {
     }
   }
 
+  const nextStyleValue = req.style !== undefined ? req.style : drama.style;
+  const nextVisualState = visualStyleStateFromDramaRow({
+    style: nextStyleValue,
+    metadata: mergedMetadata,
+  });
+  const styleChanged = prevVisualState.style_signature !== nextVisualState.style_signature;
+  mergedMetadata.style_version = styleChanged
+    ? Math.max(Number(prevVisualState.style_version) || 1, Number(existingMetadata.style_version) || 1) + 1
+    : Math.max(Number(existingMetadata.style_version) || 1, Number(prevVisualState.style_version) || 1);
+
   const metadataStr = JSON.stringify(mergedMetadata);
   
   db.prepare(
@@ -521,6 +552,16 @@ function saveOutline(db, log, dramaId, req) {
     now, 
     dramaId
   );
+  if (styleChanged) {
+    try {
+      const { loadConfig } = require('../config');
+      const cfg = loadConfig();
+      const codexImageJobService = require('./codexImageJobService');
+      codexImageJobService.invalidateJobsForDrama(db, log, cfg, dramaId, '项目统一视觉风格已更新，请重新生成');
+    } catch (err) {
+      log.warn('Style change job invalidation skipped', { drama_id: dramaId, error: err.message });
+    }
+  }
   log.info('Outline saved', { drama_id: dramaId, style: req.style, genre: req.genre, metadata: mergedMetadata });
   return true;
 }

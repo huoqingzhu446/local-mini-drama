@@ -407,6 +407,23 @@
             <el-button v-else type="success" @click="onPipelineResume">▶ 继续</el-button>
           </template>
         </div>
+        <div class="visual-bible-strip">
+          <div class="visual-bible-strip__head">
+            <span class="visual-bible-strip__title">统一视觉风格圣经</span>
+            <span class="visual-bible-strip__version">v{{ projectStyleVersion }}</span>
+          </div>
+          <el-input
+            v-model="visualBible"
+            type="textarea"
+            :rows="2"
+            resize="vertical"
+            placeholder="例如：冷青灰主色，边缘高光克制，潮湿空气感，皮肤保留真实纹理，金属磨损偏旧，禁止糖水滤镜和过饱和霓虹。"
+            @change="() => saveProjectSettings(true)"
+          />
+          <div class="visual-bible-strip__hint">
+            改这里会统一影响人物、道具、场景、分镜与 Codex 队列；保存后旧风格缓存会自动视为过期。
+          </div>
+        </div>
         <div v-if="pipelineRunning || pipelineErrorLog.length > 0" class="pipeline-status">
           <div v-if="pipelineCurrentStep" class="pipeline-current-step">
             <span v-if="pipelineStepIndex > 0" class="pipeline-step-badge">{{ pipelineStepIndex }}/{{ pipelineStepTotal }}</span>
@@ -3274,6 +3291,8 @@ const isStoryGenRunning = computed(() => {
 const generationStyle = ref('')
 const projectAspectRatio = ref('16:9')
 const videoClipDuration = ref(5)
+const visualBible = ref('')
+const projectStyleVersion = computed(() => Number(store.drama?.metadata?.style_version) || 1)
 
 /** 根据 value 查找样式选项对象 */
 function _findStyleOption(val) {
@@ -5454,6 +5473,7 @@ async function loadDrama() {
     storyInput.value = (d.description || '').toString().trim()
     storyStyle.value = (d.metadata && d.metadata.story_style) ? d.metadata.story_style : ''
     storyType.value = d.genre || ''
+    visualBible.value = (d.metadata && d.metadata.visual_bible) ? String(d.metadata.visual_bible) : ''
     generationStyle.value = d.style || ''
     projectAspectRatio.value = (d.metadata && d.metadata.aspect_ratio) ? d.metadata.aspect_ratio : '16:9'
     videoClipDuration.value = (d.metadata && d.metadata.video_clip_duration) ? Number(d.metadata.video_clip_duration) : 5
@@ -5766,6 +5786,7 @@ async function saveScriptToBackend(content) {
         ...projectStylePromptMetadata(),
         story_style: storyStyle.value || undefined,
         aspect_ratio: projectAspectRatio.value || '16:9',
+        visual_bible: visualBible.value.trim() || undefined,
       },
     })
     store.setDrama(drama)
@@ -5804,6 +5825,7 @@ async function saveScriptToBackend(content) {
           ...projectStylePromptMetadata(),
           story_style: storyStyle.value || undefined,
           aspect_ratio: projectAspectRatio.value || '16:9',
+          visual_bible: visualBible.value.trim() || undefined,
         },
       }).catch(() => {})
     }
@@ -5842,6 +5864,7 @@ async function saveScriptToBackend(content) {
         ...projectStylePromptMetadata(),
         story_style: storyStyle.value || undefined,
         aspect_ratio: projectAspectRatio.value || '16:9',
+        visual_bible: visualBible.value.trim() || undefined,
       },
     }).catch(() => {})
   }
@@ -5859,6 +5882,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     story_style: storyStyle.value || undefined,
     aspect_ratio: projectAspectRatio.value || '16:9',
     video_clip_duration: videoClipDuration.value || 5,
+    visual_bible: visualBible.value.trim() || undefined,
     storyboard_include_narration: !!storyboardIncludeNarration.value,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
     storyboard_use_first_last_frame: !!storyboardUseFirstLastFrame.value,
@@ -9002,6 +9026,7 @@ function applyRouteToStore() {
     storyType.value = ''
     scriptLanguage.value = 'zh'
     scriptStoryboardStyle.value = ''
+    visualBible.value = ''
     generationStyle.value = ''
     selectedStoryboardPromptStyleIds.value = []
     sbPromptDialogStyleIds.value = []
@@ -11845,5 +11870,44 @@ html.light .frame-layout-anchor {
   color: #64748b;
   margin-top: 4px;
   line-height: 1.4;
+}
+
+.visual-bible-strip {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f8fbff 0%, #f4f8ff 100%);
+}
+
+.visual-bible-strip__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.visual-bible-strip__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.visual-bible-strip__version {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.visual-bible-strip__hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #475569;
 }
 </style>

@@ -1,6 +1,14 @@
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
-const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+const { mergeCfgStyleWithDrama, refreshCfgVisualStyleMetadata } = require('../utils/dramaStyleMerge');
+
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  } catch (_) {
+    return new Set();
+  }
+}
 
 function listByDramaId(db, dramaId) {
   const rows = db.prepare(
@@ -13,6 +21,7 @@ function listByDramaId(db, dramaId) {
     type: r.type,
     description: r.description,
     prompt: r.prompt,
+    prompt_style_signature: r.prompt_style_signature || null,
     negative_prompt: r.negative_prompt || null,
     image_url: r.image_url,
     local_path: r.local_path,
@@ -56,6 +65,7 @@ function getById(db, id) {
     type: r.type,
     description: r.description,
     prompt: r.prompt,
+    prompt_style_signature: r.prompt_style_signature || null,
     negative_prompt: r.negative_prompt || null,
     image_url: r.image_url,
     local_path: r.local_path,
@@ -69,12 +79,24 @@ function getById(db, id) {
 function update(db, log, id, updates) {
   const existing = getById(db, id);
   if (!existing) return null;
+  const propColumns = tableColumns(db, 'props');
   const set = [];
   const params = [];
   if (updates.name != null) { set.push('name = ?'); params.push(updates.name); }
   if (updates.type != null) { set.push('type = ?'); params.push(updates.type); }
   if (updates.description != null) { set.push('description = ?'); params.push(updates.description); }
-  if (updates.prompt != null) { set.push('prompt = ?'); params.push(updates.prompt); }
+  if (updates.prompt != null) {
+    set.push('prompt = ?');
+    params.push(updates.prompt);
+    if (propColumns.has('prompt_style_signature')) {
+      const dramaRow = existing.drama_id
+        ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(existing.drama_id)
+        : null;
+      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+      set.push('prompt_style_signature = ?');
+      params.push(signature);
+    }
+  }
   if (updates.negative_prompt !== undefined) { set.push('negative_prompt = ?'); params.push(updates.negative_prompt); }
   if (updates.image_url != null) { set.push('image_url = ?'); params.push(updates.image_url); }
   if (updates.local_path !== undefined) { set.push('local_path = ?'); params.push(updates.local_path ?? null); }
@@ -123,6 +145,7 @@ function associateWithStoryboard(db, log, storyboardId, propIds) {
  * 供「提取道具后异步预生成」和「重新生成提示词」按钮调用
  */
 async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
+  const propColumns = tableColumns(db, 'props');
   const prop = getById(db, propId);
   if (!prop) return { ok: false, error: 'prop not found' };
 
@@ -132,7 +155,7 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
   let polishCfg = mergeCfgStyleWithDrama(cfg, dramaRow || {});
   const so = (style && String(style).trim()) || '';
   if (so) {
-    polishCfg = {
+    polishCfg = refreshCfgVisualStyleMetadata({
       ...polishCfg,
       style: {
         ...polishCfg.style,
@@ -140,7 +163,7 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
         default_style_en: so,
         default_style: so,
       },
-    };
+    });
   }
 
   const descText = [
@@ -150,7 +173,8 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
   ].filter(Boolean).join('\n') || prop.name || '';
 
   const systemPrompt = promptI18n.getPropPolishPrompt(polishCfg);
-  const userPrompt = `请为以下道具生成**一段英文**图片提示词。\n**约束**：最终英文中不得出现人名、地名、组织名、台词或任何剧本专有信息（若下列「道具名称/描述」中含此类词，请改写为泛化物体描述）；只写已给出的可见外观信息，不要扩写未提及的细节。\n\n${descText}`;
+  const visualBible = (polishCfg?.style?.visual_bible || '').trim();
+  const userPrompt = `请为以下道具生成**一段英文**图片提示词。\n**约束**：最终英文中不得出现人名、地名、组织名、台词或任何剧本专有信息（若下列「道具名称/描述」中含此类词，请改写为泛化物体描述）；只写已给出的可见外观信息，不要扩写未提及的细节。${visualBible ? `\n\n【统一视觉风格圣经（必须融入最终提示词）】\n${visualBible}` : ''}\n\n${descText}`;
 
   log.info('[道具提示词] 开始生成', { prop_id: propId, name: prop.name });
 
@@ -167,9 +191,18 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
   }
 
   if (generatedPrompt && generatedPrompt.trim()) {
-    db.prepare('UPDATE props SET prompt = ?, updated_at = ? WHERE id = ?').run(
-      generatedPrompt.trim(), new Date().toISOString(), Number(propId)
-    );
+    if (propColumns.has('prompt_style_signature')) {
+      db.prepare('UPDATE props SET prompt = ?, prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
+        generatedPrompt.trim(),
+        (polishCfg?.style?.style_signature || '').trim() || null,
+        new Date().toISOString(),
+        Number(propId)
+      );
+    } else {
+      db.prepare('UPDATE props SET prompt = ?, updated_at = ? WHERE id = ?').run(
+        generatedPrompt.trim(), new Date().toISOString(), Number(propId)
+      );
+    }
     log.info('[道具提示词] 生成并保存完成', { prop_id: propId, length: generatedPrompt.length });
     return { ok: true, prompt: generatedPrompt.trim() };
   }

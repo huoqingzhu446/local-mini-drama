@@ -6,6 +6,7 @@ const propService = require('./propService');
 const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
 const { aspectRatioToSize } = require('./imageService');
+const { isStyleSignatureCurrent } = require('../utils/dramaStyleMerge');
 
 function appendPrompt(base, extra) {
   const add = (extra || '').toString().trim();
@@ -26,22 +27,48 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     taskService.updateTaskError(db, taskId, '道具不存在');
     return;
   }
-  if (!prop.prompt || !String(prop.prompt).trim()) {
-    taskService.updateTaskError(db, taskId, '道具没有图片提示词');
-    return;
-  }
 
   const loadConfig = require('../config').loadConfig;
-  const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+  const { mergeCfgStyleWithDrama, refreshCfgVisualStyleMetadata } = require('../utils/dramaStyleMerge');
   let cfg = loadConfig();
+  let dramaRow = null;
   if (prop.drama_id) {
     try {
-      const dr = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(prop.drama_id);
-      cfg = mergeCfgStyleWithDrama(cfg, dr || {});
+      dramaRow = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(prop.drama_id);
+      cfg = mergeCfgStyleWithDrama(cfg, dramaRow || {});
     } catch (_) {}
   }
   const styleOverride = (opts && opts.style) ? String(opts.style).trim() : '';
+  if (styleOverride) {
+    cfg = refreshCfgVisualStyleMetadata({
+      ...cfg,
+      style: {
+        ...(cfg?.style || {}),
+        default_style_zh: styleOverride,
+        default_style_en: styleOverride,
+        default_style: styleOverride,
+      },
+    });
+  }
+  const currentStyleSignature = (cfg?.style?.style_signature || '').trim();
+  const propPromptMissing = !prop.prompt || !String(prop.prompt).trim();
+  const propPromptStale = !propPromptMissing && !isStyleSignatureCurrent(prop.prompt_style_signature, currentStyleSignature);
+  if (propPromptMissing || propPromptStale) {
+    const rebuilt = await propService.generatePropPromptOnly(db, log, cfg, propId, opts?.model || undefined, opts?.style || undefined);
+    if (!rebuilt.ok) {
+      taskService.updateTaskError(db, taskId, rebuilt.error || '道具提示词生成失败');
+      return;
+    }
+    const refreshed = propService.getById(db, propId);
+    if (!refreshed?.prompt || !String(refreshed.prompt).trim()) {
+      taskService.updateTaskError(db, taskId, '道具没有图片提示词');
+      return;
+    }
+    prop.prompt = refreshed.prompt;
+    prop.prompt_style_signature = refreshed.prompt_style_signature || currentStyleSignature;
+  }
   const baseStyle = styleOverride || (cfg?.style?.default_style_en || cfg?.style?.default_style || '');
+  const visualBible = (cfg?.style?.visual_bible || '').trim();
   let style = '';
   style = appendPrompt(style, baseStyle);
   if (!styleOverride) {
@@ -59,7 +86,10 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     } catch (_) {}
   }
   if (!imageSize) imageSize = cfg?.style?.default_image_size || '1920x1920';
-  const fullPrompt = appendPrompt(String(prop.prompt).trim(), style);
+  let fullPrompt = appendPrompt(String(prop.prompt).trim(), style);
+  if (visualBible) {
+    fullPrompt = `Visual bible (must follow exactly): ${visualBible}\n${fullPrompt}`;
+  }
   // 与角色/场景一致：使用前端「图片生成模型」选择的 model；未传时用 YAML default_image_provider 兜底
   const model = (opts && opts.model) ? String(opts.model).trim() || null : null;
   const preferredProvider = !model && cfg?.ai?.default_image_provider ? cfg.ai.default_image_provider : null;

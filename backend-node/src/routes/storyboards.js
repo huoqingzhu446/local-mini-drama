@@ -429,9 +429,11 @@ function routes(db, log) {
         // 画风：mergeCfgStyleWithDrama 会把 dramas.style 的 value（如 cartoon）展开为完整提示词，与图生一致
         let styleZh = '';
         let styleEn = '';
+        let styleSignature = '';
+        let visualBibleBlock = '';
         try {
           const loadConfig = require('../config').loadConfig;
-          const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+          const { mergeCfgStyleWithDrama, buildVisualStyleConstraintBlock } = require('../utils/dramaStyleMerge');
           let cfg = loadConfig();
           const dr = dramaId
             ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(dramaId)
@@ -439,6 +441,11 @@ function routes(db, log) {
           cfg = mergeCfgStyleWithDrama(cfg, dr || {});
           styleEn = (cfg?.style?.default_style_en || cfg?.style?.default_style || '').trim();
           styleZh = (cfg?.style?.default_style_zh || '').trim();
+          styleSignature = (cfg?.style?.style_signature || '').trim();
+          visualBibleBlock = buildVisualStyleConstraintBlock(cfg, {
+            language: 'en',
+            heading: 'VISUAL_BIBLE (must stay consistent across characters, props, scenes, and storyboard images):',
+          });
         } catch (_) {}
         const styleForTokens =
           styleEn ||
@@ -500,6 +507,7 @@ function routes(db, log) {
 
         const userPromptLines = [
           ...styleBlockLines,
+          visualBibleBlock || null,
           sb.image_prompt  ? `PROMPT: ${sb.image_prompt}`    : null,
           sb.action        ? `ACTION: ${sb.action}`          : null,
           sb.dialogue      ? `DIALOGUE: ${sb.dialogue}`      : null,
@@ -526,9 +534,22 @@ function routes(db, log) {
 
         const polished = polishedPrompt.trim();
         const nowIso = new Date().toISOString();
-        db.prepare('UPDATE storyboards SET polished_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-          polished, nowIso, sbId
-        );
+        const storyboardCols = new Set((() => {
+          try {
+            return db.prepare('PRAGMA table_info(storyboards)').all().map((c) => c.name);
+          } catch (_) {
+            return [];
+          }
+        })());
+        if (storyboardCols.has('polished_prompt_style_signature')) {
+          db.prepare('UPDATE storyboards SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
+            polished, styleSignature || null, nowIso, sbId
+          );
+        } else {
+          db.prepare('UPDATE storyboards SET polished_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
+            polished, nowIso, sbId
+          );
+        }
         log.info('[分镜] polishPrompt 完成', { id: sbId, len: polished.length, has_prev_continuity: !!prevContinuityState });
 
         // 异步提取连戏状态快照并保存（不阻塞响应）

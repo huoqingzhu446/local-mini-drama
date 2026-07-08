@@ -2,12 +2,16 @@
 const imageClient = require('./imageClient');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
-const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+const {
+  mergeCfgStyleWithDrama,
+  refreshCfgVisualStyleMetadata,
+  isStyleSignatureCurrent,
+} = require('../utils/dramaStyleMerge');
 
 function applySceneStyleOverride(cfg, styleOverride) {
   const o = (styleOverride || '').toString().trim();
   if (!o) return cfg;
-  return {
+  return refreshCfgVisualStyleMetadata({
     ...cfg,
     style: {
       ...(cfg?.style || {}),
@@ -15,18 +19,50 @@ function applySceneStyleOverride(cfg, styleOverride) {
       default_style_en: o,
       default_style: o,
     },
-  };
+  });
+}
+
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  } catch (_) {
+    return new Set();
+  }
 }
 function updateScene(db, log, sceneId, req) {
   const row = db.prepare('SELECT id FROM scenes WHERE id = ? AND deleted_at IS NULL').get(Number(sceneId));
   if (!row) return { ok: false, error: 'scene not found' };
+  const sceneRow = db.prepare('SELECT drama_id FROM scenes WHERE id = ? AND deleted_at IS NULL').get(Number(sceneId));
+  const sceneColumns = tableColumns(db, 'scenes');
   const updates = [];
   const params = [];
   if (req.location != null) { updates.push('location = ?'); params.push(req.location); }
   if (req.time != null) { updates.push('time = ?'); params.push(req.time); }
   if (req.prompt != null) { updates.push('prompt = ?'); params.push(req.prompt); }
-  if (req.polished_prompt != null) { updates.push('polished_prompt = ?'); params.push(req.polished_prompt); }
-  if (req.polished_prompt_single != null) { updates.push('polished_prompt_single = ?'); params.push(req.polished_prompt_single); }
+  if (req.polished_prompt != null) {
+    updates.push('polished_prompt = ?');
+    params.push(req.polished_prompt);
+    if (sceneColumns.has('polished_prompt_style_signature')) {
+      const dramaRow = sceneRow?.drama_id
+        ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
+        : null;
+      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+      updates.push('polished_prompt_style_signature = ?');
+      params.push(signature);
+    }
+  }
+  if (req.polished_prompt_single != null) {
+    updates.push('polished_prompt_single = ?');
+    params.push(req.polished_prompt_single);
+    if (sceneColumns.has('polished_prompt_single_style_signature')) {
+      const dramaRow = sceneRow?.drama_id
+        ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
+        : null;
+      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+      updates.push('polished_prompt_single_style_signature = ?');
+      params.push(signature);
+    }
+  }
   if (req.image_url != null) { updates.push('image_url = ?'); params.push(req.image_url); }
   if (req.local_path !== undefined) { updates.push('local_path = ?'); params.push(req.local_path); }
   if (req.extra_images !== undefined) { updates.push('extra_images = ?'); params.push(req.extra_images ?? null); }
@@ -150,43 +186,47 @@ function getSceneById(db, id) {
  * 将文字AI的四视图描述 + 布局指令 + 风格 合并为完整的图片AI提示词
  * 与角色的 buildFourViewImagePrompt 对应（画风置顶 + 尾部重申）
  */
-function buildSceneFourViewImagePrompt(fourViewDescription, styleEn, styleZh) {
+function buildSceneFourViewImagePrompt(fourViewDescription, styleEn, styleZh, visualBible) {
   const imageLayoutInstruction = promptI18n.getSceneGenerateImagePrompt();
   const zh = (styleZh || '').trim();
   const en = (styleEn || '').trim();
+  const bible = (visualBible || '').trim();
 
   const styleLines = [];
   if (zh) styleLines.push(`【画风·最高优先级】四格统一：${zh}`);
   if (en && en !== zh) styleLines.push(`MANDATORY ART STYLE (all 4 panels): ${en}.`);
   else if (en && !zh) styleLines.push(`MANDATORY ART STYLE (all 4 panels): ${en}.`);
   const styleHeader = styleLines.length ? `${styleLines.join('\n')}\n\n` : '';
+  const bibleHeader = bible ? `【统一视觉风格圣经】\n${bible}\n\n` : '';
 
   const tailParts = [];
   if (zh || en) tailParts.push(`Reiterate: same art style as above (${en || zh}). No people, no text.`);
   const tail = tailParts.length ? `\n\n---\n\n${tailParts.join(' ')}` : '';
 
-  return `${styleHeader}${imageLayoutInstruction}\n\n---\n\n${fourViewDescription}${tail}`;
+  return `${styleHeader}${bibleHeader}${imageLayoutInstruction}\n\n---\n\n${fourViewDescription}${tail}`;
 }
 
 /**
  * 将文字AI的单图场景描述 + 布局指令 + 风格 合并为完整的图片AI提示词
  */
-function buildSceneSingleImagePrompt(description, styleEn, styleZh) {
+function buildSceneSingleImagePrompt(description, styleEn, styleZh, visualBible) {
   const imageLayoutInstruction = promptI18n.getSceneGenerateSingleImagePrompt();
   const zh = (styleZh || '').trim();
   const en = (styleEn || '').trim();
+  const bible = (visualBible || '').trim();
 
   const styleLines = [];
   if (zh) styleLines.push(`【画风·最高优先级】${zh}`);
   if (en && en !== zh) styleLines.push(`MANDATORY ART STYLE: ${en}.`);
   else if (en && !zh) styleLines.push(`MANDATORY ART STYLE: ${en}.`);
   const styleHeader = styleLines.length ? `${styleLines.join('\n')}\n\n` : '';
+  const bibleHeader = bible ? `【统一视觉风格圣经】\n${bible}\n\n` : '';
 
   const tailParts = [];
   if (zh || en) tailParts.push(`Reiterate: same art style as above (${en || zh}). No people, no text.`);
   const tail = tailParts.length ? `\n\n---\n\n${tailParts.join(' ')}` : '';
 
-  return `${styleHeader}${imageLayoutInstruction}\n\n---\n\n${description}${tail}`;
+  return `${styleHeader}${bibleHeader}${imageLayoutInstruction}\n\n---\n\n${description}${tail}`;
 }
 
 /**
@@ -197,6 +237,7 @@ function buildSceneSingleImagePrompt(description, styleEn, styleZh) {
  * 供「提取场景后异步预生成」和「重新生成提示词」按钮调用。
  */
 async function generateScenePromptOnly(db, log, cfg, sceneId, modelName, style) {
+  const sceneColumns = tableColumns(db, 'scenes');
   const sceneRow = db.prepare(
     'SELECT id, drama_id, location, time, prompt FROM scenes WHERE id = ? AND deleted_at IS NULL'
   ).get(Number(sceneId));
@@ -240,11 +281,23 @@ async function generateScenePromptOnly(db, log, cfg, sceneId, modelName, style) 
 
   const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
   const styleZh = (mergedCfg.style.default_style_zh || '').trim();
-  const polishedPrompt = buildSceneFourViewImagePrompt(fourViewDescription.trim(), styleEn, styleZh);
-
-  db.prepare('UPDATE scenes SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
-    polishedPrompt, new Date().toISOString(), Number(sceneId)
+  const polishedPrompt = buildSceneFourViewImagePrompt(
+    fourViewDescription.trim(),
+    styleEn,
+    styleZh,
+    mergedCfg?.style?.visual_bible || ''
   );
+  const styleSignature = (mergedCfg?.style?.style_signature || '').trim();
+
+  if (sceneColumns.has('polished_prompt_style_signature')) {
+    db.prepare('UPDATE scenes SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, styleSignature || null, new Date().toISOString(), Number(sceneId)
+    );
+  } else {
+    db.prepare('UPDATE scenes SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, new Date().toISOString(), Number(sceneId)
+    );
+  }
   log.info('[场景提示词] 生成并保存完成', { scene_id: sceneId, length: polishedPrompt.length });
   return { ok: true, polished_prompt: polishedPrompt };
 }
@@ -254,6 +307,7 @@ async function generateScenePromptOnly(db, log, cfg, sceneId, modelName, style) 
  * 与 generateScenePromptOnly 对应（四视图版本）。
  */
 async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, style) {
+  const sceneColumns = tableColumns(db, 'scenes');
   const sceneRow = db.prepare(
     'SELECT id, drama_id, location, time, prompt FROM scenes WHERE id = ? AND deleted_at IS NULL'
   ).get(Number(sceneId));
@@ -295,11 +349,23 @@ async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, s
 
   const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
   const styleZh = (mergedCfg.style.default_style_zh || '').trim();
-  const polishedPrompt = buildSceneSingleImagePrompt(singleViewDescription.trim(), styleEn, styleZh);
-
-  db.prepare('UPDATE scenes SET polished_prompt_single = ?, updated_at = ? WHERE id = ?').run(
-    polishedPrompt, new Date().toISOString(), Number(sceneId)
+  const polishedPrompt = buildSceneSingleImagePrompt(
+    singleViewDescription.trim(),
+    styleEn,
+    styleZh,
+    mergedCfg?.style?.visual_bible || ''
   );
+  const styleSignature = (mergedCfg?.style?.style_signature || '').trim();
+
+  if (sceneColumns.has('polished_prompt_single_style_signature')) {
+    db.prepare('UPDATE scenes SET polished_prompt_single = ?, polished_prompt_single_style_signature = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, styleSignature || null, new Date().toISOString(), Number(sceneId)
+    );
+  } else {
+    db.prepare('UPDATE scenes SET polished_prompt_single = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, new Date().toISOString(), Number(sceneId)
+    );
+  }
   log.info('[场景单图提示词] 生成并保存完成', { scene_id: sceneId, length: polishedPrompt.length });
   return { ok: true, polished_prompt_single: polishedPrompt };
 }
@@ -311,8 +377,11 @@ async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, s
  * 如果已有 polished_prompt（预生成的完整提示词），直接使用，跳过 Step 1
  */
 async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, style) {
+  const sceneColumns = tableColumns(db, 'scenes');
   const sceneRow = db.prepare(
-    'SELECT id, drama_id, location, time, prompt, polished_prompt FROM scenes WHERE id = ? AND deleted_at IS NULL'
+    `SELECT id, drama_id, location, time, prompt, polished_prompt,
+            ${sceneColumns.has('polished_prompt_style_signature') ? 'polished_prompt_style_signature' : 'NULL AS polished_prompt_style_signature'}
+     FROM scenes WHERE id = ? AND deleted_at IS NULL`
   ).get(Number(sceneId));
   if (!sceneRow) return { ok: false, error: 'scene not found' };
   const dramaFull = db.prepare('SELECT id, style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id);
@@ -322,7 +391,12 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
   mergedCfg = applySceneStyleOverride(mergedCfg, style);
   let imagePrompt;
 
-  if (sceneRow.polished_prompt && String(sceneRow.polished_prompt).trim()) {
+  const currentStyleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  if (
+    sceneRow.polished_prompt &&
+    String(sceneRow.polished_prompt).trim() &&
+    isStyleSignatureCurrent(sceneRow.polished_prompt_style_signature, currentStyleSignature)
+  ) {
     imagePrompt = String(sceneRow.polished_prompt).trim();
     log.info('[场景四视图] 使用已保存的 polished_prompt，跳过文字AI', { scene_id: sceneId });
   } else {
@@ -354,13 +428,24 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
 
     const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
     const styleZh = (mergedCfg.style.default_style_zh || '').trim();
-    imagePrompt = buildSceneFourViewImagePrompt(fourViewDescription, styleEn, styleZh);
+    imagePrompt = buildSceneFourViewImagePrompt(
+      fourViewDescription,
+      styleEn,
+      styleZh,
+      mergedCfg?.style?.visual_bible || ''
+    );
 
     // 顺带保存，供下次复用
     try {
-      db.prepare('UPDATE scenes SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
-        imagePrompt, new Date().toISOString(), Number(sceneId)
-      );
+      if (sceneColumns.has('polished_prompt_style_signature')) {
+        db.prepare('UPDATE scenes SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
+          imagePrompt, currentStyleSignature || null, new Date().toISOString(), Number(sceneId)
+        );
+      } else {
+        db.prepare('UPDATE scenes SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
+          imagePrompt, new Date().toISOString(), Number(sceneId)
+        );
+      }
     } catch (_) {}
 
     log.info('[场景四视图] Step1 完成，开始Step2生图', { scene_id: sceneId });
@@ -387,8 +472,11 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
  * Step 2: 图片AI根据描述生成单张场景参考图
  */
 async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style) {
+  const sceneColumns = tableColumns(db, 'scenes');
   const sceneRow = db.prepare(
-    'SELECT id, drama_id, location, time, prompt, polished_prompt, polished_prompt_single FROM scenes WHERE id = ? AND deleted_at IS NULL'
+    `SELECT id, drama_id, location, time, prompt, polished_prompt, polished_prompt_single,
+            ${sceneColumns.has('polished_prompt_single_style_signature') ? 'polished_prompt_single_style_signature' : 'NULL AS polished_prompt_single_style_signature'}
+     FROM scenes WHERE id = ? AND deleted_at IS NULL`
   ).get(Number(sceneId));
   if (!sceneRow) return { ok: false, error: 'scene not found' };
   const dramaFull = db.prepare('SELECT id, style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id);
@@ -400,7 +488,12 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style)
 
   // 注意：单图模式只检查 polished_prompt_single，即使 polished_prompt（四宫格）有值也不复用
   // 这样可以兼容老数据（老数据 polished_prompt 是四宫格内容，不能用于单图）
-  if (sceneRow.polished_prompt_single && String(sceneRow.polished_prompt_single).trim()) {
+  const currentStyleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  if (
+    sceneRow.polished_prompt_single &&
+    String(sceneRow.polished_prompt_single).trim() &&
+    isStyleSignatureCurrent(sceneRow.polished_prompt_single_style_signature, currentStyleSignature)
+  ) {
     imagePrompt = String(sceneRow.polished_prompt_single).trim();
     log.info('[场景单图] 使用已保存的 polished_prompt_single，跳过文字AI', { scene_id: sceneId });
   } else {
@@ -432,12 +525,23 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style)
 
     const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
     const styleZh = (mergedCfg.style.default_style_zh || '').trim();
-    imagePrompt = buildSceneSingleImagePrompt(singleViewDescription, styleEn, styleZh);
+    imagePrompt = buildSceneSingleImagePrompt(
+      singleViewDescription,
+      styleEn,
+      styleZh,
+      mergedCfg?.style?.visual_bible || ''
+    );
 
     try {
-      db.prepare('UPDATE scenes SET polished_prompt_single = ?, updated_at = ? WHERE id = ?').run(
-        imagePrompt, new Date().toISOString(), Number(sceneId)
-      );
+      if (sceneColumns.has('polished_prompt_single_style_signature')) {
+        db.prepare('UPDATE scenes SET polished_prompt_single = ?, polished_prompt_single_style_signature = ?, updated_at = ? WHERE id = ?').run(
+          imagePrompt, currentStyleSignature || null, new Date().toISOString(), Number(sceneId)
+        );
+      } else {
+        db.prepare('UPDATE scenes SET polished_prompt_single = ?, updated_at = ? WHERE id = ?').run(
+          imagePrompt, new Date().toISOString(), Number(sceneId)
+        );
+      }
     } catch (_) {}
 
     log.info('[场景单图] Step1 完成，开始Step2生图', { scene_id: sceneId });

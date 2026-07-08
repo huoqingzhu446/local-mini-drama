@@ -42,6 +42,10 @@ function styleTextEnForImage(cfg) {
   return (cfg?.style?.default_style_en || cfg?.style?.default_style || '').trim();
 }
 
+function visualBibleTextForPrompt(cfg) {
+  return (cfg?.style?.visual_bible || '').toString().trim();
+}
+
 function getCharacterExtractionPrompt(cfg) {
   const style = styleTextForCfgLang(cfg);
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
@@ -792,6 +796,7 @@ function getPropExtractionPrompt(cfg) {
   const base = styleTextForCfgLang(cfg);
   const propExtra = (cfg?.style?.default_prop_style || '').toString().trim();
   const style = [base, propExtra].filter(Boolean).join(', ');
+  const visualBible = visualBibleTextForPrompt(cfg);
   const imageRatio = cfg?.style?.default_prop_ratio || cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
     return `You are a professional script prop analyst, skilled at extracting key props with visual characteristics from scripts.
@@ -806,7 +811,7 @@ Your task is to extract and organize all key props that are important to the plo
 5. In "image_prompt" you **must** specify: **one seamless solid-color studio backdrop** (matte, no gradient), **only the prop as the sole subject**, **soft even studio lighting** (readable micro-detail, no dramatic movie lighting), and explicitly forbid people, hands, furniture, floors, tables, scenery, packaging (unless the prop *is* the package), text, logos, dust/debris, or any secondary objects.
 6. **No script leakage in "image_prompt"**: forbid character names, place names, organization names, dialogue, plot beats, and other **original-script identifiers**. Replace with generic visual terms (e.g. "engraved serif lettering" instead of a name). The **only** exception is text that is **visibly printed or engraved on the prop itself** as part of its graphic design—describe that text generically if possible ("small engraved inscription") unless the script explicitly requires exact wording on the object.
 7. **Strict, non-expanding "image_prompt"**: include **only** attributes grounded in the script or the "description" you output—**no** invented accessories, era/brand backstory, mood adjectives unrelated to materials, or "hero story" filler. Prefer a **tight** prompt over a long one.
-- **Style Requirement**: ${style}
+- **Style Requirement**: ${style}${visualBible ? `\n- **Visual Bible**: ${visualBible}` : ''}
 - **Image Ratio**: ${imageRatio}
 
 [Output Format]
@@ -835,7 +840,7 @@ Each object containing:
 6. "image_prompt" 中**必须**写明：**单一无缝纯色棚拍背景**（哑光、无渐变）、**画面中仅有该道具一个主体**、**柔和均匀的棚拍光**（便于看清细节，避免电影化强反差光），并**明确禁止**：人物、手、家具、地面/台面、室内外环境、散落杂物、其他道具、文字商标、包装（除非该道具本身就是包装）、烟尘粒子等任何多余元素。
 7. **image_prompt 禁止泄漏剧本特征**：不得出现剧本人名、地名、组织名、台词、情节梗专有称呼等；一律改写为**泛化视觉描述**（如用 "刻有细小铭文" 而非具体人名）。**唯一例外**：文字**实体印/刻在道具表面**且剧本明确要求还原该字样时，可保留该可见字样；否则用泛化描述。
 8. **image_prompt 严格不扩展**：只写剧本与你在本对象 "description" 中已交代、且**肉眼可见**的外观信息；禁止凭空增加配饰、品牌故事、时代煽情形容词、叙事性铺垫；宁可**短而准**，不要为凑字数扩写。必须自然融入「符合时代的真实物理比例」等项目铁律。
-- **风格要求**：${style}
+- **风格要求**：${style}${visualBible ? `\n- **统一视觉风格圣经**：${visualBible}` : ''}
 - **图片比例**：${imageRatio}
 
 【输出格式】
@@ -850,6 +855,7 @@ Each object containing:
 function getSceneExtractionPrompt(cfg, style) {
   const styleText = (style || '').toString().trim();
   const s = styleText || styleTextForCfgLang(cfg);
+  const visualBible = visualBibleTextForPrompt(cfg);
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
     return `[Task] Extract all unique scene backgrounds from the script
@@ -862,14 +868,14 @@ function getSceneExtractionPrompt(cfg, style) {
    - Must use **English**, no Chinese characters
    - Detailed description of scene, time, atmosphere, style
    - Must explicitly specify "no people, no characters, empty scene"
-   - **Style Requirement**: ${s}
+   - **Style Requirement**: ${s}${visualBible ? `\n   - **Visual Bible**: ${visualBible}` : ''}
    - **Image Ratio**: ${imageRatio}
 
 [Output Format]
 **CRITICAL: Return ONLY a valid JSON array. Do NOT include any markdown code blocks. Start directly with [ and end with ].**
 Each element: location, time, prompt (English image generation prompt for pure background).`;
   }
-  const _sceneLocked = `\n5. **风格要求**：${s}\n   - **图片比例**：${imageRatio}\n\n【输出格式】\n**重要：必须只返回纯JSON数组，不要包含任何markdown代码块。直接以 [ 开头，以 ] 结尾。**\n每个元素包含：location（地点）, time（时间）, prompt（完整的中文图片生成提示词，纯背景，明确说明无人物）。`;
+  const _sceneLocked = `\n5. **风格要求**：${s}${visualBible ? `\n6. **统一视觉风格圣经**：${visualBible}` : ''}\n   - **图片比例**：${imageRatio}\n\n【输出格式】\n**重要：必须只返回纯JSON数组，不要包含任何markdown代码块。直接以 [ 开头，以 ] 结尾。**\n每个元素包含：location（地点）, time（时间）, prompt（完整的中文图片生成提示词，纯背景，明确说明无人物）。`;
   const _sceneOverride = _overrideCache['scene_extraction'];
   if (_sceneOverride) {
     return _sceneOverride + _sceneLocked;
@@ -881,7 +887,7 @@ Each element: location, time, prompt (English image generation prompt for pure b
 2. 为每个场景生成详细的**中文**图片生成提示词（Prompt）
 3. **重要**：场景描述必须是**纯背景**，不能包含人物、角色、动作等元素
 4. **重要**：prompt 字段必须为中文，不得使用英文（风格词如 realistic 可保留）
-5. **风格要求**：${s}
+5. **风格要求**：${s}${visualBible ? `\n6. **统一视觉风格圣经**：${visualBible}` : ''}
    - **图片比例**：${imageRatio}
 
 【输出格式】
@@ -1028,6 +1034,7 @@ function getLockedSuffix(key) {
  */
 function getScenePolishPromptSingle(cfg) {
   const style = styleTextZhForPolish(cfg);
+  const visualBible = visualBibleTextForPrompt(cfg);
   return `# 场景单图参考图生成器
 
 ## 你的身份
@@ -1039,7 +1046,7 @@ function getScenePolishPromptSingle(cfg) {
 - **单张连续画面**：生成一段完整、统一的场景描述，用于绘制**一张**图片
 - **完整展示**：必须包含场景的全貌、主要建筑结构、地面材质、关键陈设、光线/时段、氛围
 - **禁止出现**：角色、人物剪影、文字标注、水印、四宫格/分格/第1格/第2格等字样
-- **真实可信**：建筑风格、材质、植被必须符合场景所属时代和地域${style ? '\n- **画风风格**：' + style : ''}
+- **真实可信**：建筑风格、材质、植被必须符合场景所属时代和地域${style ? '\n- **画风风格**：' + style : ''}${visualBible ? '\n- **统一视觉风格圣经（必须内化进最终提示词）**：' + visualBible : ''}
 
 ### 单图内容设计原则
 - 用最宽/最合适的视角一次性展示整体空间关系，不遗漏边界
@@ -1060,6 +1067,7 @@ function getScenePolishPromptSingle(cfg) {
  */
 function getScenePolishPrompt(cfg) {
   const style = styleTextZhForPolish(cfg);
+  const visualBible = visualBibleTextForPrompt(cfg);
   return `# 场景四视图参考图生成器
 
 ## 你的身份
@@ -1070,7 +1078,7 @@ function getScenePolishPrompt(cfg) {
 ### 提取与统一
 - **完全统一**：四格图中的建筑结构、地面材质、主要陈设、光线/时段必须完全一致，只有焦距与机位角度可变
 - **禁止出现**：角色、人物剪影、文字标注、水印
-- **真实可信**：建筑风格、材质、植被必须符合场景所属时代和地域${style ? '\n- **画风风格**：' + style : ''}
+- **真实可信**：建筑风格、材质、植被必须符合场景所属时代和地域${style ? '\n- **画风风格**：' + style : ''}${visualBible ? '\n- **统一视觉风格圣经（必须内化进最终提示词）**：' + visualBible : ''}
 
 ### 四格内容设计原则
 - 第1格用最宽视角展示整体空间关系，不遗漏边界
@@ -1150,6 +1158,7 @@ Follow ART STYLE / 画风 block at the start of the user message if present.`;
  */
 function getRolePolishPrompt(cfg) {
   const style = styleTextZhForPolish(cfg);
+  const visualBible = visualBibleTextForPrompt(cfg);
   return `# 工业角色参考表标准提示词生成器
 
 ## 你的身份
@@ -1162,7 +1171,7 @@ function getRolePolishPrompt(cfg) {
 - **严禁添加**：场景、环境、叙事性光影特效、情绪形容词堆砌
 - **标志性道具（可选）**：仅当原文明确写出身份关键道具时，写在「SIGNATURE PROP / EQUIPMENT DETAIL」小窗内容里；**不得**凭空加武器或剧情道具
 - **全版面一致**：所有面板同一角色、同一年龄段与妆面；发型、瞳色、服装、体型、比例完全一致
-- **时代匹配**：服装与发型必须符合作品类型所属时代背景${style ? '\n- **画风风格（须贯穿各栏描述，与下长生图侧画风块一致）**：' + style : ''}
+- **时代匹配**：服装与发型必须符合作品类型所属时代背景${style ? '\n- **画风风格（须贯穿各栏描述，与下长生图侧画风块一致）**：' + style : ''}${visualBible ? '\n- **统一视觉风格圣经（必须内化进各栏描述）**：' + visualBible : ''}
 
 ### 版式（强制，减少留白）
 - **顶部标题栏**：浅灰细边框技术标题条，标题使用用户提供的角色名称（或作品内统一称呼），与正文描述一致
@@ -1522,6 +1531,7 @@ Rules:
 function getPropPolishPrompt(cfg) {
   const styleZh = styleTextZhForPolish(cfg);
   const styleEn = styleTextEnForImage(cfg);
+  const visualBible = visualBibleTextForPrompt(cfg);
   if (isEnglish(cfg)) {
     return `# 道具图片提示词生成器
 
@@ -1544,7 +1554,7 @@ function getPropPolishPrompt(cfg) {
 - **光**：柔和均匀的棚拍光（large softbox, even illumination），仅允许**极轻**的接触阴影以锚定体量，**禁止**戏剧轮廓光、强逆光、体积光、镜头眩光、色散、电影级低 key 高反差。
 
 ### 硬性排除
-- 禁止：人物、手、身体任何部分、文字水印、商标（除非剧情指定且为道具本体一部分）、叙事性场景词、**任何专有名词式剧本标签**。${styleZh ? '\n- **画风风格**（仅作用于渲染质感，不改变「单道具 + 纯色底」版式）：' + styleZh : ''}
+- 禁止：人物、手、身体任何部分、文字水印、商标（除非剧情指定且为道具本体一部分）、叙事性场景词、**任何专有名词式剧本标签**。${styleZh ? '\n- **画风风格**（仅作用于渲染质感，不改变「单道具 + 纯色底」版式）：' + styleZh : ''}${visualBible ? '\n- **Visual bible**（must also be reflected in the final prompt without breaking the single-prop studio layout）：' + visualBible : ''}
 
 ### 输出格式
 直接输出**一段**英文 prompt（约 **45–90 词**，能更短则更短），不要解释、标题、列表或引号。
@@ -1574,7 +1584,7 @@ function getPropPolishPrompt(cfg) {
 - **光**：柔和均匀的棚拍光，仅允许**极轻**的接触阴影以锚定体量，**禁止**戏剧轮廓光、强逆光、体积光、镜头眩光、色散、电影级低 key 高反差。
 
 ### 硬性排除
-- 禁止：人物、手、身体任何部分、文字水印、商标（除非剧情指定且为道具本体一部分）、叙事性场景词、**任何专有名词式剧本标签**。${styleZh ? '\n- **画风风格**（仅作用于渲染质感，不改变「单道具 + 纯色底」版式）：' + styleZh : ''}
+- 禁止：人物、手、身体任何部分、文字水印、商标（除非剧情指定且为道具本体一部分）、叙事性场景词、**任何专有名词式剧本标签**。${styleZh ? '\n- **画风风格**（仅作用于渲染质感，不改变「单道具 + 纯色底」版式）：' + styleZh : ''}${visualBible ? '\n- **统一视觉风格圣经**（必须在最终提示词中体现，但不得破坏单道具纯色棚拍版式）：' + visualBible : ''}
 
 ### 输出格式
 直接输出**一段**中文提示词（约 **45–90 字**，能更短则更短），不要解释、标题、列表或引号。

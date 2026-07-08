@@ -1126,7 +1126,7 @@ async function processImageGeneration(db, log, imageGenId) {
 
     // ── Step 3: 计算尺寸 ────────────────────────────────────────────
     const loadConfig = require('../config').loadConfig;
-    const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+    const { mergeCfgStyleWithDrama, buildVisualStyleConstraintBlock, isStyleSignatureCurrent } = require('../utils/dramaStyleMerge');
     let cfg = loadConfig();
     if (row.drama_id) {
       try {
@@ -1167,9 +1167,23 @@ async function processImageGeneration(db, log, imageGenId) {
         const isFrameSpecial = row.frame_type && ['first', 'last', 'key', 'storyboard_first', 'storyboard_last'].includes(String(row.frame_type));
         if (row.storyboard_id && !isFrameSpecial) {
           const sbPolished = db.prepare(
-            'SELECT polished_prompt FROM storyboards WHERE id = ? AND deleted_at IS NULL'
+            `SELECT polished_prompt,
+                    ${(() => {
+                      try {
+                        const cols = new Set(db.prepare('PRAGMA table_info(storyboards)').all().map((c) => c.name));
+                        return cols.has('polished_prompt_style_signature')
+                          ? 'polished_prompt_style_signature'
+                          : 'NULL AS polished_prompt_style_signature';
+                      } catch (_) {
+                        return 'NULL AS polished_prompt_style_signature';
+                      }
+                    })()}
+             FROM storyboards WHERE id = ? AND deleted_at IS NULL`
           ).get(Number(row.storyboard_id));
-          if (sbPolished?.polished_prompt?.trim().length > 10) {
+          if (
+            sbPolished?.polished_prompt?.trim().length > 10 &&
+            isStyleSignatureCurrent(sbPolished.polished_prompt_style_signature, cfg?.style?.style_signature)
+          ) {
             finalPrompt = sbPolished.polished_prompt.trim();
             alreadyPolished = true;
             log.info('[图生] Step3.5 已有 polished_prompt，跳过重复优化', { id: imageGenId, len: finalPrompt.length, elapsed: elapsed() });
@@ -1193,6 +1207,10 @@ async function processImageGeneration(db, log, imageGenId) {
           if (rawSt && rawSt !== styleZh) styleBlockLines.push(`MANDATORY ART STYLE: ${rawSt}.`);
           else if (rawSt && !styleZh) styleBlockLines.push(`MANDATORY ART STYLE: ${rawSt}.`);
           else if (!styleZh && !rawSt) styleBlockLines.push(`MANDATORY ART STYLE: ${style}.`);
+          const visualBibleBlock = buildVisualStyleConstraintBlock(cfg, {
+            language: 'en',
+            heading: 'VISUAL_BIBLE (must stay consistent across characters, props, scenes, and storyboard images):',
+          });
           const assetNames = (reference_context_note || '').split('\n')
             .map((l) => l.replace(/^Image \d+: [^"]*"([^"]+)".*/, '$1'))
             .filter(Boolean).join(', ');
@@ -1231,6 +1249,7 @@ async function processImageGeneration(db, log, imageGenId) {
 
           const userPromptLines = [
             ...styleBlockLines,
+            visualBibleBlock || null,
             `PROMPT: ${row.prompt}`,
             sbDetail?.action     ? `ACTION: ${sbDetail.action}`        : null,
             sbDetail?.dialogue   ? `DIALOGUE: ${sbDetail.dialogue}`    : null,
@@ -1259,9 +1278,22 @@ async function processImageGeneration(db, log, imageGenId) {
             );
             // 回写到 storyboards.polished_prompt（原始 image_prompt 保持不变，供对比查看）
             try {
-              db.prepare('UPDATE storyboards SET polished_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-                finalPrompt, nowIso, Number(row.storyboard_id)
-              );
+              const storyboardCols = new Set((() => {
+                try {
+                  return db.prepare('PRAGMA table_info(storyboards)').all().map((c) => c.name);
+                } catch (_) {
+                  return [];
+                }
+              })());
+              if (storyboardCols.has('polished_prompt_style_signature')) {
+                db.prepare('UPDATE storyboards SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
+                  finalPrompt, (cfg?.style?.style_signature || '').trim() || null, nowIso, Number(row.storyboard_id)
+                );
+              } else {
+                db.prepare('UPDATE storyboards SET polished_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
+                  finalPrompt, nowIso, Number(row.storyboard_id)
+                );
+              }
             } catch (_) {}
             log.info('[图生] Step3.5 prompt 优化完成', {
               id: imageGenId,

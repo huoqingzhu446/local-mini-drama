@@ -5,7 +5,11 @@ const imageClient = require('./imageClient');
 const { aspectRatioToSize } = require('./imageService');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
-const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+const {
+  mergeCfgStyleWithDrama,
+  refreshCfgVisualStyleMetadata,
+  isStyleSignatureCurrent,
+} = require('../utils/dramaStyleMerge');
 const jimengMaterialHubService = require('./jimengMaterialHubService');
 const modelArkAssetConfigService = require('./modelArkAssetConfigService');
 const uploadService = require('./uploadService');
@@ -21,7 +25,7 @@ const {
 function applyStyleOverrideToCfg(cfg, styleOverride) {
   const o = (styleOverride || '').toString().trim();
   if (!o) return cfg;
-  return {
+  return refreshCfgVisualStyleMetadata({
     ...cfg,
     style: {
       ...(cfg?.style || {}),
@@ -29,7 +33,19 @@ function applyStyleOverrideToCfg(cfg, styleOverride) {
       default_style_en: o,
       default_style: o,
     },
-  };
+  });
+}
+
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function columnOrNull(columns, name) {
+  return columns.has(name) ? name : `NULL AS ${name}`;
 }
 
 function appendPrompt(base, extra) {
@@ -320,7 +336,16 @@ function updateCharacter(db, log, characterId, req) {
   if (req.description != null) { updates.push('description = ?'); params.push(req.description); }
   if (req.image_url != null) { updates.push('image_url = ?'); params.push(req.image_url); }
   if (req.local_path != null) { updates.push('local_path = ?'); params.push(req.local_path); }
-  if (req.polished_prompt != null) { updates.push('polished_prompt = ?'); params.push(req.polished_prompt); }
+  if (req.polished_prompt != null) {
+    updates.push('polished_prompt = ?');
+    params.push(req.polished_prompt);
+    const dramaRow = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(charRow.drama_id);
+    const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+    if (tableColumns(db, 'characters').has('polished_prompt_style_signature')) {
+      updates.push('polished_prompt_style_signature = ?');
+      params.push(signature);
+    }
+  }
   if (req.stages != null) { updates.push('stages = ?'); params.push(typeof req.stages === 'string' ? req.stages : JSON.stringify(req.stages)); }
   if (req.negative_prompt !== undefined) { updates.push('negative_prompt = ?'); params.push(req.negative_prompt); }
   if (updates.length === 0) return { ok: true };
@@ -449,16 +474,18 @@ function detectGenderFromDescription(text) {
  * @param {string} [styleEn] default_style_en 或 fallback default_style
  * @param {string} [styleZh] default_style_zh（可与 en 相同；相同时不重复输出英文行）
  */
-function buildFourViewImagePrompt(fourViewDescription, styleEn, styleZh) {
+function buildFourViewImagePrompt(fourViewDescription, styleEn, styleZh, visualBible) {
   const imageLayoutInstruction = promptI18n.getRoleGenerateImagePrompt();
   const zh = (styleZh || '').trim();
   const en = (styleEn || '').trim();
+  const bible = (visualBible || '').trim();
 
   const styleLines = [];
   if (zh) styleLines.push(`【画风·最高优先级】四格统一：${zh}`);
   if (en && en !== zh) styleLines.push(`MANDATORY ART STYLE (all 4 panels): ${en}.`);
   else if (en && !zh) styleLines.push(`MANDATORY ART STYLE (all 4 panels): ${en}.`);
   const styleHeader = styleLines.length ? `${styleLines.join('\n')}\n\n` : '';
+  const bibleHeader = bible ? `【统一视觉风格圣经】\n${bible}\n\n` : '';
 
   const gender = detectGenderFromDescription(fourViewDescription);
   const genderEnforcement = gender === 'MALE'
@@ -472,7 +499,7 @@ function buildFourViewImagePrompt(fourViewDescription, styleEn, styleZh) {
   if (zh || en) tailParts.push(`Reiterate: same art style as above (${en || zh}).`);
   const tail = tailParts.length ? `\n\n---\n\n${tailParts.join(' ')}` : '';
 
-  return `${styleHeader}${imageLayoutInstruction}\n\n---\n\n${fourViewDescription}${tail}`;
+  return `${styleHeader}${bibleHeader}${imageLayoutInstruction}\n\n---\n\n${fourViewDescription}${tail}`;
 }
 
 /**
@@ -518,20 +545,36 @@ async function generateCharacterPromptOnly(db, log, cfg, characterId, modelName,
 
   const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
   const styleZh = (mergedCfg.style.default_style_zh || '').trim();
-  const polishedPrompt = buildFourViewImagePrompt(fourViewDescription, styleEn, styleZh);
+  const polishedPrompt = buildFourViewImagePrompt(
+    fourViewDescription,
+    styleEn,
+    styleZh,
+    mergedCfg?.style?.visual_bible || ''
+  );
+  const charColumns = tableColumns(db, 'characters');
+  const styleSignature = (mergedCfg?.style?.style_signature || '').trim();
 
   // 保存到 characters.polished_prompt
-  db.prepare('UPDATE characters SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
-    polishedPrompt, new Date().toISOString(), Number(characterId)
-  );
+  if (charColumns.has('polished_prompt_style_signature')) {
+    db.prepare('UPDATE characters SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, styleSignature || null, new Date().toISOString(), Number(characterId)
+    );
+  } else {
+    db.prepare('UPDATE characters SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, new Date().toISOString(), Number(characterId)
+    );
+  }
 
   log.info('[四视图提示词] 生成并保存完成', { character_id: characterId, length: polishedPrompt.length });
   return { ok: true, polished_prompt: polishedPrompt };
 }
 
 async function generateCharacterFourViewImage(db, log, cfg, characterId, modelName, style) {
+  const charColumns = tableColumns(db, 'characters');
   const charRow = db.prepare(
-    'SELECT id, drama_id, name, appearance, description, polished_prompt, negative_prompt FROM characters WHERE id = ? AND deleted_at IS NULL'
+    `SELECT id, drama_id, name, appearance, description, polished_prompt, negative_prompt,
+            ${columnOrNull(charColumns, 'polished_prompt_style_signature')}
+     FROM characters WHERE id = ? AND deleted_at IS NULL`
   ).get(Number(characterId));
   if (!charRow) return { ok: false, error: 'character not found' };
   const dramaFull = db.prepare('SELECT id, style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(charRow.drama_id);
@@ -541,7 +584,12 @@ async function generateCharacterFourViewImage(db, log, cfg, characterId, modelNa
   mergedCfg = applyStyleOverrideToCfg(mergedCfg, style);
   let imagePrompt;
 
-  if (charRow.polished_prompt && String(charRow.polished_prompt).trim()) {
+  const currentStyleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  if (
+    charRow.polished_prompt &&
+    String(charRow.polished_prompt).trim() &&
+    isStyleSignatureCurrent(charRow.polished_prompt_style_signature, currentStyleSignature)
+  ) {
     // 直接使用已保存的提示词（用户可能已编辑过）
     imagePrompt = String(charRow.polished_prompt).trim();
     log.info('[四视图] 使用已保存的 polished_prompt，跳过文字AI', { character_id: characterId });
@@ -575,13 +623,24 @@ async function generateCharacterFourViewImage(db, log, cfg, characterId, modelNa
 
     const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
     const styleZh = (mergedCfg.style.default_style_zh || '').trim();
-    imagePrompt = buildFourViewImagePrompt(fourViewDescription, styleEn, styleZh);
+    imagePrompt = buildFourViewImagePrompt(
+      fourViewDescription,
+      styleEn,
+      styleZh,
+      mergedCfg?.style?.visual_bible || ''
+    );
 
     // 顺带保存，供下次复用
     try {
-      db.prepare('UPDATE characters SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
-        imagePrompt, new Date().toISOString(), Number(characterId)
-      );
+      if (charColumns.has('polished_prompt_style_signature')) {
+        db.prepare('UPDATE characters SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
+          imagePrompt, currentStyleSignature || null, new Date().toISOString(), Number(characterId)
+        );
+      } else {
+        db.prepare('UPDATE characters SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
+          imagePrompt, new Date().toISOString(), Number(characterId)
+        );
+      }
     } catch (_) {}
 
     log.info('[四视图] Step1 完成，开始Step2生图', { character_id: characterId });

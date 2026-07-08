@@ -87,6 +87,19 @@ function createStoryboard(db, log, req) {
 function updateStoryboard(db, log, id, req) {
   const row = db.prepare('SELECT id FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(Number(id));
   if (!row) return null;
+  const sbRow = db.prepare(
+    `SELECT e.drama_id
+     FROM storyboards s
+     LEFT JOIN episodes e ON e.id = s.episode_id AND e.deleted_at IS NULL
+     WHERE s.id = ? AND s.deleted_at IS NULL`
+  ).get(Number(id));
+  const storyboardCols = new Set((() => {
+    try {
+      return db.prepare('PRAGMA table_info(storyboards)').all().map((c) => c.name);
+    } catch (_) {
+      return [];
+    }
+  })());
   const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path'];
   const updates = [];
   const params = [];
@@ -105,6 +118,15 @@ function updateStoryboard(db, log, id, req) {
       updates.push(key + ' = ?');
       const val = req[key];
       params.push(val);
+      if (key === 'polished_prompt' && storyboardCols.has('polished_prompt_style_signature')) {
+        const dramaRow = sbRow?.drama_id
+          ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sbRow.drama_id)
+          : null;
+        const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+        const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+        updates.push('polished_prompt_style_signature = ?');
+        params.push(signature);
+      }
     }
   }
   if (updates.length === 0 && req.prop_ids === undefined) return getStoryboardById(db, id);
