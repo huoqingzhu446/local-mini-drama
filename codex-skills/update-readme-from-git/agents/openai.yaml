@@ -1,0 +1,4 @@
+interface:
+  display_name: "更新 README"
+  short_description: "Summarize Git changes and refresh README features"
+  default_prompt: "Use $update-readme-from-git to refresh README.md from recent Git commits and code changes."

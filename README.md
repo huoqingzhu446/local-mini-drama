@@ -12,12 +12,12 @@
 [![stack](https://img.shields.io/badge/Vue3%20%2B%20Node.js%20%2B%20Electron-informational?style=flat-square)](#-项目架构)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/xuanyustudio/LocalMiniDrama/pulls)
 
-**[English](docs/en.md) · 简体中文 · [作者故事](docs/story.md)**
+**[English](docs/en.md) · 简体中文 · 基于 [xuanyustudio/LocalMiniDrama](https://github.com/xuanyustudio/LocalMiniDrama) 二次开发**
 
 [![GitHub](https://img.shields.io/badge/GitHub-xuanyustudio%2FLocalMiniDrama-181717?logo=github&style=flat-square)](https://github.com/xuanyustudio/LocalMiniDrama)
 [![Gitee](https://img.shields.io/badge/Gitee-bi__shang__a%2Flocalminidrama-C71D23?logo=gitee&style=flat-square)](https://gitee.com/bi_shang_a/localminidrama)
 
-[**⬇️ 下载 Release**](https://github.com/xuanyustudio/LocalMiniDrama/releases) · [**🚀 快速开始**](#-快速开始) · [**📖 配置 AI**](docs/configuration.md) · [**🗺 画布文档**](docs/plans/2026-06-15-drama-canvas-workflow-plan.md)
+[**⬇️ 下载 Release**](https://github.com/xuanyustudio/LocalMiniDrama/releases) · [**🚀 快速开始**](#-快速开始) · [**📖 配置 AI**](docs/configuration.md) · [**🎨 自定义风格**](#custom-style) · [**🧪 Codex 辅助开发**](#codex-dev) · [**🗺 画布文档**](docs/plans/2026-06-15-drama-canvas-workflow-plan.md)
 
 </div>
 
@@ -25,10 +25,14 @@
 
 <table>
 <tr>
-<td width="25%" align="center"><b>🔒 本地优先</b><br/>SQLite + 本地文件，素材不上云</td>
-<td width="25%" align="center"><b>🎬 全流程</b><br/>剧本 → 角色/场景 → 分镜 → 视频合成</td>
-<td width="25%" align="center"><b>🤖 多模型</b><br/>通义 / 火山 / 可灵 / Gemini 等</td>
-<td width="25%" align="center"><b>🗺 双视图</b><br/>列表精细编辑 + 画布批量编排</td>
+<td width="33.33%" align="center"><b>🔒 本地优先</b><br/>SQLite + 本地文件，素材不上云</td>
+<td width="33.33%" align="center"><b>🎬 全流程</b><br/>剧本 → 角色/场景 → 分镜 → 视频合成</td>
+<td width="33.33%" align="center"><b>🤖 多模型</b><br/>通义 / 火山 / 可灵 / Gemini 等</td>
+</tr>
+<tr>
+<td width="33.33%" align="center"><b>🎨 自定义风格</b><br/>风格库 + 视觉圣经 + 分域覆盖</td>
+<td width="33.33%" align="center"><b>🧪 Codex 辅助开发</b><br/>角色/道具/场景/分镜图加入 Codex 队列</td>
+<td width="33.33%" align="center"><b>🗺 双视图</b><br/>列表精细编辑 + 画布批量编排</td>
 </tr>
 </table>
 
@@ -36,17 +40,18 @@
 本项目用纯 JavaScript 从零搭建，接入你自己的 AI API，打开即可生成完整 AI 短剧。
 
 > ✅ 无订阅费 · ✅ 数据本地存储 · ✅ 支持多家 AI 服务商 · ✅ 完全开源可二次开发
+>
+> 🔗 本仓库基于上游项目 [xuanyustudio/LocalMiniDrama](https://github.com/xuanyustudio/LocalMiniDrama) 进行二次开发，并在其基础上持续迭代功能。
 
 ---
 
-## 📌 最新动态（v1.2.8）
+## 📌 最新动态（2026-07-07 ~ 2026-07-08）
 
-- 🆕 **Agnes AI 接入**：文本 / 图片 / 视频一键配置，一个 Key 覆盖全流程
-- 🆕 **画布模式增强**：剧本节点、右键菜单、浮动工具栏、画布内新建/删除/整集生成
-- 🆕 **ModelArk 私有资产库**：SD2 角色认证对接火山方舟资产组，AK/SK 与 Bearer 双鉴权
-- 🧪 **Codex 生图辅助模式**：角色/道具/场景/分镜图可加入 Codex 队列，由 Codex 生成候选图后回写项目
-- 🔧 **图床可配置**：`upload_url` / 超时（默认 180s）/ 重试次数写入 `config.yaml`；缓存 URL 失效自动重传
-- 🔧 **提示词优化** · **分镜图片数量上限修复**
+- 🆕 **自定义风格库 + 分域风格覆盖**：支持全局画风、视觉圣经，以及角色 / 场景 / 道具 / 视频四类独立风格补充
+- 🆕 **统一视觉风格基线**：风格变更后可自动识别旧素材是否过期，减少角色、场景、道具、分镜之间的画风漂移
+- 🆕 **提示词风格管理**：可维护可复用的提示词约束模板，并接入通用提示词 / 分镜生成链路
+- 🆕 **图片质量选择 + Codex 生图增强**：新增标准 / 高清两档图片质量，设置已打通模型生图与 Codex 队列
+- 🆕 **分镜参考图升级**：支持 `@图片N` 多图参考、通用视频携带参考图，并可删除单张分镜参考图
 
 完整记录 → **[CHANGELOG.md](CHANGELOG.md)**
 
@@ -147,8 +152,9 @@
 - **一键生成 / 补全并生成**：从角色到合成视频全自动；智能跳过已有内容
 - **失败自动重试**：每步最多 3 次，应对限流；实时进度与错误日志
 - **工程 ZIP 导出/导入** · **全局素材库** · **16:9 / 9:16 / 1:1 画幅**
+- **自定义风格库 / 视觉圣经**：统一整剧风格基线，并支持角色 / 场景 / 道具 / 视频分域覆盖
 - **经典 / 全能分镜** · **`@图片N` 多图参考** · **尾帧衔接** · **导出分镜表 HTML**
-- **图片/视频提示词**全文编辑 · 手动上传/拖拽替换参考图
+- **提示词风格模板**复用 · **图片/视频提示词**全文编辑 · 手动上传/拖拽替换参考图
 
 </details>
 
@@ -167,15 +173,21 @@
 
 界面预览见 [上方截图](#-界面预览) · 📖 [画布工作流完整文档](docs/plans/2026-06-15-drama-canvas-workflow-plan.md)
 
-### 🤖 AI 配置 · 🌓 亮/暗主题 · 自定义提示词
+<a id="custom-style"></a>
 
-三类模型独立配置（图/视频/文本）；一键配置通义/火山；9 类提示词可自定义覆盖。
+### 🤖 AI 配置 · 🌓 亮/暗主题 · 提示词风格 / 自定义风格库
+
+三类模型独立配置（图/视频/文本）；一键配置通义/火山；9 类提示词可自定义覆盖，并支持可复用提示词风格、自定义生成风格库与视觉圣经管理。
 
 ---
+
+<a id="codex-dev"></a>
 
 ## 🧪 Codex 生图辅助模式（开发辅助）
 
 当你在源码开发环境里使用 Codex 时，可以不配置后端图片模型，直接把项目里的图片需求加入本地 Codex 队列，让 Codex 用内置图片生成能力出图，再由页面人工确认使用。
+
+项目级图片质量支持 `标准` / `高清` 两档，质量设置会随 Codex 任务一起入队，方便样片探索和正式资产分开控制。
 
 适合：
 
@@ -372,29 +384,11 @@ LocalMiniDrama/
 **GitHub 仓库建议 Topics**（在仓库 Settings → Topics 添加，便于搜索）：  
 `ai-video` `short-drama` `storyboard` `vue3` `electron` `local-first` `seedance` `comic-drama`
 
----
+## 🔗 项目来源
 
-<details>
-<summary><b>☕ 一杯咖啡的鼓励</b></summary>
+本仓库基于上游项目 [xuanyustudio/LocalMiniDrama](https://github.com/xuanyustudio/LocalMiniDrama) 二次开发。
 
-项目完全开源、无订阅。若对你有帮助，欢迎随缘打赏（自愿，不影响 Issue/PR 处理）：
-
-<table>
-  <tr>
-    <td align="center"><img src="项目截图/weixinpay.jpg" alt="微信赞赏码" width="200"/><br/><sub>微信支付</sub></td>
-    <td align="center"><img src="项目截图/ali.jpg" alt="支付宝收款码" width="200"/><br/><sub>支付宝</sub></td>
-  </tr>
-</table>
-
-</details>
-
----
-
-## 💬 联系 & 社区
-
-[作者故事 & 碎碎念](docs/story.md) · 微信交流 / 用户群（二维码见仓库 `项目截图/` 目录）
-
-> 群二维码约 7 天有效，过期请加作者微信拉群。
+如果你想查看原始版本、历史实现或上游发布信息，可以前往上游仓库；当前仓库在其基础上继续维护和扩展。
 
 ---
 
@@ -406,7 +400,7 @@ LocalMiniDrama/
 
 <div align="center">
 
-**如果这个项目对你有帮助，请点 ⭐ Star —— 这是对作者最大的鼓励！**
+**如果这个项目对你有帮助，欢迎点 ⭐ Star 支持！**
 
 [⬇️ 立即下载](https://github.com/xuanyustudio/LocalMiniDrama/releases) · [📖 快速开始文档](docs/quickstart.md) · [🗺 画布文档](docs/plans/2026-06-15-drama-canvas-workflow-plan.md)
 

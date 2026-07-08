@@ -43,3 +43,9 @@ cd frontweb && npm run build
 - AI content generation requires external API keys (configured via the app's "AI 配置" page), but the app fully functions without them for development/testing purposes.
 - Codex-only image generation workflow is documented in `docs/codex-image-workflow.md`; read it before changing Codex image queue, candidate import, character/prop/scene image buttons, or storyboard main/first/last frame buttons.
 - The backend also serves the built frontend from `frontweb/dist/` at port 5679 when the dist folder exists; during development, use the Vite dev server at port 3013 instead.
+
+### README Update Agent
+
+- When the user explicitly asks to `更新 README.md`、`同步 README`、`补充 README 功能说明` or similar, first read `codex-skills/update-readme-from-git/SKILL.md` and follow that workflow.
+- Before editing, run `codex-skills/update-readme-from-git/scripts/collect_readme_context.sh [revision-range]` to collect the relevant Git commits, changed files, and diffstat.
+- Default scope is the root `README.md` only. Do not update `docs/en.md`, child-package README files, or `CHANGELOG.md` unless the user explicitly asks for those files too.
