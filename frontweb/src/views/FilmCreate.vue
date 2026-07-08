@@ -387,9 +387,12 @@
           </el-select>
           <StylePickerButton
             v-model="generationStyle"
-            :options="generationStyleOptions"
-            @change="() => saveProjectSettings(true)"
+            :options="generationStylePickerOptions"
+            @change="onGenerationStyleChange"
           />
+          <el-button plain :loading="generationStyleLibraryLoading" @click="showGenerationStyleManager = true">
+            风格库
+          </el-button>
           <el-button
             type="primary"
             :loading="pipelineRunning && !pipelinePaused"
@@ -3130,6 +3133,11 @@
       </div>
     </el-drawer>
 
+    <GenerationStyleManagerDrawer
+      v-model="showGenerationStyleManager"
+      @changed="onGenerationStylesChanged"
+    />
+
     <el-dialog v-model="showAiConfigDialog" title="AI 配置" width="90%" destroy-on-close class="ai-config-dialog">
       <AIConfigContent v-if="showAiConfigDialog" />
     </el-dialog>
@@ -3173,18 +3181,20 @@ import { characterLibraryAPI } from '@/api/characterLibrary'
 import { sceneLibraryAPI } from '@/api/sceneLibrary'
 import { propLibraryAPI } from '@/api/propLibrary'
 import { promptStylesAPI } from '@/api/promptStyles'
+import { generationStylesAPI } from '@/api/generationStyles'
 import { generationSettingsAPI } from '@/api/prompts'
 import { parseScriptIntoEpisodes, episodesListToPlainScript } from '@/utils/scriptEpisodes'
 import { exportStoryboardSheet } from '@/utils/exportStoryboardSheet'
 import StylePickerButton from '@/components/StylePickerButton.vue'
+import GenerationStyleManagerDrawer from '@/components/GenerationStyleManagerDrawer.vue'
 import AIConfigContent from '@/components/AIConfigContent.vue'
 import UniversalSegmentOmniAtEditor from '@/components/UniversalSegmentOmniAtEditor.vue'
 import CodexImageJobButton from '@/components/CodexImageJobButton.vue'
 import {
-  generationStyleOptions,
   getStylePromptEn,
   getStylePromptZh,
-  stylePromptMetadataForSave,
+  buildGenerationStyleOptions,
+  generationStyleSelectionMetadata,
   backfillDramaStylePromptMetadataIfNeeded,
 } from '@/constants/styleOptions'
 import { useNavigation } from '@/composables/filmCreate/useNavigation'
@@ -3238,6 +3248,10 @@ const promptStyleForm = reactive({
 const selectedStoryboardPromptStyleIds = ref([])
 const sbPromptDialogStyleIds = ref([])
 const enabledPromptStyleOptions = computed(() => (promptStyleList.value || []).filter((style) => style.enabled))
+const showGenerationStyleManager = ref(false)
+const generationStyleLibraryLoading = ref(false)
+const customGenerationStyles = ref([])
+const generationStylePickerOptions = computed(() => buildGenerationStyleOptions(customGenerationStyles.value))
 
 function normalizePromptStyleIds(ids) {
   const arr = Array.isArray(ids) ? ids : []
@@ -3245,6 +3259,19 @@ function normalizePromptStyleIds(ids) {
   return arr
     .map((id) => Number(id))
     .filter((id) => Number.isFinite(id) && id > 0 && !seen.has(id) && seen.add(id))
+}
+
+async function loadGenerationStyles() {
+  generationStyleLibraryLoading.value = true
+  try {
+    const res = await generationStylesAPI.list({ enabled: 1 })
+    customGenerationStyles.value = Array.isArray(res?.styles) ? res.styles : []
+  } catch (e) {
+    customGenerationStyles.value = []
+    ElMessage.error(e.message || '加载自定义风格失败')
+  } finally {
+    generationStyleLibraryLoading.value = false
+  }
 }
 
 function pruneSelectedPromptStyleIds() {
@@ -3431,15 +3458,14 @@ const projectAspectRatio = ref('16:9')
 const videoClipDuration = ref(5)
 const projectImageQuality = ref('standard')
 const visualBible = ref('')
+const lastAppliedStyleLibraryVisualBible = ref('')
 const projectStyleVersion = computed(() => Number(store.drama?.metadata?.style_version) || 1)
 
 /** 根据 value 查找样式选项对象 */
 function _findStyleOption(val) {
-  for (const group of generationStyleOptions) {
-    const found = group.options.find(o => o.value === val)
-    if (found) return found
-  }
-  return null
+  return generationStylePickerOptions.value
+    .flatMap((group) => group.options || [])
+    .find((o) => o.value === val) || null
 }
 
 /** 传给图像/视频 AI 用的英文 prompt（效果最好）；
@@ -3447,22 +3473,46 @@ function _findStyleOption(val) {
 function getSelectedStylePrompt() {
   const val = (generationStyle.value || '').toString().trim()
   if (!val) return undefined
-  const opt = _findStyleOption(val)
-  if (opt) return opt.promptEn || opt.prompt || val
-  return val
+  return getStylePromptEn(val, customGenerationStyles.value) || val
 }
 
 /** 中文风格描述（用于界面展示或中文场景提示词拼接） */
 function getSelectedStylePromptZh() {
   const val = (generationStyle.value || '').toString().trim()
   if (!val) return undefined
-  const opt = _findStyleOption(val)
-  if (opt) return opt.prompt || opt.promptEn || val
-  return val
+  return getStylePromptZh(val, customGenerationStyles.value) || val
 }
 
-function projectStylePromptMetadata() {
-  return stylePromptMetadataForSave(generationStyle.value)
+function projectGenerationStyleMetadata() {
+  const meta = generationStyleSelectionMetadata(generationStyle.value, customGenerationStyles.value)
+  return {
+    ...meta,
+    visual_bible: visualBible.value.trim() || meta.visual_bible || '',
+  }
+}
+
+async function onGenerationStylesChanged() {
+  await loadGenerationStyles()
+}
+
+function onGenerationStyleChange() {
+  const meta = generationStyleSelectionMetadata(generationStyle.value, customGenerationStyles.value)
+  const nextBible = (meta.visual_bible || '').toString().trim()
+  if (!generationStyle.value) {
+    if (visualBible.value.trim() === lastAppliedStyleLibraryVisualBible.value) {
+      visualBible.value = ''
+    }
+    lastAppliedStyleLibraryVisualBible.value = ''
+  } else if (nextBible && (!visualBible.value.trim() || visualBible.value.trim() === lastAppliedStyleLibraryVisualBible.value)) {
+    visualBible.value = nextBible
+    lastAppliedStyleLibraryVisualBible.value = nextBible
+  } else if (nextBible) {
+    lastAppliedStyleLibraryVisualBible.value = nextBible
+  } else if (!nextBible && visualBible.value.trim() === lastAppliedStyleLibraryVisualBible.value) {
+    visualBible.value = ''
+    lastAppliedStyleLibraryVisualBible.value = ''
+  }
+  saveProjectSettings(true)
 }
 
 function getSelectedImageQuality() {
@@ -5732,7 +5782,7 @@ async function loadDrama() {
   if (!store.dramaId) return
   try {
     let d = await dramaAPI.get(store.dramaId)
-    d = await backfillDramaStylePromptMetadataIfNeeded(dramaAPI, store.dramaId, d)
+    d = await backfillDramaStylePromptMetadataIfNeeded(dramaAPI, store.dramaId, d, customGenerationStyles.value)
     store.setDrama(d)
     // 恢复「故事生成」框的梗概（项目 description 存的是故事梗概）
     storyInput.value = (d.description || '').toString().trim()
@@ -5740,6 +5790,11 @@ async function loadDrama() {
     storyType.value = d.genre || ''
     visualBible.value = (d.metadata && d.metadata.visual_bible) ? String(d.metadata.visual_bible) : ''
     generationStyle.value = d.style || ''
+    {
+      const styleMeta = generationStyleSelectionMetadata(d.style || '', customGenerationStyles.value)
+      const libraryBible = (styleMeta.visual_bible || '').toString().trim()
+      lastAppliedStyleLibraryVisualBible.value = libraryBible && libraryBible === visualBible.value.trim() ? libraryBible : ''
+    }
     projectAspectRatio.value = (d.metadata && d.metadata.aspect_ratio) ? d.metadata.aspect_ratio : '16:9'
     videoClipDuration.value = (d.metadata && d.metadata.video_clip_duration) ? Number(d.metadata.video_clip_duration) : 5
     projectImageQuality.value = (d.metadata && d.metadata.image_quality) ? String(d.metadata.image_quality) : 'standard'
@@ -6050,7 +6105,7 @@ async function saveScriptToBackend(content) {
       genre: storyType.value || undefined,
       style: generationStyle.value || undefined,
       metadata: {
-        ...projectStylePromptMetadata(),
+        ...projectGenerationStyleMetadata(),
         story_style: storyStyle.value || undefined,
         aspect_ratio: projectAspectRatio.value || '16:9',
         image_quality: getSelectedImageQuality(),
@@ -6090,7 +6145,7 @@ async function saveScriptToBackend(content) {
         genre: storyType.value || undefined,
         style: generationStyle.value || undefined,
         metadata: {
-          ...projectStylePromptMetadata(),
+          ...projectGenerationStyleMetadata(),
           story_style: storyStyle.value || undefined,
           aspect_ratio: projectAspectRatio.value || '16:9',
           image_quality: getSelectedImageQuality(),
@@ -6130,7 +6185,7 @@ async function saveScriptToBackend(content) {
       genre: storyType.value || undefined,
       style: generationStyle.value || undefined,
       metadata: {
-        ...projectStylePromptMetadata(),
+        ...projectGenerationStyleMetadata(),
         story_style: storyStyle.value || undefined,
         aspect_ratio: projectAspectRatio.value || '16:9',
         image_quality: getSelectedImageQuality(),
@@ -6161,7 +6216,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     last_frame_use_first_layout_lock: !!lastFrameUseFirstLayoutLock.value,
   }
   if (includeGenerationStyle) {
-    Object.assign(metadata, projectStylePromptMetadata())
+    Object.assign(metadata, projectGenerationStyleMetadata())
   }
   const payload = {
     genre: storyType.value || undefined,
@@ -6182,6 +6237,7 @@ async function onGenerateStory() {
     storyEpisodeCount: storyEpisodeCount.value,
     scriptTitle: scriptTitle.value,
     generationStyle: generationStyle.value,
+    generationStyleMetadata: projectGenerationStyleMetadata(),
     projectAspectRatio: projectAspectRatio.value,
     projectImageQuality: getSelectedImageQuality(),
     store,
@@ -9320,6 +9376,7 @@ function applyRouteToStore() {
     scriptLanguage.value = 'zh'
     scriptStoryboardStyle.value = ''
     visualBible.value = ''
+    lastAppliedStyleLibraryVisualBible.value = ''
     generationStyle.value = ''
     projectImageQuality.value = 'standard'
     selectedStoryboardPromptStyleIds.value = []
@@ -9330,6 +9387,7 @@ function applyRouteToStore() {
 onMounted(async () => {
   loadPipelineConcurrency()
   loadPromptStyles()
+  await loadGenerationStyles()
   applyRouteToStore()
 })
 

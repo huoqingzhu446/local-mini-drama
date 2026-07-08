@@ -1,6 +1,9 @@
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
-const { mergeCfgStyleWithDrama, refreshCfgVisualStyleMetadata } = require('../utils/dramaStyleMerge');
+const {
+  mergeCfgStyleWithDrama,
+  refreshCfgVisualStyleMetadata,
+} = require('../utils/dramaStyleMerge');
 
 function tableColumns(db, table) {
   try {
@@ -92,7 +95,7 @@ function update(db, log, id, updates) {
       const dramaRow = existing.drama_id
         ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(existing.drama_id)
         : null;
-      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.prop_style_signature || null;
       set.push('prompt_style_signature = ?');
       params.push(signature);
     }
@@ -194,7 +197,7 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
     if (propColumns.has('prompt_style_signature')) {
       db.prepare('UPDATE props SET prompt = ?, prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
         generatedPrompt.trim(),
-        (polishCfg?.style?.style_signature || '').trim() || null,
+        (polishCfg?.style?.prop_style_signature || polishCfg?.style?.style_signature || '').trim() || null,
         new Date().toISOString(),
         Number(propId)
       );

@@ -9,6 +9,7 @@ const {
   mergeCfgStyleWithDrama,
   refreshCfgVisualStyleMetadata,
   isStyleSignatureCurrent,
+  scopedStyleTextsFromStyleObject,
 } = require('../utils/dramaStyleMerge');
 const jimengMaterialHubService = require('./jimengMaterialHubService');
 const modelArkAssetConfigService = require('./modelArkAssetConfigService');
@@ -42,6 +43,10 @@ function tableColumns(db, table) {
   } catch (_) {
     return new Set();
   }
+}
+
+function characterScopedStyle(styleObj) {
+  return scopedStyleTextsFromStyleObject(styleObj || {}, 'character');
 }
 
 function columnOrNull(columns, name) {
@@ -85,7 +90,7 @@ function generateCharacterImage(db, log, cfg, characterId, modelName, style, qua
   } else {
     prompt = charRow.name || '';
   }
-  const styleForImage = (effectiveCfg?.style?.default_style_en || effectiveCfg?.style?.default_style || '').trim();
+  const styleForImage = characterScopedStyle(effectiveCfg?.style).en;
   prompt = appendPrompt(prompt, styleForImage);
   if (!(style && String(style).trim())) {
     prompt = appendPrompt(prompt, effectiveCfg?.style?.default_role_style || '');
@@ -340,7 +345,7 @@ function updateCharacter(db, log, characterId, req) {
     updates.push('polished_prompt = ?');
     params.push(req.polished_prompt);
     const dramaRow = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(charRow.drama_id);
-    const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+    const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.character_style_signature || null;
     if (tableColumns(db, 'characters').has('polished_prompt_style_signature')) {
       updates.push('polished_prompt_style_signature = ?');
       params.push(signature);
@@ -543,8 +548,7 @@ async function generateCharacterPromptOnly(db, log, cfg, characterId, modelName,
     fourViewDescription = appearanceText;
   }
 
-  const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-  const styleZh = (mergedCfg.style.default_style_zh || '').trim();
+  const { en: styleEn, zh: styleZh } = characterScopedStyle(mergedCfg.style);
   const polishedPrompt = buildFourViewImagePrompt(
     fourViewDescription,
     styleEn,
@@ -552,7 +556,7 @@ async function generateCharacterPromptOnly(db, log, cfg, characterId, modelName,
     mergedCfg?.style?.visual_bible || ''
   );
   const charColumns = tableColumns(db, 'characters');
-  const styleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  const styleSignature = (mergedCfg?.style?.character_style_signature || mergedCfg?.style?.style_signature || '').trim();
 
   // 保存到 characters.polished_prompt
   if (charColumns.has('polished_prompt_style_signature')) {
@@ -584,7 +588,7 @@ async function generateCharacterFourViewImage(db, log, cfg, characterId, modelNa
   mergedCfg = applyStyleOverrideToCfg(mergedCfg, style);
   let imagePrompt;
 
-  const currentStyleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = (mergedCfg?.style?.character_style_signature || mergedCfg?.style?.style_signature || '').trim();
   if (
     charRow.polished_prompt &&
     String(charRow.polished_prompt).trim() &&
@@ -621,8 +625,7 @@ async function generateCharacterFourViewImage(db, log, cfg, characterId, modelNa
       fourViewDescription = appearanceText;
     }
 
-    const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-    const styleZh = (mergedCfg.style.default_style_zh || '').trim();
+    const { en: styleEn, zh: styleZh } = characterScopedStyle(mergedCfg.style);
     imagePrompt = buildFourViewImagePrompt(
       fourViewDescription,
       styleEn,

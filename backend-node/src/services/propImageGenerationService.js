@@ -6,7 +6,10 @@ const propService = require('./propService');
 const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
 const { aspectRatioToSize } = require('./imageService');
-const { isStyleSignatureCurrent } = require('../utils/dramaStyleMerge');
+const {
+  isStyleSignatureCurrent,
+  scopedStyleTextsFromStyleObject,
+} = require('../utils/dramaStyleMerge');
 
 function appendPrompt(base, extra) {
   const add = (extra || '').toString().trim();
@@ -17,6 +20,10 @@ function appendPrompt(base, extra) {
   const lowerAdd = add.toLowerCase();
   if (lowerCurrent.includes(lowerAdd)) return current;
   return current + ', ' + add;
+}
+
+function propScopedStyle(styleObj) {
+  return scopedStyleTextsFromStyleObject(styleObj || {}, 'prop');
 }
 
 async function processPropImageGeneration(db, log, taskId, propId, opts) {
@@ -50,7 +57,7 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
       },
     });
   }
-  const currentStyleSignature = (cfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = (cfg?.style?.prop_style_signature || cfg?.style?.style_signature || '').trim();
   const propPromptMissing = !prop.prompt || !String(prop.prompt).trim();
   const propPromptStale = !propPromptMissing && !isStyleSignatureCurrent(prop.prompt_style_signature, currentStyleSignature);
   if (propPromptMissing || propPromptStale) {
@@ -67,7 +74,7 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     prop.prompt = refreshed.prompt;
     prop.prompt_style_signature = refreshed.prompt_style_signature || currentStyleSignature;
   }
-  const baseStyle = styleOverride || (cfg?.style?.default_style_en || cfg?.style?.default_style || '');
+  const baseStyle = styleOverride || propScopedStyle(cfg?.style).en;
   const visualBible = (cfg?.style?.visual_bible || '').trim();
   let style = '';
   style = appendPrompt(style, baseStyle);

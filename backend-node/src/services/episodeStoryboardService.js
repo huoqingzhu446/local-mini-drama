@@ -1109,7 +1109,7 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
   // 获取剧集风格和比例（如果未指定，则从 drama metadata / style 中获取完整提示词）
   const drama = db.prepare('SELECT style, metadata FROM dramas WHERE id = ?').get(episode.drama_id);
   const { resolvedStreamStyleFromDrama, mergeCfgStyleWithDrama, buildVisualStyleConstraintBlock } = require('../utils/dramaStyleMerge');
-  const finalStyle = resolvedStreamStyleFromDrama(style, drama);
+  const finalStyle = resolvedStreamStyleFromDrama(style, drama, 'video');
   const styleCfg = mergeCfgStyleWithDrama(cfg, drama || {});
   const visualBibleBlock = buildVisualStyleConstraintBlock(styleCfg, {
     language: promptI18n.isEnglish(cfg) ? 'en' : 'zh',
@@ -1353,7 +1353,7 @@ function rebuildVideoPromptForStoryboard(db, log, storyboardId) {
     ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(row.drama_id)
     : null;
   const { resolvedStreamStyleFromDrama } = require('../utils/dramaStyleMerge');
-  const finalStyle = resolvedStreamStyleFromDrama('', drama) || cfg?.style?.default_style || '';
+  const finalStyle = resolvedStreamStyleFromDrama('', drama, 'video') || cfg?.style?.default_style || '';
 
   let dramaAspectRatio = null;
   try {

@@ -100,7 +100,7 @@
                 <span v-if="d.episodes?.length" class="badge badge-episodes">{{ d.episodes.length }} 集</span>
                 <span v-if="totalStoryboards(d) > 0" class="badge badge-storyboards">{{ totalStoryboards(d) }} 分镜</span>
                 <span v-if="d.metadata?.aspect_ratio" class="badge badge-ratio">{{ d.metadata.aspect_ratio }}</span>
-                <span v-if="d.style" class="badge badge-style">{{ formatStyle(d.style) }}</span>
+                <span v-if="d.style" class="badge badge-style">{{ formatStyle(d) }}</span>
                 <span v-if="d.genre" class="badge badge-genre">{{ formatGenre(d.genre) }}</span>
               </div>
               <p class="project-meta">{{ formatDate(d.updated_at) }}</p>
@@ -649,7 +649,11 @@ function formatStatus(status) {
   return map[status] || status || '草稿'
 }
 
-function formatStyle(style) {
+function formatStyle(dramaOrStyle) {
+  const drama = dramaOrStyle && typeof dramaOrStyle === 'object' ? dramaOrStyle : null
+  const style = drama ? drama.style : dramaOrStyle
+  const metaName = drama?.metadata?.generation_style_name
+  if (metaName && String(metaName).trim()) return String(metaName).trim()
   const map = {
     // 写实 / 影视
     realistic: '写实',

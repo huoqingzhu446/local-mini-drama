@@ -1,5 +1,6 @@
 // 内存覆盖缓存：key => body（仅存可编辑部分，不含锁定的 JSON 格式要求）
 const _overrideCache = {};
+const { scopedStyleTextsFromStyleObject } = require('../utils/dramaStyleMerge');
 
 function loadOverridesIntoCache(overrides) {
   for (const o of overrides) {
@@ -26,20 +27,32 @@ function isEnglish(cfg) {
 
 /** 画风由前端写入 dramas.metadata.style_prompt_zh / style_prompt_en，mergeCfgStyleWithDrama 注入 cfg.style */
 
+function styleTextForScope(cfg, scope) {
+  const scoped = scopedStyleTextsFromStyleObject(cfg?.style || {}, scope);
+  if (isEnglish(cfg)) return scoped.en || scoped.zh;
+  return scoped.zh || scoped.en;
+}
+
+function styleTextZhForScope(cfg, scope) {
+  const scoped = scopedStyleTextsFromStyleObject(cfg?.style || {}, scope);
+  return scoped.zh || scoped.en;
+}
+
+function styleTextEnForScope(cfg, scope) {
+  const scoped = scopedStyleTextsFromStyleObject(cfg?.style || {}, scope);
+  return scoped.en || scoped.zh;
+}
+
 function styleTextForCfgLang(cfg) {
-  const z = (cfg?.style?.default_style_zh || '').trim();
-  const e = (cfg?.style?.default_style_en || '').trim();
-  const d = (cfg?.style?.default_style || '').trim();
-  if (isEnglish(cfg)) return e || d;
-  return z || d;
+  return styleTextForScope(cfg, 'global');
 }
 
 function styleTextZhForPolish(cfg) {
-  return (cfg?.style?.default_style_zh || cfg?.style?.default_style || '').trim();
+  return styleTextZhForScope(cfg, 'global');
 }
 
 function styleTextEnForImage(cfg) {
-  return (cfg?.style?.default_style_en || cfg?.style?.default_style || '').trim();
+  return styleTextEnForScope(cfg, 'global');
 }
 
 function visualBibleTextForPrompt(cfg) {
@@ -47,7 +60,7 @@ function visualBibleTextForPrompt(cfg) {
 }
 
 function getCharacterExtractionPrompt(cfg) {
-  const style = styleTextForCfgLang(cfg);
+  const style = styleTextForScope(cfg, 'character');
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
     return `You are a professional character analyst, skilled at extracting and analyzing character information from scripts.
@@ -793,7 +806,7 @@ JSON字段：
 
 /** 道具提取系统提示词（system prompt，剧本内容由 user prompt 单独传入） */
 function getPropExtractionPrompt(cfg) {
-  const base = styleTextForCfgLang(cfg);
+  const base = styleTextForScope(cfg, 'prop');
   const propExtra = (cfg?.style?.default_prop_style || '').toString().trim();
   const style = [base, propExtra].filter(Boolean).join(', ');
   const visualBible = visualBibleTextForPrompt(cfg);
@@ -854,7 +867,7 @@ Each object containing:
 
 function getSceneExtractionPrompt(cfg, style) {
   const styleText = (style || '').toString().trim();
-  const s = styleText || styleTextForCfgLang(cfg);
+  const s = styleText || styleTextForScope(cfg, 'scene');
   const visualBible = visualBibleTextForPrompt(cfg);
   const imageRatio = cfg?.style?.default_image_ratio || '16:9';
   if (isEnglish(cfg)) {
@@ -1033,7 +1046,7 @@ function getLockedSuffix(key) {
  * 场景单图提示词生成：文本AI将场景描述转化为单图场景参考图提示词（非四宫格）
  */
 function getScenePolishPromptSingle(cfg) {
-  const style = styleTextZhForPolish(cfg);
+  const style = styleTextZhForScope(cfg, 'scene');
   const visualBible = visualBibleTextForPrompt(cfg);
   return `# 场景单图参考图生成器
 
@@ -1066,7 +1079,7 @@ function getScenePolishPromptSingle(cfg) {
  * 场景四视图提示词生成：文本AI将场景描述转化为四格场景参考图提示词
  */
 function getScenePolishPrompt(cfg) {
-  const style = styleTextZhForPolish(cfg);
+  const style = styleTextZhForScope(cfg, 'scene');
   const visualBible = visualBibleTextForPrompt(cfg);
   return `# 场景四视图参考图生成器
 
@@ -1157,7 +1170,7 @@ Follow ART STYLE / 画风 block at the start of the user message if present.`;
  * 角色参考表提示词生成：文本AI将角色外貌描述转化为工业分栏角色参考表绘图提示词（非四宫格）
  */
 function getRolePolishPrompt(cfg) {
-  const style = styleTextZhForPolish(cfg);
+  const style = styleTextZhForScope(cfg, 'character');
   const visualBible = visualBibleTextForPrompt(cfg);
   return `# 工业角色参考表标准提示词生成器
 
@@ -1529,8 +1542,8 @@ Rules:
  * 将道具描述转换为精准的 AI 绘图提示词（单图，突出道具本体）
  */
 function getPropPolishPrompt(cfg) {
-  const styleZh = styleTextZhForPolish(cfg);
-  const styleEn = styleTextEnForImage(cfg);
+  const styleZh = styleTextZhForScope(cfg, 'prop');
+  const styleEn = styleTextEnForScope(cfg, 'prop');
   const visualBible = visualBibleTextForPrompt(cfg);
   if (isEnglish(cfg)) {
     return `# 道具图片提示词生成器

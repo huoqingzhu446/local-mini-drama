@@ -6,6 +6,7 @@ const {
   mergeCfgStyleWithDrama,
   refreshCfgVisualStyleMetadata,
   isStyleSignatureCurrent,
+  scopedStyleTextsFromStyleObject,
 } = require('../utils/dramaStyleMerge');
 
 function applySceneStyleOverride(cfg, styleOverride) {
@@ -29,6 +30,10 @@ function tableColumns(db, table) {
     return new Set();
   }
 }
+
+function sceneScopedStyle(styleObj) {
+  return scopedStyleTextsFromStyleObject(styleObj || {}, 'scene');
+}
 function updateScene(db, log, sceneId, req) {
   const row = db.prepare('SELECT id FROM scenes WHERE id = ? AND deleted_at IS NULL').get(Number(sceneId));
   if (!row) return { ok: false, error: 'scene not found' };
@@ -46,7 +51,7 @@ function updateScene(db, log, sceneId, req) {
       const dramaRow = sceneRow?.drama_id
         ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
         : null;
-      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
       updates.push('polished_prompt_style_signature = ?');
       params.push(signature);
     }
@@ -58,7 +63,7 @@ function updateScene(db, log, sceneId, req) {
       const dramaRow = sceneRow?.drama_id
         ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
         : null;
-      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
       updates.push('polished_prompt_single_style_signature = ?');
       params.push(signature);
     }
@@ -279,15 +284,14 @@ async function generateScenePromptOnly(db, log, cfg, sceneId, modelName, style) 
     return { ok: false, error: 'AI返回内容为空' };
   }
 
-  const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-  const styleZh = (mergedCfg.style.default_style_zh || '').trim();
+  const { en: styleEn, zh: styleZh } = sceneScopedStyle(mergedCfg.style);
   const polishedPrompt = buildSceneFourViewImagePrompt(
     fourViewDescription.trim(),
     styleEn,
     styleZh,
     mergedCfg?.style?.visual_bible || ''
   );
-  const styleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  const styleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
 
   if (sceneColumns.has('polished_prompt_style_signature')) {
     db.prepare('UPDATE scenes SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
@@ -347,15 +351,14 @@ async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, s
     return { ok: false, error: 'AI返回内容为空' };
   }
 
-  const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-  const styleZh = (mergedCfg.style.default_style_zh || '').trim();
+  const { en: styleEn, zh: styleZh } = sceneScopedStyle(mergedCfg.style);
   const polishedPrompt = buildSceneSingleImagePrompt(
     singleViewDescription.trim(),
     styleEn,
     styleZh,
     mergedCfg?.style?.visual_bible || ''
   );
-  const styleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  const styleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
 
   if (sceneColumns.has('polished_prompt_single_style_signature')) {
     db.prepare('UPDATE scenes SET polished_prompt_single = ?, polished_prompt_single_style_signature = ?, updated_at = ? WHERE id = ?').run(
@@ -391,7 +394,7 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
   mergedCfg = applySceneStyleOverride(mergedCfg, style);
   let imagePrompt;
 
-  const currentStyleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
   if (
     sceneRow.polished_prompt &&
     String(sceneRow.polished_prompt).trim() &&
@@ -426,8 +429,7 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
       fourViewDescription = inputText;
     }
 
-    const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-    const styleZh = (mergedCfg.style.default_style_zh || '').trim();
+    const { en: styleEn, zh: styleZh } = sceneScopedStyle(mergedCfg.style);
     imagePrompt = buildSceneFourViewImagePrompt(
       fourViewDescription,
       styleEn,
@@ -488,7 +490,7 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style,
 
   // 注意：单图模式只检查 polished_prompt_single，即使 polished_prompt（四宫格）有值也不复用
   // 这样可以兼容老数据（老数据 polished_prompt 是四宫格内容，不能用于单图）
-  const currentStyleSignature = (mergedCfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
   if (
     sceneRow.polished_prompt_single &&
     String(sceneRow.polished_prompt_single).trim() &&
@@ -523,8 +525,7 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style,
       singleViewDescription = inputText;
     }
 
-    const styleEn = (mergedCfg.style.default_style_en || mergedCfg.style.default_style || '').trim();
-    const styleZh = (mergedCfg.style.default_style_zh || '').trim();
+    const { en: styleEn, zh: styleZh } = sceneScopedStyle(mergedCfg.style);
     imagePrompt = buildSceneSingleImagePrompt(
       singleViewDescription,
       styleEn,

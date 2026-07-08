@@ -549,6 +549,56 @@ function ensureAllColumns(database) {
     database.exec('CREATE INDEX IF NOT EXISTS idx_prompt_style_tags_tag ON prompt_style_tags(tag)');
   } catch (_) {}
 
+  // --- generation_styles（用户自定义全局生成风格 + 角色/场景/道具/视频高级覆盖） ---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS generation_styles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL DEFAULT '',
+      description TEXT,
+      style_prompt_zh TEXT,
+      style_prompt_en TEXT,
+      visual_bible TEXT,
+      visual_bible_struct TEXT,
+      character_style_prompt_zh TEXT,
+      character_style_prompt_en TEXT,
+      scene_style_prompt_zh TEXT,
+      scene_style_prompt_en TEXT,
+      prop_style_prompt_zh TEXT,
+      prop_style_prompt_en TEXT,
+      video_style_prompt_zh TEXT,
+      video_style_prompt_en TEXT,
+      enabled INTEGER DEFAULT 1,
+      sort_order INTEGER DEFAULT 0,
+      created_at TEXT,
+      updated_at TEXT,
+      deleted_at TEXT
+    )`);
+  } catch (_) {}
+  ensureColumns(database, 'generation_styles', [
+    { name: 'name', type: 'TEXT NOT NULL DEFAULT \'\'' },
+    { name: 'description', type: 'TEXT' },
+    { name: 'style_prompt_zh', type: 'TEXT' },
+    { name: 'style_prompt_en', type: 'TEXT' },
+    { name: 'visual_bible', type: 'TEXT' },
+    { name: 'visual_bible_struct', type: 'TEXT' },
+    { name: 'character_style_prompt_zh', type: 'TEXT' },
+    { name: 'character_style_prompt_en', type: 'TEXT' },
+    { name: 'scene_style_prompt_zh', type: 'TEXT' },
+    { name: 'scene_style_prompt_en', type: 'TEXT' },
+    { name: 'prop_style_prompt_zh', type: 'TEXT' },
+    { name: 'prop_style_prompt_en', type: 'TEXT' },
+    { name: 'video_style_prompt_zh', type: 'TEXT' },
+    { name: 'video_style_prompt_en', type: 'TEXT' },
+    { name: 'enabled', type: 'INTEGER DEFAULT 1' },
+    { name: 'sort_order', type: 'INTEGER DEFAULT 0' },
+    { name: 'created_at', type: 'TEXT' },
+    { name: 'updated_at', type: 'TEXT' },
+    { name: 'deleted_at', type: 'TEXT' },
+  ]);
+  try {
+    database.exec('CREATE INDEX IF NOT EXISTS idx_generation_styles_deleted_enabled ON generation_styles(deleted_at, enabled)');
+  } catch (_) {}
+
   // --- storyboard_characters（分镜与角色库的关联表） ---
   try {
     database.exec(`CREATE TABLE IF NOT EXISTS storyboard_characters (

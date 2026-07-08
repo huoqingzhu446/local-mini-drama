@@ -820,14 +820,15 @@ function routes(db, log) {
       let videoRatio = '9:16';
       try {
         const loadConfig = require('../config').loadConfig;
-        const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+        const { mergeCfgStyleWithDrama, scopedStyleTextsFromStyleObject } = require('../utils/dramaStyleMerge');
         let cfg = loadConfig();
         const dr = dramaId
           ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(dramaId)
           : null;
         cfg = mergeCfgStyleWithDrama(cfg, dr || {});
-        styleEn = (cfg?.style?.default_style_en || cfg?.style?.default_style || '').trim();
-        styleZh = (cfg?.style?.default_style_zh || '').trim();
+        const scoped = scopedStyleTextsFromStyleObject(cfg?.style || {}, 'video');
+        styleEn = (scoped.en || '').trim();
+        styleZh = (scoped.zh || '').trim();
         try {
           const meta = dr?.metadata ? JSON.parse(dr.metadata) : {};
           if (meta?.aspect_ratio && String(meta.aspect_ratio).trim()) {

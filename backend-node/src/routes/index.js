@@ -21,6 +21,7 @@ const assetRoutes = require('./assets');
 const audioRoutes = require('./audio');
 const promptOverridesRoutes = require('./promptOverrides');
 const promptStylesRoutes = require('./promptStyles');
+const generationStylesRoutes = require('./generationStyles');
 const sceneModelMapRoutes = require('./sceneModelMap');
 const codexImageJobRoutes = require('./codexImageJobs');
 
@@ -50,6 +51,7 @@ function setupRouter(cfg, db, log) {
   const audio = audioRoutes(db, log, cfg);
   const promptOverrides = promptOverridesRoutes.routes(db, log);
   const promptStyles = promptStylesRoutes.routes(db, log);
+  const generationStyles = generationStylesRoutes.routes(db, log);
   const codexImageJobs = codexImageJobRoutes(db, cfg, log);
 
   // ---------- dramas ----------
@@ -329,6 +331,13 @@ function setupRouter(cfg, db, log) {
   r.get('/prompt-styles/:id', promptStyles.get);
   r.put('/prompt-styles/:id', promptStyles.update);
   r.delete('/prompt-styles/:id', promptStyles.delete);
+
+  // ---------- generation styles ----------
+  r.get('/generation-styles', generationStyles.list);
+  r.post('/generation-styles', generationStyles.create);
+  r.get('/generation-styles/:id', generationStyles.get);
+  r.put('/generation-styles/:id', generationStyles.update);
+  r.delete('/generation-styles/:id', generationStyles.delete);
 
   // ---------- scene model map ----------
   r.get('/scene-model-map', sceneModelMap.list);

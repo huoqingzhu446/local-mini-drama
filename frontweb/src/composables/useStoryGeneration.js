@@ -1,7 +1,6 @@
 import { ElMessage } from 'element-plus'
 import { dramaAPI } from '@/api/drama'
 import { generationAPI } from '@/api/generation'
-import { stylePromptMetadataForSave } from '@/constants/styleOptions'
 import { GEN_RESOURCE } from '@/stores/generationTaskStore'
 
 /**
@@ -16,6 +15,7 @@ export async function runGenerateStoryFromPremise({
   storyEpisodeCount,
   scriptTitle,
   generationStyle,
+  generationStyleMetadata,
   projectAspectRatio,
   projectImageQuality,
   store,
@@ -49,7 +49,7 @@ export async function runGenerateStoryFromPremise({
         genre: storyType || undefined,
         style: generationStyle || undefined,
         metadata: {
-          ...stylePromptMetadataForSave(generationStyle),
+          ...(generationStyleMetadata || {}),
           story_style: storyStyle || undefined,
           aspect_ratio: projectAspectRatio || '16:9',
           image_quality: projectImageQuality || 'standard',
@@ -86,7 +86,7 @@ export async function runGenerateStoryFromPremise({
         genre: storyType || undefined,
         drama_style: generationStyle || undefined,
         metadata: {
-          ...stylePromptMetadataForSave(generationStyle),
+          ...(generationStyleMetadata || {}),
           story_style: storyStyle || undefined,
           aspect_ratio: projectAspectRatio || '16:9',
           image_quality: projectImageQuality || 'standard',

@@ -80,7 +80,11 @@ async function processBackgroundExtraction(db, cfg, log, taskID, episodeId, mode
   let effectiveCfg = cfg;
   try {
     const dramaRow = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(episode.drama_id);
-    const { mergeCfgStyleWithDrama, refreshCfgVisualStyleMetadata } = require('../utils/dramaStyleMerge');
+    const {
+      mergeCfgStyleWithDrama,
+      refreshCfgVisualStyleMetadata,
+      scopedStyleTextsFromStyleObject,
+    } = require('../utils/dramaStyleMerge');
     const paramStyle = (style && String(style).trim()) || '';
     let next = { ...cfg, style: { ...(cfg?.style || {}) } };
     if (dramaRow?.metadata) {
@@ -100,7 +104,8 @@ async function processBackgroundExtraction(db, cfg, log, taskID, episodeId, mode
       });
     }
     effectiveCfg = next;
-    style = paramStyle || effectiveCfg?.style?.default_style_en || effectiveCfg?.style?.default_style || style;
+    const scopedStyle = scopedStyleTextsFromStyleObject(effectiveCfg?.style || {}, 'scene');
+    style = scopedStyle.en || scopedStyle.zh || style;
   } catch (_) {}
 
   const requestedLanguage = normalizeLanguage(language);

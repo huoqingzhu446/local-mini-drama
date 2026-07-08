@@ -8,6 +8,7 @@ const {
   parseDramaMetadata,
   refreshCfgVisualStyleMetadata,
   buildVisualStyleConstraintBlock,
+  scopedStyleTextsFromStyleObject,
 } = require('../utils/dramaStyleMerge');
 const { normalizeImageQuality, codexQualityInstruction } = require('../utils/imageQuality');
 
@@ -19,6 +20,13 @@ const CATEGORY_BY_ENTITY = {
   scene: 'scenes',
   storyboard: 'storyboards',
 };
+
+function styleScopeForEntity(entityType) {
+  if (entityType === 'character') return 'character';
+  if (entityType === 'scene') return 'scene';
+  if (entityType === 'prop') return 'prop';
+  return 'global';
+}
 
 function ensureCodexImageJobsTable(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS codex_image_jobs (
@@ -252,16 +260,10 @@ function getDramaRow(db, dramaId) {
   return db.prepare('SELECT id, title, style, metadata, created_at FROM dramas WHERE id = ? AND deleted_at IS NULL').get(id) || null;
 }
 
-function styleFromDrama(cfg, dramaRow, styleOverride) {
-  const explicit = styleOverride != null ? String(styleOverride).trim() : '';
-  if (explicit) return explicit;
-  const merged = mergeCfgStyleWithDrama(cfg, dramaRow || {});
-  return (
-    merged?.style?.default_style_en ||
-    merged?.style?.default_style ||
-    merged?.style?.default_style_zh ||
-    ''
-  ).toString().trim();
+function styleFromDrama(cfg, dramaRow, styleOverride, scope = 'global') {
+  const merged = mergedDramaStyleCfg(cfg, dramaRow, styleOverride);
+  const scoped = scopedStyleTextsFromStyleObject(merged?.style || {}, scope);
+  return (scoped.en || scoped.zh || '').toString().trim();
 }
 
 function cfgWithStyleOverride(cfg, styleOverride) {
@@ -282,8 +284,13 @@ function mergedDramaStyleCfg(cfg, dramaRow, styleOverride) {
   return cfgWithStyleOverride(mergeCfgStyleWithDrama(cfg, dramaRow || {}), styleOverride);
 }
 
-function styleSignatureFromDrama(cfg, dramaRow, styleOverride) {
-  return (mergedDramaStyleCfg(cfg, dramaRow, styleOverride)?.style?.style_signature || '').toString().trim();
+function styleSignatureFromDrama(cfg, dramaRow, styleOverride, scope = 'global') {
+  const styleCfg = mergedDramaStyleCfg(cfg, dramaRow, styleOverride)?.style || {};
+  if (scope === 'character') return (styleCfg.character_style_signature || styleCfg.style_signature || '').toString().trim();
+  if (scope === 'scene') return (styleCfg.scene_style_signature || styleCfg.style_signature || '').toString().trim();
+  if (scope === 'prop') return (styleCfg.prop_style_signature || styleCfg.style_signature || '').toString().trim();
+  if (scope === 'video') return (styleCfg.video_style_signature || styleCfg.style_signature || '').toString().trim();
+  return (styleCfg.style_signature || '').toString().trim();
 }
 
 function aspectRatioFromDrama(cfg, dramaRow) {
@@ -434,7 +441,8 @@ function pickPromptSource(entityType, row, opts = {}) {
 
 function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
   const source = pickPromptSource(entityType, row, opts);
-  const style = styleFromDrama(cfg, dramaRow, opts.style);
+  const scope = styleScopeForEntity(entityType);
+  const style = styleFromDrama(cfg, dramaRow, opts.style, scope);
   const styleCfg = mergedDramaStyleCfg(cfg, dramaRow, opts.style);
   const visualBibleBlock = buildVisualStyleConstraintBlock(styleCfg, { language: 'en', heading: 'Visual bible (must follow exactly):' });
   const aspectRatio = opts.aspect_ratio || aspectRatioFromDrama(cfg, dramaRow);
@@ -470,7 +478,7 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
     prompt: lines.join('\n'),
     prompt_source: source.key,
     style,
-    style_signature: (styleCfg?.style?.style_signature || '').toString().trim(),
+    style_signature: styleSignatureFromDrama(cfg, dramaRow, opts.style, scope),
     aspect_ratio: aspectRatio,
     quality,
   };

@@ -39,49 +39,17 @@
             </el-col>
             <el-col :span="12">
               <el-form-item label="图片/视频风格">
-                <el-select v-model="infoForm.style" placeholder="选择全剧统一风格" clearable style="width: 100%" @change="saveInfo">
-                  <el-option-group label="写实 / 影视">
-                    <el-option label="写实" value="realistic" />
-                    <el-option label="电影感" value="cinematic" />
-                    <el-option label="纪录片" value="documentary" />
-                    <el-option label="黑色电影" value="noir" />
-                    <el-option label="复古胶片" value="retro film" />
-                    <el-option label="恐怖" value="horror" />
-                  </el-option-group>
-                  <el-option-group label="动漫 / 卡通">
-                    <el-option label="日本动漫" value="anime style" />
-                    <el-option label="欧美漫画" value="comic style" />
-                    <el-option label="卡通" value="cartoon" />
-                  </el-option-group>
-                  <el-option-group label="中国风格">
-                    <el-option label="国画水墨" value="ink wash" />
-                    <el-option label="中国风" value="chinese style" />
-                    <el-option label="古装" value="historical" />
-                    <el-option label="武侠" value="wuxia" />
-                  </el-option-group>
-                  <el-option-group label="绘画艺术">
-                    <el-option label="水彩" value="watercolor" />
-                    <el-option label="油画" value="oil painting" />
-                    <el-option label="素描" value="sketch" />
-                    <el-option label="版画" value="woodblock print" />
-                    <el-option label="印象派" value="impressionist" />
-                  </el-option-group>
-                  <el-option-group label="幻想 / 科幻">
-                    <el-option label="奇幻" value="fantasy" />
-                    <el-option label="暗黑奇幻" value="dark fantasy" />
-                    <el-option label="科幻" value="sci-fi" />
-                    <el-option label="赛博朋克" value="cyberpunk" />
-                    <el-option label="蒸汽朋克" value="steampunk" />
-                    <el-option label="末世废土" value="post-apocalyptic" />
-                  </el-option-group>
-                  <el-option-group label="数字 / 现代">
-                    <el-option label="3D 渲染" value="3d render" />
-                    <el-option label="像素风" value="pixel art" />
-                    <el-option label="低多边形" value="low poly" />
-                    <el-option label="极简" value="minimalist" />
-                    <el-option label="唯美梦幻" value="dreamy" />
-                  </el-option-group>
-                </el-select>
+                <div class="detail-style-row">
+                  <StylePickerButton
+                    v-model="infoForm.style"
+                    :options="generationStylePickerOptions"
+                    style="width: 100%"
+                    @change="saveInfo"
+                  />
+                  <el-button plain :loading="generationStyleLibraryLoading" @click="showGenerationStyleManager = true">
+                    风格库
+                  </el-button>
+                </div>
               </el-form-item>
             </el-col>
             <el-col :span="12">
@@ -551,6 +519,10 @@
     </el-dialog>
 
     <!-- 图片预览 -->
+    <GenerationStyleManagerDrawer
+      v-model="showGenerationStyleManager"
+      @changed="onGenerationStylesChanged"
+    />
     <Teleport to="body">
       <div v-if="previewUrl" class="image-preview-overlay" @click="previewUrl = null">
         <img :src="previewUrl" alt="" class="image-preview-img" @click.stop="previewUrl = null" />
@@ -570,13 +542,20 @@ import { dramaAPI } from '@/api/drama'
 import { characterLibraryAPI } from '@/api/characterLibrary'
 import { sceneLibraryAPI } from '@/api/sceneLibrary'
 import { propLibraryAPI } from '@/api/propLibrary'
+import { generationStylesAPI } from '@/api/generationStyles'
 import { uploadAPI } from '@/api/upload'
 import { imagesAPI } from '@/api/images'
 import { taskAPI } from '@/api/task'
 import { characterAPI } from '@/api/characters'
 import { sceneAPI } from '@/api/scenes'
 import { propAPI } from '@/api/props'
-import { stylePromptMetadataForSave, backfillDramaStylePromptMetadataIfNeeded } from '@/constants/styleOptions'
+import StylePickerButton from '@/components/StylePickerButton.vue'
+import GenerationStyleManagerDrawer from '@/components/GenerationStyleManagerDrawer.vue'
+import {
+  buildGenerationStyleOptions,
+  generationStyleSelectionMetadata,
+  backfillDramaStylePromptMetadataIfNeeded,
+} from '@/constants/styleOptions'
 
 const route = useRoute()
 const { isDark, toggle: toggleTheme } = useTheme()
@@ -876,6 +855,10 @@ async function generateDramaPropImg() {
 const loading = ref(false)
 const drama = ref(null)
 const episodes = ref([])
+const showGenerationStyleManager = ref(false)
+const generationStyleLibraryLoading = ref(false)
+const customGenerationStyles = ref([])
+const generationStylePickerOptions = computed(() => buildGenerationStyleOptions(customGenerationStyles.value))
 const nextEpisodeNumber = computed(() => (
   episodes.value.length > 0
     ? Math.max(...episodes.value.map((e) => Number(e.episode_number) || 0), 0) + 1
@@ -883,6 +866,23 @@ const nextEpisodeNumber = computed(() => (
 ))
 
 const infoForm = reactive({ title: '', description: '', genre: '', style: '', aspect_ratio: '16:9' })
+
+async function loadGenerationStyles() {
+  generationStyleLibraryLoading.value = true
+  try {
+    const res = await generationStylesAPI.list({ enabled: 1 })
+    customGenerationStyles.value = Array.isArray(res?.styles) ? res.styles : []
+  } catch (e) {
+    customGenerationStyles.value = []
+    ElMessage.error(e.message || '加载自定义风格失败')
+  } finally {
+    generationStyleLibraryLoading.value = false
+  }
+}
+
+async function onGenerationStylesChanged() {
+  await loadGenerationStyles()
+}
 
 function assetImageUrl(item) {
   if (!item) return ''
@@ -900,7 +900,7 @@ async function loadDrama() {
   loading.value = true
   try {
     let d = await dramaAPI.get(dramaId)
-    d = await backfillDramaStylePromptMetadataIfNeeded(dramaAPI, dramaId, d)
+    d = await backfillDramaStylePromptMetadataIfNeeded(dramaAPI, dramaId, d, customGenerationStyles.value)
     drama.value = d
     episodes.value = d.episodes || []
     infoForm.title = d.title || ''
@@ -921,11 +921,12 @@ function saveInfo() {
   infoSaveTimer = setTimeout(async () => {
     try {
       await dramaAPI.update(dramaId, { title: infoForm.title, description: infoForm.description })
+      const styleMeta = generationStyleSelectionMetadata(infoForm.style, customGenerationStyles.value)
       await dramaAPI.saveOutline(dramaId, {
         genre: infoForm.genre || undefined,
         style: infoForm.style || undefined,
         metadata: {
-          ...stylePromptMetadataForSave(infoForm.style),
+          ...styleMeta,
           aspect_ratio: infoForm.aspect_ratio || '16:9',
         },
       })
@@ -1203,7 +1204,8 @@ watch(activeResTab, (tab) => {
   else if (tab === 'lib-prop') loadPropList()
 })
 
-onMounted(() => {
+onMounted(async () => {
+  await loadGenerationStyles()
   loadDrama()
   loadCharList()
   if (route.query.importBatch) {
@@ -1341,6 +1343,18 @@ html.light .section-title { color: #18181b; }
 .section-header .section-title { margin-bottom: 0; }
 .section-count { color: #71717a; font-size: 0.85rem; }
 .info-form { max-width: 100%; }
+.detail-style-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  align-items: center;
+}
+.detail-style-row :deep(.style-picker-wrap) {
+  flex: 1;
+}
+.detail-style-row :deep(.style-picker-trigger) {
+  width: 100%;
+}
 .empty-tip { color: #71717a; text-align: center; padding: 32px; }
 
 /* 分集卡片 */
