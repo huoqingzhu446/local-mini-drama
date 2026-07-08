@@ -102,6 +102,7 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
       size: imageSize,
       drama_id: prop.drama_id,
       model: model || undefined,
+      quality: opts?.quality || undefined,
       preferred_provider: preferredProvider || undefined,
       user_negative_prompt: userNeg || undefined,
     });

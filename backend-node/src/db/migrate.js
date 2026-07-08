@@ -608,6 +608,7 @@ function ensureAllColumns(database) {
     { name: 'prompt',                type: 'TEXT' },
     { name: 'negative_prompt',       type: 'TEXT' },
     { name: 'aspect_ratio',          type: 'TEXT' },
+    { name: 'quality',               type: 'TEXT DEFAULT \'standard\'' },
     { name: 'style',                 type: 'TEXT' },
     { name: 'source_snapshot',       type: 'TEXT' },
     { name: 'candidates',            type: 'TEXT' },

@@ -57,6 +57,7 @@ const props = defineProps({
   frameType: { type: String, default: 'main' },
   style: { type: String, default: '' },
   aspectRatio: { type: String, default: '' },
+  quality: { type: String, default: 'standard' },
   disabled: { type: Boolean, default: false }
 })
 
@@ -101,6 +102,7 @@ async function loadLatestJob() {
       entity_type: props.entityType,
       entity_id: props.entityId,
       frame_type: props.frameType || 'main',
+      quality: props.quality || 'standard',
       page: 1,
       page_size: 1
     })
@@ -131,6 +133,7 @@ async function createJob(force = false) {
       frame_type: props.frameType || 'main',
       style: props.style || undefined,
       aspect_ratio: props.aspectRatio || undefined,
+      quality: props.quality || 'standard',
       force
     })
     job.value = res?.job || null
@@ -190,7 +193,7 @@ async function useCandidate(candidate) {
   }
 }
 
-watch(() => [props.entityType, props.entityId, props.frameType], loadLatestJob)
+watch(() => [props.entityType, props.entityId, props.frameType, props.quality], loadLatestJob)
 
 onMounted(loadLatestJob)
 onBeforeUnmount(() => {

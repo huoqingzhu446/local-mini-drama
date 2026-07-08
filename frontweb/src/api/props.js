@@ -16,9 +16,9 @@ export const propAPI = {
   generatePrompt(id, model, style) {
     return request.post(`/props/${id}/generate-prompt`, { model, style })
   },
-  generateImage(id, model, style) {
-    const body = { model, style }
-    if (body.model == null && body.style == null) return request.post(`/props/${id}/generate`)
+  generateImage(id, model, style, quality) {
+    const body = { model, style, quality }
+    if (body.model == null && body.style == null && body.quality == null) return request.post(`/props/${id}/generate`)
     return request.post(`/props/${id}/generate`, body)
   },
   extractFromScript(episodeId) {

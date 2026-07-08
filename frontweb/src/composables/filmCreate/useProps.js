@@ -19,7 +19,7 @@ import { buildExtractTaskMeta, isEpisodeExtractRunning } from '@/composables/use
  * @param {Function} deps.hasAssetImage
  */
 export function useProps(deps) {
-  const { store, dramaId, currentEpisodeId, getSelectedStyle, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage } = deps
+  const { store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageQuality, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage } = deps
   const genStore = useGenerationTaskStore()
 
   function buildPropImageMeta(prop) {
@@ -301,7 +301,7 @@ export function useProps(deps) {
     generatingPropIds.add(prop.id)
     genStore.markRunning(meta)
     try {
-      const res = await propAPI.generateImage(prop.id, undefined, getSelectedStyle(), !!useQuadGrid)
+      const res = await propAPI.generateImage(prop.id, undefined, getSelectedStyle(), getSelectedImageQuality?.())
       const taskId = res?.task_id
       if (taskId) {
         const pollRes = await pollTask(taskId, () => loadDrama(), meta)

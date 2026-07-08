@@ -9,6 +9,7 @@ const taskService = require('./taskService');
 const { loadConfig } = require('../config');
 const { postJSONWithTimeout } = require('./aiClient');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
+const { normalizeImageQuality } = require('../utils/imageQuality');
 
 /** 图生 POST 使用 Node http(s)，默认 10 分钟，避免 undici fetch 大包体/慢链路下模糊失败 */
 const IMAGE_HTTP_TIMEOUT_MS = 600000;
@@ -1399,7 +1400,7 @@ async function callImageApi(db, log, opts) {
     prompt,
     model: preferredModel,
     size,
-    quality,
+    quality: rawQuality,
     drama_id,
     preferred_provider,
     character_id,
@@ -1413,6 +1414,7 @@ async function callImageApi(db, log, opts) {
     user_negative_prompt,
   } = opts;
   const preferredProvider = preferred_provider ?? opts.preferredProvider;
+  const quality = normalizeImageQuality(rawQuality, '');
   const config = getDefaultImageConfig(db, preferredModel, preferredProvider, imageServiceType);
   if (!config) {
     throw new Error('未配置图片模型，请在「AI 配置」中添加 image 类型且已启用的配置');
@@ -1622,11 +1624,12 @@ function createAndGenerateImage(db, log, opts) {
     prompt,
     model,
     size,
-    quality,
+    quality: rawQuality,
     provider,
     user_negative_prompt,
   } = opts;
   const negRow = (user_negative_prompt && String(user_negative_prompt).trim()) || null;
+  const quality = normalizeImageQuality(rawQuality, '');
   const now = new Date().toISOString();
   const dramaIdNum = Number(drama_id) || 0;
   const charIdNum = character_id != null ? Number(character_id) : null;

@@ -94,6 +94,7 @@ function makeDb(tmpDir) {
       drama_id INTEGER,
       provider TEXT,
       prompt TEXT,
+      quality TEXT,
       image_url TEXT,
       local_path TEXT,
       frame_type TEXT,
@@ -132,8 +133,10 @@ test('Codex image job queues, imports, and applies a character candidate', () =>
   });
   assert.equal(created.ok, true);
   assert.equal(created.job.status, 'pending');
+  assert.equal(created.job.quality, 'standard');
   assert.match(created.job.prompt, /张将军/);
   assert.equal(fs.existsSync(created.manifest.manifest_path), true);
+  assert.equal(created.manifest.jobs[0].quality, 'standard');
 
   const candidateSource = path.join(tmpDir, 'candidate.png');
   fs.writeFileSync(candidateSource, Buffer.from('fake image bytes'));
@@ -217,10 +220,13 @@ test('Codex storyboard last-frame candidate creates image_generation and binds t
     entity_type: 'storyboard',
     entity_id: 9,
     frame_type: 'last',
+    quality: 'hd',
   });
   assert.equal(created.ok, true);
   assert.equal(created.job.frame_type, 'last');
+  assert.equal(created.job.quality, 'hd');
   assert.match(created.job.prompt, /尾帧/);
+  assert.match(created.job.prompt, /Quality target: HD/);
 
   const candidateSource = path.join(tmpDir, 'storyboard-last.png');
   fs.writeFileSync(candidateSource, Buffer.from('fake storyboard image bytes'));
@@ -237,11 +243,12 @@ test('Codex storyboard last-frame candidate creates image_generation and binds t
   assert.equal(fs.existsSync(path.join(cfg.storage.local_path, used.local_path)), true);
   assert.ok(used.image_generation_id);
 
-  const imageRow = db.prepare('SELECT storyboard_id, frame_type, local_path, status FROM image_generations WHERE id = ?').get(used.image_generation_id);
+  const imageRow = db.prepare('SELECT storyboard_id, frame_type, local_path, status, quality FROM image_generations WHERE id = ?').get(used.image_generation_id);
   assert.equal(imageRow.storyboard_id, 9);
   assert.equal(imageRow.frame_type, 'storyboard_last');
   assert.equal(imageRow.status, 'completed');
   assert.equal(imageRow.local_path, used.local_path);
+  assert.equal(imageRow.quality, 'hd');
 
   const sbRow = db.prepare('SELECT last_frame_image_id, last_frame_image_url, last_frame_local_path FROM storyboards WHERE id = 9').get();
   assert.equal(sbRow.last_frame_image_id, used.image_generation_id);

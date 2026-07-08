@@ -376,7 +376,7 @@ async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, s
  * Step 2: 图片AI根据描述生成 16:9 四格场景参考图
  * 如果已有 polished_prompt（预生成的完整提示词），直接使用，跳过 Step 1
  */
-async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, style) {
+async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, style, quality) {
   const sceneColumns = tableColumns(db, 'scenes');
   const sceneRow = db.prepare(
     `SELECT id, drama_id, location, time, prompt, polished_prompt,
@@ -457,7 +457,7 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
     prompt: imagePrompt,
     model: modelName || undefined,
     size: '1792x1024',
-    quality: 'standard',
+    quality: quality || 'standard',
     provider: 'openai',
   });
 
@@ -471,7 +471,7 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
  * Step 1: 文本AI将 location/time/prompt 转换为单图场景描述
  * Step 2: 图片AI根据描述生成单张场景参考图
  */
-async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style) {
+async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style, quality) {
   const sceneColumns = tableColumns(db, 'scenes');
   const sceneRow = db.prepare(
     `SELECT id, drama_id, location, time, prompt, polished_prompt, polished_prompt_single,
@@ -553,7 +553,7 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style)
     prompt: imagePrompt,
     model: modelName || undefined,
     size: '1792x1024',
-    quality: 'standard',
+    quality: quality || 'standard',
     provider: 'openai',
   });
 

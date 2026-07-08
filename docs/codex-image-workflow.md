@@ -86,6 +86,8 @@ backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboard
 
    后端创建 `codex_image_jobs` 记录，并刷新 `jobs.json`。
 
+   如果项目页顶部设置了“图片质量”，会一并写入 job 的 `quality` 字段，并注入到 Codex prompt 中。
+
 2. Codex 生成图片
 
    用户说“生成当前 jobs.json 里的所有图片”时，Codex 应：
@@ -107,6 +109,7 @@ backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboard
        {
          "job_id": "cij_xxx",
          "status": "completed",
+         "quality": "hd",
          "candidates": [
            {
              "id": "cij_xxx_v1",

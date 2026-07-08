@@ -9,6 +9,7 @@ const {
   refreshCfgVisualStyleMetadata,
   buildVisualStyleConstraintBlock,
 } = require('../utils/dramaStyleMerge');
+const { normalizeImageQuality, codexQualityInstruction } = require('../utils/imageQuality');
 
 const ENABLED_ENTITY_TYPES = new Set(['character', 'prop', 'scene', 'storyboard']);
 const ACTIVE_STATUSES = new Set(['pending', 'generating', 'completed']);
@@ -31,6 +32,7 @@ function ensureCodexImageJobsTable(db) {
     prompt TEXT,
     negative_prompt TEXT,
     aspect_ratio TEXT,
+    quality TEXT,
     style TEXT,
     style_signature TEXT,
     source_snapshot TEXT,
@@ -50,6 +52,9 @@ function ensureCodexImageJobsTable(db) {
     const cols = new Set(db.prepare('PRAGMA table_info(codex_image_jobs)').all().map((row) => row.name));
     if (!cols.has('style_signature')) {
       db.exec('ALTER TABLE codex_image_jobs ADD COLUMN style_signature TEXT');
+    }
+    if (!cols.has('quality')) {
+      db.exec("ALTER TABLE codex_image_jobs ADD COLUMN quality TEXT DEFAULT 'standard'");
     }
   } catch (_) {}
   db.exec('CREATE INDEX IF NOT EXISTS idx_codex_image_jobs_entity ON codex_image_jobs(entity_type, entity_id, status)');
@@ -170,6 +175,7 @@ function rowToJob(row) {
     prompt: row.prompt || '',
     negative_prompt: row.negative_prompt || '',
     aspect_ratio: row.aspect_ratio || '',
+    quality: normalizeImageQuality(row.quality),
     style: row.style || '',
     style_signature: row.style_signature || '',
     source_snapshot: sourceSnapshot,
@@ -209,6 +215,10 @@ function listJobs(db, query = {}) {
   if (query.frame_type) {
     where.push('frame_type = ?');
     params.push(normalizeFrameType(query.frame_type));
+  }
+  if (query.quality != null && query.quality !== '') {
+    where.push(`COALESCE(NULLIF(quality, ''), 'standard') = ?`);
+    params.push(normalizeImageQuality(query.quality));
   }
   if (query.status) {
     const statuses = String(query.status).split(',').map((x) => x.trim()).filter(Boolean);
@@ -428,6 +438,7 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
   const styleCfg = mergedDramaStyleCfg(cfg, dramaRow, opts.style);
   const visualBibleBlock = buildVisualStyleConstraintBlock(styleCfg, { language: 'en', heading: 'Visual bible (must follow exactly):' });
   const aspectRatio = opts.aspect_ratio || aspectRatioFromDrama(cfg, dramaRow);
+  const quality = normalizeImageQuality(opts.quality);
   const name = entityDisplayName(entityType, row);
   const frameType = normalizeFrameType(opts.frame_type);
   const assetKind = entityType === 'character' ? 'short drama character concept asset'
@@ -443,6 +454,7 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
     style ? `Visual style: ${style}` : '',
     visualBibleBlock || '',
     `Aspect ratio: ${aspectRatio}`,
+    codexQualityInstruction(quality),
     '',
     'Primary request:',
     source.text || name,
@@ -460,19 +472,22 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
     style,
     style_signature: (styleCfg?.style?.style_signature || '').toString().trim(),
     aspect_ratio: aspectRatio,
+    quality,
   };
 }
 
-function activeJobForEntity(db, entityType, entityId, frameType, styleSignature) {
+function activeJobForEntity(db, entityType, entityId, frameType, styleSignature, quality) {
   const styleSig = String(styleSignature || '').trim();
+  const normalizedQuality = normalizeImageQuality(quality);
   const row = db.prepare(
     `SELECT * FROM codex_image_jobs
      WHERE entity_type = ? AND entity_id = ? AND frame_type = ? AND deleted_at IS NULL
        AND status IN ('pending', 'generating', 'completed')
+       AND COALESCE(NULLIF(quality, ''), 'standard') = ?
        ${styleSig ? 'AND style_signature = ?' : ''}
      ORDER BY updated_at DESC, created_at DESC
      LIMIT 1`
-  ).get(...[entityType, Number(entityId), normalizeFrameType(frameType)].concat(styleSig ? [styleSig] : []));
+  ).get(...[entityType, Number(entityId), normalizeFrameType(frameType), normalizedQuality].concat(styleSig ? [styleSig] : []));
   return rowToJob(row);
 }
 
@@ -487,6 +502,7 @@ function jobManifestItem(job) {
     prompt: job.prompt,
     negative_prompt: job.negative_prompt || undefined,
     aspect_ratio: job.aspect_ratio || undefined,
+    quality: job.quality || undefined,
     style: job.style || undefined,
     style_signature: job.style_signature || undefined,
     target_category: CATEGORY_BY_ENTITY[job.entity_type] || job.entity_type,
@@ -538,14 +554,16 @@ function createJob(db, log, cfg, req = {}) {
   const dramaId = Number(req.drama_id || row.drama_id || 0) || null;
   const episodeId = req.episode_id != null ? Number(req.episode_id) || null : (row.episode_id != null ? Number(row.episode_id) : null);
   const dramaRow = getDramaRow(db, dramaId);
+  const quality = normalizeImageQuality(req.quality);
   const built = buildCodexPrompt(entityType, row, dramaRow, cfg, {
     style: req.style,
     aspect_ratio: req.aspect_ratio,
+    quality,
     frame_type: frameType,
   });
   const styleSignature = built.style_signature || '';
   if (!req.force) {
-    const existing = activeJobForEntity(db, entityType, entityId, frameType, styleSignature);
+    const existing = activeJobForEntity(db, entityType, entityId, frameType, styleSignature, quality);
     if (existing) {
       const manifest = writeJobsManifest(db, cfg);
       return { ok: true, job: existing, reused: true, manifest };
@@ -558,12 +576,13 @@ function createJob(db, log, cfg, req = {}) {
     drama: dramaRow ? { id: dramaRow.id, title: dramaRow.title, style: dramaRow.style, metadata: parseDramaMetadata(dramaRow) } : null,
     prompt_source: built.prompt_source,
     style_signature: styleSignature,
+    quality,
   };
   db.prepare(
     `INSERT INTO codex_image_jobs
      (id, entity_type, entity_id, drama_id, episode_id, frame_type, status, prompt, negative_prompt,
-      aspect_ratio, style, style_signature, source_snapshot, candidates, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, '[]', ?, ?)`
+      aspect_ratio, quality, style, style_signature, source_snapshot, candidates, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)`
   ).run(
     id,
     entityType,
@@ -574,6 +593,7 @@ function createJob(db, log, cfg, req = {}) {
     built.prompt,
     row.negative_prompt || null,
     built.aspect_ratio,
+    quality,
     built.style || null,
     styleSignature || null,
     stringifyJson(sourceSnapshot),
@@ -779,6 +799,7 @@ function applyToStoryboard(db, log, job, localPath, imageUrl) {
     image_url: imageUrl || (localPath ? `/static/${localPath}` : ''),
     local_path: localPath || null,
     frame_type: frameTypeForImageGeneration(job.frame_type),
+    quality: job.quality || undefined,
   });
   if (!uploaded?.id) return { ok: false, error: 'failed to bind storyboard image' };
   return { ok: true, image_generation_id: uploaded.id };

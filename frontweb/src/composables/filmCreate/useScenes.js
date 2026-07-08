@@ -21,7 +21,7 @@ import { buildExtractTaskMeta, isEpisodeExtractRunning } from '@/composables/use
  * @param {object} deps.dramaAPI
  */
 export function useScenes(deps) {
-  const { store, dramaId, currentEpisodeId, getSelectedStyle, scriptLanguage, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage, dramaAPI } = deps
+  const { store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageQuality, scriptLanguage, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage, dramaAPI } = deps
   const genStore = useGenerationTaskStore()
 
   function buildSceneImageMeta(scene) {
@@ -320,6 +320,7 @@ export function useScenes(deps) {
         scene_id: scene.id,
         model: undefined,
         style: getSelectedStyle(),
+        quality: getSelectedImageQuality?.(),
         use_quad_grid: !!useQuadGrid
       })
       const taskId = res?.image_generation?.task_id ?? res?.task_id

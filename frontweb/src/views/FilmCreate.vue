@@ -381,6 +381,10 @@
             <el-option label="中文" value="zh" />
             <el-option label="英文" value="en" />
           </el-select>
+          <el-select v-model="projectImageQuality" style="width: 110px" @change="() => saveProjectSettings(false)">
+            <el-option label="标准画质" value="standard" />
+            <el-option label="高清画质" value="hd" />
+          </el-select>
           <StylePickerButton
             v-model="generationStyle"
             :options="generationStyleOptions"
@@ -626,6 +630,7 @@
                         :episode-id="currentEpisodeId"
                         :style="getSelectedStyle()"
                         :aspect-ratio="projectAspectRatio"
+                        :quality="projectImageQuality"
                         @used="onCodexImageUsed"
                         @preview="openImagePreview"
                       />
@@ -736,6 +741,7 @@
                         :episode-id="currentEpisodeId"
                         :style="getSelectedStyle()"
                         :aspect-ratio="projectAspectRatio"
+                        :quality="projectImageQuality"
                         @used="onCodexImageUsed"
                         @preview="openImagePreview"
                       />
@@ -848,6 +854,7 @@
                         :episode-id="currentEpisodeId"
                         :style="getSelectedStyle()"
                         :aspect-ratio="projectAspectRatio"
+                        :quality="projectImageQuality"
                         @used="onCodexImageUsed"
                         @preview="openImagePreview"
                       />
@@ -1457,6 +1464,7 @@
                           frame-type="first"
                           :style="getSelectedStyle()"
                           :aspect-ratio="projectAspectRatio"
+                          :quality="projectImageQuality"
                           @used="onCodexStoryboardImageUsed($event, sb, 'first')"
                           @preview="openImagePreview"
                         />
@@ -1498,6 +1506,7 @@
                           frame-type="last"
                           :style="getSelectedStyle()"
                           :aspect-ratio="projectAspectRatio"
+                          :quality="projectImageQuality"
                           @used="onCodexStoryboardImageUsed($event, sb, 'last')"
                           @preview="openImagePreview"
                         />
@@ -1596,6 +1605,7 @@
                       frame-type="main"
                       :style="getSelectedStyle()"
                       :aspect-ratio="projectAspectRatio"
+                      :quality="projectImageQuality"
                       :disabled="storyboardMainRefLimitReached(sb)"
                       @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                       @preview="openImagePreview"
@@ -1641,6 +1651,7 @@
                       frame-type="main"
                       :style="getSelectedStyle()"
                       :aspect-ratio="projectAspectRatio"
+                      :quality="projectImageQuality"
                       :disabled="storyboardMainRefLimitReached(sb)"
                       @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                       @preview="openImagePreview"
@@ -1712,6 +1723,7 @@
                   frame-type="main"
                   :style="getSelectedStyle()"
                   :aspect-ratio="projectAspectRatio"
+                  :quality="projectImageQuality"
                   :disabled="storyboardMainRefLimitReached(sb)"
                   @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                   @preview="openImagePreview"
@@ -1838,6 +1850,7 @@
                         frame-type="main"
                         :style="getSelectedStyle()"
                         :aspect-ratio="projectAspectRatio"
+                        :quality="projectImageQuality"
                         :disabled="storyboardMainRefLimitReached(sb)"
                         @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                         @preview="openImagePreview"
@@ -1852,6 +1865,7 @@
                           frame-type="first"
                           :style="getSelectedStyle()"
                           :aspect-ratio="projectAspectRatio"
+                          :quality="projectImageQuality"
                           @used="onCodexStoryboardImageUsed($event, sb, 'first')"
                           @preview="openImagePreview"
                         />
@@ -1864,6 +1878,7 @@
                           frame-type="last"
                           :style="getSelectedStyle()"
                           :aspect-ratio="projectAspectRatio"
+                          :quality="projectImageQuality"
                           @used="onCodexStoryboardImageUsed($event, sb, 'last')"
                           @preview="openImagePreview"
                         />
@@ -1908,6 +1923,7 @@
                     frame-type="main"
                     :style="getSelectedStyle()"
                     :aspect-ratio="projectAspectRatio"
+                    :quality="projectImageQuality"
                     @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                     @preview="openImagePreview"
                   />
@@ -3413,6 +3429,7 @@ const isStoryGenRunning = computed(() => {
 const generationStyle = ref('')
 const projectAspectRatio = ref('16:9')
 const videoClipDuration = ref(5)
+const projectImageQuality = ref('standard')
 const visualBible = ref('')
 const projectStyleVersion = computed(() => Number(store.drama?.metadata?.style_version) || 1)
 
@@ -3446,6 +3463,11 @@ function getSelectedStylePromptZh() {
 
 function projectStylePromptMetadata() {
   return stylePromptMetadataForSave(generationStyle.value)
+}
+
+function getSelectedImageQuality() {
+  const val = (projectImageQuality.value || '').toString().trim().toLowerCase()
+  return val === 'hd' ? 'hd' : 'standard'
 }
 
 const scriptContent = computed({
@@ -3540,6 +3562,7 @@ async function onBatchCreateMissingAssetCodexJobs() {
           frame_type: 'main',
           style: getSelectedStyle() || undefined,
           aspect_ratio: projectAspectRatio.value || undefined,
+          quality: getSelectedImageQuality(),
         })
         if (res?.reused) reused += 1
         else created += 1
@@ -3587,6 +3610,7 @@ async function onBatchCreateCodexJobs(type) {
           frame_type: 'main',
           style: getSelectedStyle() || undefined,
           aspect_ratio: projectAspectRatio.value || undefined,
+          quality: getSelectedImageQuality(),
         })
         ok += 1
       } catch (_) {
@@ -3656,6 +3680,7 @@ async function onBatchCreateStoryboardCodexJobs() {
           frame_type: frameType,
           style: getSelectedStyle() || undefined,
           aspect_ratio: projectAspectRatio.value || undefined,
+          quality: getSelectedImageQuality(),
         })
         if (res?.reused) reused += 1
         else created += 1
@@ -3781,7 +3806,7 @@ const {
   openEditCharLibrary, submitEditCharLibrary,
   onDeleteCharLibrary, onAddCharacterToLibrary, onAddCharacterToMaterialLibrary,
   onAddCharFromLibrary, onAddDramaCharToEpisode,
-} = useCharacters({ store, dramaId, currentEpisodeId, getSelectedStyle, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage })
+} = useCharacters({ store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageQuality, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage })
 
 // ── Composable: Props ──────────────────────────────────
 const {
@@ -3804,7 +3829,7 @@ const {
   onDeletePropLibrary, onAddPropToLibrary, onAddPropToMaterialLibrary,
   onAddPropFromLibrary, onAddDramaPropToEpisode,
   doExtractFromRef2,
-} = usePropsComposable({ store, dramaId, currentEpisodeId, getSelectedStyle, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage })
+} = usePropsComposable({ store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageQuality, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage })
 
 // ── Composable: Scenes ─────────────────────────────────
 const {
@@ -3825,7 +3850,7 @@ const {
   openEditSceneLibrary, submitEditSceneLibrary,
   onDeleteSceneLibrary, onAddSceneToLibrary, onAddSceneToMaterialLibrary,
   onAddSceneFromLibrary, onAddDramaSceneToEpisode,
-} = useScenes({ store, dramaId, currentEpisodeId, getSelectedStyle, scriptLanguage, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage, dramaAPI })
+} = useScenes({ store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageQuality, scriptLanguage, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage, dramaAPI })
 
 async function onGenerateCharacters() {
   trackFilmCreateAction('generate_characters_click')
@@ -5359,6 +5384,7 @@ async function onGenerateSbFrameImage(sb, slot) {
       style: getSelectedStyle(),
       frame_type: frameTypeForSlot(slot),
       aspect_ratio: projectAspectRatio.value || '16:9',
+      quality: getSelectedImageQuality(),
       reference_images: refImagesForCreate,
       use_first_frame_layout_lock: isLast ? !!lastFrameUseFirstLayoutLock.value : undefined,
     })
@@ -5448,6 +5474,7 @@ async function onGenerateSbImage(sb, { count = 1 } = {}) {
         style: getSelectedStyle(),
         frame_type: frameType,
         aspect_ratio: projectAspectRatio.value || '16:9',
+        quality: getSelectedImageQuality(),
       }))
     }
     ElMessage.success(createCount > 1 ? `已提交 ${createCount} 张分镜参考图任务` : '分镜图生成任务已提交')
@@ -5715,6 +5742,7 @@ async function loadDrama() {
     generationStyle.value = d.style || ''
     projectAspectRatio.value = (d.metadata && d.metadata.aspect_ratio) ? d.metadata.aspect_ratio : '16:9'
     videoClipDuration.value = (d.metadata && d.metadata.video_clip_duration) ? Number(d.metadata.video_clip_duration) : 5
+    projectImageQuality.value = (d.metadata && d.metadata.image_quality) ? String(d.metadata.image_quality) : 'standard'
     storyboardIncludeNarration.value = !!(d.metadata && d.metadata.storyboard_include_narration)
     storyboardUniversalOmni.value = !!(d.metadata && d.metadata.storyboard_universal_omni)
     storyboardUseFirstLastFrame.value = !!(d.metadata && d.metadata.storyboard_use_first_last_frame)
@@ -5956,6 +5984,7 @@ async function onRegenAffectedSbImages(assetKey, affectedBoards) {
           style: getSelectedStyle(),
           frame_type: frameTypeForCreate,
           aspect_ratio: projectAspectRatio.value || '16:9',
+          quality: getSelectedImageQuality(),
         })
         if (res?.task_id) {
           const pollRes = await new Promise((resolve) => {
@@ -6024,6 +6053,7 @@ async function saveScriptToBackend(content) {
         ...projectStylePromptMetadata(),
         story_style: storyStyle.value || undefined,
         aspect_ratio: projectAspectRatio.value || '16:9',
+        image_quality: getSelectedImageQuality(),
         visual_bible: visualBible.value.trim() || undefined,
       },
     })
@@ -6063,6 +6093,7 @@ async function saveScriptToBackend(content) {
           ...projectStylePromptMetadata(),
           story_style: storyStyle.value || undefined,
           aspect_ratio: projectAspectRatio.value || '16:9',
+          image_quality: getSelectedImageQuality(),
           visual_bible: visualBible.value.trim() || undefined,
         },
       }).catch(() => {})
@@ -6102,6 +6133,7 @@ async function saveScriptToBackend(content) {
         ...projectStylePromptMetadata(),
         story_style: storyStyle.value || undefined,
         aspect_ratio: projectAspectRatio.value || '16:9',
+        image_quality: getSelectedImageQuality(),
         visual_bible: visualBible.value.trim() || undefined,
       },
     }).catch(() => {})
@@ -6120,6 +6152,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     story_style: storyStyle.value || undefined,
     aspect_ratio: projectAspectRatio.value || '16:9',
     video_clip_duration: videoClipDuration.value || 5,
+    image_quality: getSelectedImageQuality(),
     visual_bible: visualBible.value.trim() || undefined,
     storyboard_include_narration: !!storyboardIncludeNarration.value,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
@@ -6150,6 +6183,7 @@ async function onGenerateStory() {
     scriptTitle: scriptTitle.value,
     generationStyle: generationStyle.value,
     projectAspectRatio: projectAspectRatio.value,
+    projectImageQuality: getSelectedImageQuality(),
     store,
     router,
     route,
@@ -8044,6 +8078,7 @@ async function startBatchImageGeneration() {
             style: getSelectedStyle(),
             frame_type: frameTypeForCreate,
             aspect_ratio: projectAspectRatio.value || '16:9',
+            quality: getSelectedImageQuality(),
           })
           if (res?.task_id) {
             const pollRes = await pollTask(res.task_id, () => loadSingleStoryboardMedia(sb.id))
@@ -8677,7 +8712,7 @@ async function runOneClickPipeline(textOnly = false) {
         try {
           const stepName = '角色图 ' + (char.name || char.id)
           const ok = await pipelineWithRetry(stepName, async () => {
-            const res = await characterAPI.generateImage(char.id, undefined, style)
+            const res = await characterAPI.generateImage(char.id, undefined, style, getSelectedImageQuality())
             const taskId = res?.image_generation?.task_id ?? res?.task_id
             if (taskId) {
               const result = await pollTaskWithPause(taskId, () => loadDrama())
@@ -8713,7 +8748,7 @@ async function runOneClickPipeline(textOnly = false) {
           const stepName = '场景图 ' + (scene.location || scene.id)
           const ok = await pipelineWithRetry(stepName, async () => {
             const useQuad = !!sceneUseQuadGrid.value
-            const res = await sceneAPI.generateImage({ scene_id: scene.id, model: undefined, style, use_quad_grid: useQuad })
+            const res = await sceneAPI.generateImage({ scene_id: scene.id, model: undefined, style, quality: getSelectedImageQuality(), use_quad_grid: useQuad })
             const taskId = res?.image_generation?.task_id ?? res?.task_id
             if (taskId) {
               const result = await pollTaskWithPause(taskId, () => loadDrama())
@@ -8748,7 +8783,7 @@ async function runOneClickPipeline(textOnly = false) {
         try {
           const stepName = '道具图 ' + (prop.name || prop.id)
           const ok = await pipelineWithRetry(stepName, async () => {
-            const res = await propAPI.generateImage(prop.id, undefined, style)
+            const res = await propAPI.generateImage(prop.id, undefined, style, getSelectedImageQuality())
             const taskId = res?.image_generation?.task_id ?? res?.task_id
             if (taskId) {
               const result = await pollTaskWithPause(taskId, () => loadDrama())
@@ -8809,6 +8844,7 @@ async function runOneClickPipeline(textOnly = false) {
               style,
               frame_type: frameTypeForCreate,
               aspect_ratio: projectAspectRatio.value || '16:9',
+              quality: getSelectedImageQuality(),
             })
             if (res?.task_id) {
               const result = await pollTaskWithPause(res.task_id, () => loadSingleStoryboardMedia(sb.id))
@@ -8979,7 +9015,7 @@ async function runRepairPipeline() {
         await checkPause()
         const stepName = '角色图 ' + (char.name || char.id)
         const ok = await pipelineWithRetry(stepName, async () => {
-          const res = await characterAPI.generateImage(char.id, undefined, style)
+          const res = await characterAPI.generateImage(char.id, undefined, style, getSelectedImageQuality())
           const taskId = res?.image_generation?.task_id ?? res?.task_id
           if (taskId) {
             const result = await pollTaskWithPause(taskId, () => loadDrama())
@@ -9028,7 +9064,7 @@ async function runRepairPipeline() {
         const stepName = '场景图 ' + (scene.location || scene.id)
         const ok = await pipelineWithRetry(stepName, async () => {
           const useQuad = !!sceneUseQuadGrid.value
-          const res = await sceneAPI.generateImage({ scene_id: scene.id, model: undefined, style, use_quad_grid: useQuad })
+          const res = await sceneAPI.generateImage({ scene_id: scene.id, model: undefined, style, quality: getSelectedImageQuality(), use_quad_grid: useQuad })
           const taskId = res?.image_generation?.task_id ?? res?.task_id
           if (taskId) {
             const result = await pollTaskWithPause(taskId, () => loadDrama())
@@ -9078,7 +9114,7 @@ async function runRepairPipeline() {
         try {
           const stepName = '道具图 ' + (prop.name || prop.id)
           const ok = await pipelineWithRetry(stepName, async () => {
-            const res = await propAPI.generateImage(prop.id, undefined, style)
+            const res = await propAPI.generateImage(prop.id, undefined, style, getSelectedImageQuality())
             const taskId = res?.image_generation?.task_id ?? res?.task_id
             if (taskId) {
               const result = await pollTaskWithPause(taskId, () => loadDrama())
@@ -9167,6 +9203,7 @@ async function runRepairPipeline() {
             style,
             frame_type: frameTypeForCreate,
             aspect_ratio: projectAspectRatio.value || '16:9',
+            quality: getSelectedImageQuality(),
           })
           if (res?.task_id) {
             const result = await pollTaskWithPause(res.task_id, () => loadSingleStoryboardMedia(sb.id))
@@ -9284,6 +9321,7 @@ function applyRouteToStore() {
     scriptStoryboardStyle.value = ''
     visualBible.value = ''
     generationStyle.value = ''
+    projectImageQuality.value = 'standard'
     selectedStoryboardPromptStyleIds.value = []
     sbPromptDialogStyleIds.value = []
   }

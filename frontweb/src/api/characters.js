@@ -4,17 +4,18 @@ export const characterAPI = {
   get(characterId) {
     return request.get(`/characters/${characterId}`)
   },
-  generateImage(characterId, model, style) {
-    return request.post(`/characters/${characterId}/generate-image`, { model, style })
+  generateImage(characterId, model, style, quality) {
+    return request.post(`/characters/${characterId}/generate-image`, { model, style, quality })
   },
   generatePrompt(characterId, model, style) {
     return request.post(`/characters/${characterId}/generate-prompt`, { model, style })
   },
-  batchGenerateImages(characterIds, model, style) {
+  batchGenerateImages(characterIds, model, style, quality) {
     return request.post('/characters/batch-generate-images', {
       character_ids: characterIds.map(String),
       model,
-      style
+      style,
+      quality
     })
   },
   update(characterId, data) {

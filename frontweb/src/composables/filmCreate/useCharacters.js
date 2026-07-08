@@ -21,7 +21,7 @@ import { buildExtractTaskMeta, isEpisodeExtractRunning } from '@/composables/use
  * @param {Function} deps.hasAssetImage - 判断资源是否有图片
  */
 export function useCharacters(deps) {
-  const { store, dramaId, currentEpisodeId, getSelectedStyle, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage } = deps
+  const { store, dramaId, currentEpisodeId, getSelectedStyle, getSelectedImageQuality, loadDrama, pollTask, pollUntilResourceHasImage, hasAssetImage } = deps
   const genStore = useGenerationTaskStore()
 
   function buildCharImageMeta(char) {
@@ -339,7 +339,7 @@ export function useCharacters(deps) {
     generatingCharIds.add(char.id)
     genStore.markRunning(meta)
     try {
-      const res = await characterAPI.generateImage(char.id, undefined, getSelectedStyle())
+      const res = await characterAPI.generateImage(char.id, undefined, getSelectedStyle(), getSelectedImageQuality?.())
       const taskId = res?.image_generation?.task_id ?? res?.task_id
       if (taskId) {
         const pollRes = await pollTask(taskId, () => loadDrama(), meta)

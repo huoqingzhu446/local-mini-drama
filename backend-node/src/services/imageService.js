@@ -36,6 +36,7 @@ function rowToItem(r) {
     provider: r.provider,
     prompt: r.prompt,
     model: r.model,
+    quality: normalizeImageQuality(r.quality, ''),
     image_url: r.image_url,
     local_path: r.local_path,
     status: r.status,
@@ -61,6 +62,7 @@ const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
+const { normalizeImageQuality } = require('../utils/imageQuality');
 
 const LAST_FRAME_TYPES = new Set(['last', 'storyboard_last', 'tail', 'last_frame']);
 const MAX_STORYBOARD_REFERENCE_IMAGES = 6;
@@ -595,6 +597,7 @@ function create(db, log, req) {
     });
   }
   const mergedPrompt = mergePromptWithStyle(req.prompt || '', req.style);
+  const quality = normalizeImageQuality(req.quality, '');
   // 优先使用请求中直接传入的 size；其次将 aspect_ratio 转成 size；未提供则存 NULL 留给 processImageGeneration 从 drama 元数据读取
   let reqSize = req.size || null;
   if (!reqSize && req.aspect_ratio) {
@@ -602,8 +605,8 @@ function create(db, log, req) {
   }
   const useFirstFrameLayoutLock = resolveUseFirstFrameLayoutLock(req, frameType);
   const info = db.prepare(
-    `INSERT INTO image_generations (storyboard_id, drama_id, scene_id, provider, prompt, negative_prompt, model, frame_type, reference_images, use_first_frame_layout_lock, size, status, task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`
+    `INSERT INTO image_generations (storyboard_id, drama_id, scene_id, provider, prompt, negative_prompt, model, frame_type, reference_images, use_first_frame_layout_lock, size, quality, status, task_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`
   ).run(
     req.storyboard_id ?? null,
     Number(req.drama_id) || 0,
@@ -616,6 +619,7 @@ function create(db, log, req) {
     refImagesJson,
     useFirstFrameLayoutLock,
     reqSize,
+    quality || null,
     taskId,
     now,
     now
@@ -1684,9 +1688,10 @@ function upload(db, log, req) {
   }
   const now = new Date().toISOString();
   const frameType = req.frame_type ?? null;
+  const quality = normalizeImageQuality(req.quality, '');
   const info = db.prepare(
-    `INSERT INTO image_generations (storyboard_id, drama_id, provider, prompt, image_url, local_path, frame_type, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`
+    `INSERT INTO image_generations (storyboard_id, drama_id, provider, prompt, image_url, local_path, frame_type, quality, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`
   ).run(
     req.storyboard_id ?? null,
     Number(req.drama_id) || 0,
@@ -1695,6 +1700,7 @@ function upload(db, log, req) {
     req.image_url || '',
     req.local_path ?? null,
     frameType,
+    quality || null,
     now,
     now
   );

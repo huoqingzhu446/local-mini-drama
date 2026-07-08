@@ -50,6 +50,7 @@ function makeDb() {
       drama_id INTEGER,
       provider TEXT,
       prompt TEXT,
+      quality TEXT,
       image_url TEXT,
       local_path TEXT,
       frame_type TEXT,

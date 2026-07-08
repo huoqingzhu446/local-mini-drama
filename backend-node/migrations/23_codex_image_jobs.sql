@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS codex_image_jobs (
   prompt TEXT,
   negative_prompt TEXT,
   aspect_ratio TEXT,
+  quality TEXT DEFAULT 'standard',
   style TEXT,
   source_snapshot TEXT,
   candidates TEXT,

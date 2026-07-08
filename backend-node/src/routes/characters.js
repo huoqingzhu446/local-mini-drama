@@ -80,7 +80,8 @@ function routes(db, cfg, log, uploadService) {
           cfg,
           characterIds,
           body.model,
-          body.style
+          body.style,
+          body.quality
         );
         if (!out.ok) {
           return response.badRequest(res, out.error);
@@ -103,7 +104,8 @@ function routes(db, cfg, log, uploadService) {
           cfg,
           req.params.id,
           body.model,
-          body.style
+          body.style,
+          body.quality
         );
         if (!out.ok) {
           if (out.error === 'character not found') return response.notFound(res, '角色不存在');
