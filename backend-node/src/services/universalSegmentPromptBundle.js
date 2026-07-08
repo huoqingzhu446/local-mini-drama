@@ -7,6 +7,7 @@
  * @returns {{ ok:true, userPrompt:string, durationLabel:string, durationSec:number, sbId:number, episodeId:number, storyboardNumber:number } | { ok:false, code:'not_found'|'bad_request', message:string }}
  */
 const promptStyleService = require('./promptStyleService');
+const MAX_STORYBOARD_REFERENCE_IMAGES = 6;
 
 function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   const bodyIn = reqBody && typeof reqBody === 'object' ? reqBody : {};
@@ -17,7 +18,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
       action, dialogue, narration, result, atmosphere,
       image_prompt, polished_prompt, video_prompt, universal_segment_text,
       shot_type, angle, angle_h, angle_v, angle_s, movement, lighting_style, depth_of_field,
-      characters, image_url, local_path, duration, segment_index, segment_title
+      characters, image_url, local_path, first_frame_image_id, duration, segment_index, segment_title
      FROM storyboards WHERE id = ? AND deleted_at IS NULL`
   ).get(sbId);
   if (!sb) return { ok: false, code: 'not_found', message: '分镜不存在' };
@@ -231,30 +232,50 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     if (!hasMediaRef(pr)) continue;
     pushSlot('道具', String(pr.name || '道具').trim());
   }
-  let storyboardMainRef = null;
-  if (hasMediaRef(sb)) {
-    storyboardMainRef = { image_url: sb.image_url, local_path: sb.local_path };
-  } else {
-    try {
-      storyboardMainRef = db
-        .prepare(
-          `SELECT image_url, local_path
-           FROM image_generations
-           WHERE storyboard_id = ?
-             AND deleted_at IS NULL
-             AND status = 'completed'
-             AND (image_url IS NOT NULL OR local_path IS NOT NULL)
-             AND (frame_type IS NULL OR frame_type = '' OR frame_type = 'main')
-           ORDER BY updated_at DESC, created_at DESC, id DESC
-           LIMIT 1`
-        )
-        .get(sbId) || null;
-    } catch (_) {
-      storyboardMainRef = null;
+  const storyboardMainRefs = [];
+  const storyboardRefSeen = new Set();
+  const pushStoryboardRef = (row) => {
+    if (!hasMediaRef(row)) return;
+    const key = row.id != null
+      ? `id:${row.id}`
+      : row.local_path
+        ? `local:${String(row.local_path).trim()}`
+        : `url:${String(row.image_url || '').trim().replace(/\?.*$/, '')}`;
+    if (!key || storyboardRefSeen.has(key)) return;
+    storyboardRefSeen.add(key);
+    storyboardMainRefs.push(row);
+  };
+  try {
+    const mainRows = db
+      .prepare(
+        `SELECT id, image_url, local_path
+         FROM image_generations
+         WHERE storyboard_id = ?
+           AND deleted_at IS NULL
+           AND status = 'completed'
+           AND (image_url IS NOT NULL OR local_path IS NOT NULL)
+           AND (frame_type IS NULL OR frame_type = '' OR frame_type = 'main')
+         ORDER BY updated_at DESC, created_at DESC, id DESC`
+      )
+      .all(sbId) || [];
+    if (sb.first_frame_image_id != null) {
+      const bound = mainRows.find((row) => Number(row.id) === Number(sb.first_frame_image_id));
+      if (bound) pushStoryboardRef(bound);
+    }
+    if (hasMediaRef(sb)) {
+      pushStoryboardRef({ image_url: sb.image_url, local_path: sb.local_path });
+    }
+    for (const row of mainRows) {
+      pushStoryboardRef(row);
+      if (storyboardMainRefs.length >= MAX_STORYBOARD_REFERENCE_IMAGES) break;
+    }
+  } catch (_) {
+    if (hasMediaRef(sb)) {
+      pushStoryboardRef({ image_url: sb.image_url, local_path: sb.local_path });
     }
   }
-  if (hasMediaRef(storyboardMainRef)) {
-    pushSlot('分镜图', `分镜${sb.storyboard_number != null ? `#${sb.storyboard_number}` : ''}整体画面锚点`);
+  for (let i = 0; i < storyboardMainRefs.length && i < MAX_STORYBOARD_REFERENCE_IMAGES; i++) {
+    pushSlot('分镜图', `分镜${sb.storyboard_number != null ? `#${sb.storyboard_number}` : ''}整体画面锚点${storyboardMainRefs.length > 1 ? i + 1 : ''}`);
   }
 
   const charSlots = slots.filter((s) => s.kind === '角色');

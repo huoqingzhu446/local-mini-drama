@@ -22,6 +22,9 @@ function routes(db, cfg, log) {
         response.created(res, rec);
       } catch (err) {
         log.error('images create', { error: err.message });
+        if (err?.code === 'storyboard_ref_limit') {
+          return response.badRequest(res, err.message);
+        }
         response.internalError(res, err.message);
       }
     },
@@ -100,6 +103,9 @@ function routes(db, cfg, log) {
         response.created(res, item);
       } catch (err) {
         log.error('images upload', { error: err.message });
+        if (err?.code === 'storyboard_ref_limit') {
+          return response.badRequest(res, err.message);
+        }
         response.internalError(res, err.message);
       }
     },

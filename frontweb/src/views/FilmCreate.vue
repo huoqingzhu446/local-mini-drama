@@ -1253,20 +1253,25 @@
                     </div>
                   </div>
                 </div>
-                <div v-if="getSbStoryboardImageReference(sb)" class="sb-thumb-row">
-                  <span class="sb-thumb-label">分镜图</span>
+                <div v-if="getSbStoryboardImageReferences(sb).length" class="sb-thumb-row">
+                  <div class="sb-thumb-head">
+                    <span class="sb-thumb-label">分镜图</span>
+                    <span class="sb-thumb-counter">{{ getSbStoryboardImageReferences(sb).length }}/{{ MAX_STORYBOARD_REFERENCE_IMAGES }}</span>
+                  </div>
                   <div class="sb-thumb-list">
                     <div
+                      v-for="(ref, refIdx) in getSbStoryboardImageReferences(sb)"
+                      :key="storyboardMediaRefKey(ref) || `sb-ref-${sb.id}-${refIdx}`"
                       class="sb-thumb-item sb-thumb-storyboard sb-thumb-clickable"
-                      :title="getSbStoryboardImageReference(sb)?.prompt || '分镜图：作为全能视频的附加画面参考'"
+                      :title="ref.prompt || `分镜图${refIdx + 1}：作为全能视频的附加画面参考`"
                       role="button"
-                      @click="openImagePreview(assetImageUrl(getSbStoryboardImageReference(sb)))"
+                      @click="openImagePreview(assetImageUrl(ref))"
                     >
-                      <img :src="assetImageUrl(getSbStoryboardImageReference(sb))" alt="" />
+                      <img :src="assetImageUrl(ref)" alt="" />
                       <button
                         class="extra-thumb-remove sb-thumb-remove"
                         title="删除分镜图"
-                        @click.stop="onRemoveSbStoryboardImageReference(sb)"
+                        @click.stop="onRemoveSbStoryboardImageReference(sb, ref)"
                       >×</button>
                     </div>
                   </div>
@@ -1318,7 +1323,7 @@
                     <el-tooltip placement="top" :show-after="280" :show-arrow="false" popper-class="sb-universal-tooltip-popper">
                       <template #content>
                         <div class="sb-universal-tooltip">
-                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考；模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等以控制台为准）：此处为提交主提示词；只要本框有内容，生视频时<strong>只</strong>发送这段，不会拼接下方「视频提示词」里的动作/对话/旁白。参考图顺序一般为：场景 → 角色（多张）→ 物品 → 分镜图（若已生成，追加在最后，不改变前面编号）；请用 <strong>@图片1</strong>、<strong>@图片2</strong>…（<strong>@图片N 后建议加半角空格</strong>）对应参考图，勿用 @姓名 指图；有场景图时 <strong>@图片1</strong> 只表环境，人物从 <strong>@图片2</strong> 起。若场景参考是<strong>四宫格/多视角拼图</strong>，仅借空间与氛围，须在文案中写明<strong>单镜头完整画幅、禁止分屏宫格</strong>，避免成片模仿拼图布局。全能提示词下拉中「生成」会按<strong>本条分镜总时长</strong>与本集剧本、镜序、邻镜信息，自动决定子分镜数 M（第2行「由以下M个分镜…」），第4行起为「分镜1：T1秒:」…多行，且各段秒数之和等于本镜时长；第3行仍为环境/参考图约束；「生成」与「润色」均为<strong>流式输出</strong>到本框；「润色」在此基础上增强。若本框留空，则退回仅用「视频提示词」。
+                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考；模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等以控制台为准）：此处为提交主提示词；只要本框有内容，生视频时<strong>只</strong>发送这段，不会拼接下方「视频提示词」里的动作/对话/旁白。参考图顺序一般为：场景 → 角色（多张）→ 物品 → 分镜图（若已生成，可多张，按当前主图 → 历史图顺序追加在最后，最多 6 张，不改变前面编号）；请用 <strong>@图片1</strong>、<strong>@图片2</strong>…（<strong>@图片N 后建议加半角空格</strong>）对应参考图，勿用 @姓名 指图；有场景图时 <strong>@图片1</strong> 只表环境，人物从 <strong>@图片2</strong> 起。若场景参考是<strong>四宫格/多视角拼图</strong>，仅借空间与氛围，须在文案中写明<strong>单镜头完整画幅、禁止分屏宫格</strong>，避免成片模仿拼图布局。全能提示词下拉中「生成」会按<strong>本条分镜总时长</strong>与本集剧本、镜序、邻镜信息，自动决定子分镜数 M（第2行「由以下M个分镜…」），第4行起为「分镜1：T1秒:」…多行，且各段秒数之和等于本镜时长；第3行仍为环境/参考图约束；「生成」与「润色」均为<strong>流式输出</strong>到本框；「润色」在此基础上增强。若本框留空，则退回仅用「视频提示词」。
                         </div>
                       </template>
                       <el-icon class="sb-universal-hint-icon" tabindex="0" role="img" aria-label="片段说明">
@@ -1553,10 +1558,35 @@
                   </template>
                   <template v-else-if="sb.error_msg || sb.errorMsg">
                     <div class="sb-image-error" :title="sb.error_msg || sb.errorMsg">{{ sb.error_msg || sb.errorMsg }}</div>
-                    <el-button type="primary" size="small" class="sb-gen-btn" :loading="generatingSbImageIds.has(sb.id)" @click="onGenerateSbImage(sb)">
-                      <el-icon><Refresh /></el-icon>
-                      重试
-                    </el-button>
+                    <div class="sb-gen-btn-group">
+                      <el-button type="primary" size="small" class="sb-gen-btn" :loading="generatingSbImageIds.has(sb.id)" @click="onGenerateSbImage(sb)">
+                        <el-icon><Refresh /></el-icon>
+                        重试
+                      </el-button>
+                      <el-dropdown
+                        v-if="shouldShowSbMultiGenerateMenu(sb)"
+                        trigger="click"
+                        @command="(count) => onGenerateSbImage(sb, { count: Number(count) })"
+                      >
+                        <el-button size="small" class="sb-gen-count-btn" :loading="generatingSbImageIds.has(sb.id)">
+                          <el-icon><ArrowDown /></el-icon>
+                        </el-button>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item
+                              v-for="count in storyboardGenerateCountOptions(sb)"
+                              :key="`sb-regenerate-${sb.id}-${count}`"
+                              :command="count"
+                            >
+                              再生成 {{ count }} 张
+                            </el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
+                    </div>
+                    <div v-if="gridMode === 'single'" class="sb-gen-limit-hint">
+                      最多 {{ MAX_STORYBOARD_REFERENCE_IMAGES }} 张，当前 {{ getSbStoryboardImageReferences(sb).length }}/{{ MAX_STORYBOARD_REFERENCE_IMAGES }}
+                    </div>
                     <CodexImageJobButton
                       class="sb-codex-action"
                       entity-type="storyboard"
@@ -1566,16 +1596,42 @@
                       frame-type="main"
                       :style="getSelectedStyle()"
                       :aspect-ratio="projectAspectRatio"
+                      :disabled="storyboardMainRefLimitReached(sb)"
                       @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                       @preview="openImagePreview"
                     />
                     <el-button size="small" :loading="uploadingSbImageId === sb.id" @click="onUploadSbImageClick(sb)">上传</el-button>
                   </template>
                   <template v-else>
-                    <el-button type="primary" size="small" class="sb-gen-btn" :loading="generatingSbImageIds.has(sb.id)" @click="onGenerateSbImage(sb)">
-                      <el-icon><MagicStick /></el-icon>
-                      生成分镜参考图
-                    </el-button>
+                    <div class="sb-gen-btn-group">
+                      <el-button type="primary" size="small" class="sb-gen-btn" :loading="generatingSbImageIds.has(sb.id)" @click="onGenerateSbImage(sb)">
+                        <el-icon><MagicStick /></el-icon>
+                        生成分镜参考图
+                      </el-button>
+                      <el-dropdown
+                        v-if="shouldShowSbMultiGenerateMenu(sb)"
+                        trigger="click"
+                        @command="(count) => onGenerateSbImage(sb, { count: Number(count) })"
+                      >
+                        <el-button size="small" class="sb-gen-count-btn" :loading="generatingSbImageIds.has(sb.id)">
+                          <el-icon><ArrowDown /></el-icon>
+                        </el-button>
+                        <template #dropdown>
+                          <el-dropdown-menu>
+                            <el-dropdown-item
+                              v-for="count in storyboardGenerateCountOptions(sb)"
+                              :key="`sb-generate-${sb.id}-${count}`"
+                              :command="count"
+                            >
+                              生成 {{ count }} 张
+                            </el-dropdown-item>
+                          </el-dropdown-menu>
+                        </template>
+                      </el-dropdown>
+                    </div>
+                    <div v-if="gridMode === 'single'" class="sb-gen-limit-hint">
+                      最多 {{ MAX_STORYBOARD_REFERENCE_IMAGES }} 张，当前 {{ getSbStoryboardImageReferences(sb).length }}/{{ MAX_STORYBOARD_REFERENCE_IMAGES }}
+                    </div>
                     <CodexImageJobButton
                       class="sb-codex-action"
                       entity-type="storyboard"
@@ -1585,6 +1641,7 @@
                       frame-type="main"
                       :style="getSelectedStyle()"
                       :aspect-ratio="projectAspectRatio"
+                      :disabled="storyboardMainRefLimitReached(sb)"
                       @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                       @preview="openImagePreview"
                     />
@@ -1623,7 +1680,29 @@
                   </el-tooltip>
                 </template>
                 <template v-else>
-                <el-button size="small" :loading="generatingSbImageIds.has(sb.id)" @click="onGenerateSbImage(sb)">重新生成</el-button>
+                <div class="sb-gen-btn-group sb-gen-btn-group--inline">
+                  <el-button size="small" :loading="generatingSbImageIds.has(sb.id)" @click="onGenerateSbImage(sb)">重新生成</el-button>
+                  <el-dropdown
+                    v-if="shouldShowSbMultiGenerateMenu(sb)"
+                    trigger="click"
+                    @command="(count) => onGenerateSbImage(sb, { count: Number(count) })"
+                  >
+                    <el-button size="small" class="sb-gen-count-btn" :loading="generatingSbImageIds.has(sb.id)">
+                      <el-icon><ArrowDown /></el-icon>
+                    </el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item
+                          v-for="count in storyboardGenerateCountOptions(sb)"
+                          :key="`sb-actions-${sb.id}-${count}`"
+                          :command="count"
+                        >
+                          再生成 {{ count }} 张
+                        </el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
+                </div>
                 <CodexImageJobButton
                   class="sb-codex-action"
                   entity-type="storyboard"
@@ -1633,10 +1712,14 @@
                   frame-type="main"
                   :style="getSelectedStyle()"
                   :aspect-ratio="projectAspectRatio"
+                  :disabled="storyboardMainRefLimitReached(sb)"
                   @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                   @preview="openImagePreview"
                 />
                 <el-button size="small" :loading="uploadingSbImageId === sb.id" @click="onUploadSbImageClick(sb)">上传</el-button>
+                <span v-if="gridMode === 'single'" class="sb-ref-count-chip">
+                  参考图 {{ getSbStoryboardImageReferences(sb).length }}/{{ MAX_STORYBOARD_REFERENCE_IMAGES }}
+                </span>
                 <el-tooltip content="高清放大（2x超分辨率）" placement="top">
                   <el-button
                     size="small"
@@ -1695,18 +1778,56 @@
                       生成分镜视频
                     </el-button>
                     <template v-if="shouldShowSbVideoImageActions(sb)">
-                      <el-button
-                        type="success"
-                        plain
-                        size="small"
-                        class="sb-generate-image-btn"
-                        :loading="isSbQuickImageGenerating(sb)"
-                        :disabled="isSbQuickImageGenerating(sb)"
-                        @click="onGenerateSbQuickImage(sb)"
-                      >
-                        <el-icon><MagicStick /></el-icon>
-                        {{ sbQuickImageButtonText(sb) }}
-                      </el-button>
+                      <template v-if="shouldUseSbFirstLastQuickImage(sb)">
+                        <el-button
+                          type="success"
+                          plain
+                          size="small"
+                          class="sb-generate-image-btn"
+                          :loading="isSbQuickImageGenerating(sb)"
+                          :disabled="isSbQuickImageGenerating(sb)"
+                          @click="onGenerateSbQuickImage(sb)"
+                        >
+                          <el-icon><MagicStick /></el-icon>
+                          {{ sbQuickImageButtonText(sb) }}
+                        </el-button>
+                      </template>
+                      <template v-else>
+                        <div class="sb-gen-btn-group sb-gen-btn-group--video">
+                          <el-button
+                            type="success"
+                            plain
+                            size="small"
+                            class="sb-generate-image-btn"
+                            :loading="isSbQuickImageGenerating(sb)"
+                            :disabled="isSbQuickImageGenerating(sb)"
+                            @click="onGenerateSbQuickImage(sb)"
+                          >
+                            <el-icon><MagicStick /></el-icon>
+                            {{ sbQuickImageButtonText(sb) }}
+                          </el-button>
+                          <el-dropdown
+                            v-if="shouldShowSbMultiGenerateMenu(sb)"
+                            trigger="click"
+                            @command="(count) => onGenerateSbQuickImage(sb, { count: Number(count) })"
+                          >
+                            <el-button size="small" class="sb-gen-count-btn" :loading="isSbQuickImageGenerating(sb)">
+                              <el-icon><ArrowDown /></el-icon>
+                            </el-button>
+                            <template #dropdown>
+                              <el-dropdown-menu>
+                                <el-dropdown-item
+                                  v-for="count in storyboardGenerateCountOptions(sb)"
+                                  :key="`sb-quick-${sb.id}-${count}`"
+                                  :command="count"
+                                >
+                                  生成 {{ count }} 张
+                                </el-dropdown-item>
+                              </el-dropdown-menu>
+                            </template>
+                          </el-dropdown>
+                        </div>
+                      </template>
                       <CodexImageJobButton
                         v-if="!shouldUseSbFirstLastQuickImage(sb)"
                         class="sb-codex-action sb-video-codex-action"
@@ -1717,6 +1838,7 @@
                         frame-type="main"
                         :style="getSelectedStyle()"
                         :aspect-ratio="projectAspectRatio"
+                        :disabled="storyboardMainRefLimitReached(sb)"
                         @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                         @preview="openImagePreview"
                       />
@@ -4377,6 +4499,23 @@ function frameTypeForSlot(slot) {
   return slot === 'last' ? 'storyboard_last' : 'storyboard_first'
 }
 
+const MAX_STORYBOARD_REFERENCE_IMAGES = 6
+
+function storyboardMediaRefKey(ref) {
+  if (!ref) return ''
+  if (ref.id != null) return `id:${ref.id}`
+  const localPath = (ref.local_path || '').toString().trim()
+  if (localPath) return `local:${localPath}`
+  const imageUrl = (ref.image_url || '').toString().trim().replace(/\?.*$/, '')
+  return imageUrl ? `url:${imageUrl}` : ''
+}
+
+function isStoryboardMainImageRecord(img) {
+  if (!img) return false
+  if (img.frame_type && img.frame_type !== 'main') return false
+  return !!(img.image_url || img.local_path)
+}
+
 function resolveSbImageById(storyboardId, imageId) {
   if (imageId == null) return null
   const images = getSbAllImages(storyboardId)
@@ -4480,13 +4619,13 @@ function sbQuickImageButtonText(sb) {
   return '重新生成尾帧'
 }
 
-async function onGenerateSbQuickImage(sb) {
+async function onGenerateSbQuickImage(sb, { count = 1 } = {}) {
   if (!sb?.id) return
   if (shouldUseSbFirstLastQuickImage(sb)) {
     await onGenerateSbFramePair(sb)
     return
   }
-  await onGenerateSbImage(sb)
+  await onGenerateSbImage(sb, { count })
 }
 /** 取该分镜下所有已完成的非四宫格图片列表 */
 function getSbAllImages(storyboardId) {
@@ -4507,25 +4646,85 @@ function getSbImage(storyboardId) {
   return images.find((i) => !i.frame_type || i.frame_type === 'main') || images[0]
 }
 
-function getSbStoryboardImageReference(sb) {
-  if (!sb?.id || !isSbUniversalMode(sb.id)) return null
-  const img = getSbImage(sb.id)
-  if (img && (img.image_url || img.local_path)) return { ...img, source: 'image_generation' }
-  if (sb.local_path || sb.image_url || sb.composed_image) {
-    return {
+function getSbStoryboardImageReferences(sb, { limit = MAX_STORYBOARD_REFERENCE_IMAGES } = {}) {
+  if (!sb?.id) return []
+  const current = getSbImage(sb.id)
+  const mainImages = getSbAllImages(sb.id).filter(isStoryboardMainImageRecord)
+  const out = []
+  const seen = new Set()
+  const pushRef = (ref) => {
+    if (!ref || !isStoryboardMainImageRecord(ref)) return
+    const normalizedRef = ref.id != null && !ref.source
+      ? { ...ref, source: 'image_generation' }
+      : ref
+    const key = storyboardMediaRefKey(normalizedRef)
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    out.push(normalizedRef)
+  }
+
+  pushRef(current)
+  for (const img of mainImages) {
+    pushRef(img)
+    if (out.length >= limit) return out.slice(0, limit)
+  }
+
+  if (!out.length && (sb.local_path || sb.image_url || sb.composed_image)) {
+    pushRef({
       id: null,
       source: 'storyboard',
       image_url: sb.composed_image || sb.image_url || '',
       local_path: sb.local_path || '',
       prompt: sb.polished_prompt || sb.image_prompt || '',
-    }
+    })
   }
-  return null
+
+  return out.slice(0, limit)
+}
+
+function getSbStoryboardImageReference(sb) {
+  return getSbStoryboardImageReferences(sb, { limit: 1 })[0] || null
 }
 
 function getSbStoryboardImageReferenceUrl(sb) {
   const ref = getSbStoryboardImageReference(sb)
   return ref ? assetImageUrl(ref) : ''
+}
+
+function getSbStoryboardReferenceCount(sb) {
+  return getSbStoryboardImageReferences(sb).length
+}
+
+function storyboardMainRefSlotsRemaining(sb) {
+  return Math.max(0, MAX_STORYBOARD_REFERENCE_IMAGES - getSbStoryboardReferenceCount(sb))
+}
+
+function storyboardMainRefLimitReached(sb) {
+  return storyboardMainRefSlotsRemaining(sb) <= 0
+}
+
+function storyboardGenerateCountOptions(sb) {
+  const remaining = storyboardMainRefSlotsRemaining(sb)
+  if (gridMode.value !== 'single' || remaining <= 1) return []
+  return Array.from({ length: remaining - 1 }, (_, idx) => idx + 2)
+}
+
+function shouldShowSbMultiGenerateMenu(sb) {
+  return storyboardGenerateCountOptions(sb).length > 0
+}
+
+function normalizeStoryboardGenerateCount(sb, requestedCount = 1) {
+  const wanted = Math.max(1, Math.floor(Number(requestedCount) || 1))
+  const remaining = storyboardMainRefSlotsRemaining(sb)
+  if (remaining <= 0) {
+    ElMessage.warning(`单条分镜最多保留 ${MAX_STORYBOARD_REFERENCE_IMAGES} 张参考图，请先删除不需要的图片`)
+    return 0
+  }
+  if (gridMode.value !== 'single') return 1
+  if (wanted > remaining) {
+    ElMessage.info(`该分镜最多还能再生成 ${remaining} 张参考图`)
+  }
+  return Math.min(wanted, remaining)
 }
 /** 取该分镜下的四宫格整图记录 */
 /** 取该分镜下的四宫格整图记录 */
@@ -4917,9 +5116,9 @@ async function onRemoveSbHistoryImage(storyboardId, imageGenId) {
   }
 }
 
-async function onRemoveSbStoryboardImageReference(sb) {
+async function onRemoveSbStoryboardImageReference(sb, refIn = null) {
   if (!sb?.id) return
-  const ref = getSbStoryboardImageReference(sb)
+  const ref = refIn || getSbStoryboardImageReference(sb)
   if (!ref) return
   try {
     await ElMessageBox.confirm(
@@ -4932,6 +5131,8 @@ async function onRemoveSbStoryboardImageReference(sb) {
         distinguishCancelAndClose: true,
       }
     )
+    const currentRef = getSbStoryboardImageReference(sb)
+    const removingCurrent = storyboardMediaRefKey(currentRef) && storyboardMediaRefKey(currentRef) === storyboardMediaRefKey(ref)
     if (ref.source === 'image_generation' && ref.id) {
       await imagesAPI.delete(ref.id)
       const current = Array.isArray(sbImages.value[sb.id]) ? sbImages.value[sb.id] : []
@@ -4940,25 +5141,28 @@ async function onRemoveSbStoryboardImageReference(sb) {
         [sb.id]: current.filter((img) => Number(img.id) !== Number(ref.id)),
       }
     }
-    const patch = {
-      image_url: null,
-      local_path: null,
-      composed_image: null,
-      first_frame_image_id: null,
-      main_panel_idx: null,
-    }
-    const updated = await storyboardsAPI.update(sb.id, patch)
-    const list = store.currentEpisode?.storyboards
-    if (Array.isArray(list)) {
-      const row = list.find((x) => Number(x.id) === Number(sb.id))
-      if (row) Object.assign(row, updated || patch)
-    }
-    if (sbSelectedImgId.value[sb.id] != null) {
-      const nextSelected = { ...sbSelectedImgId.value }
-      delete nextSelected[sb.id]
-      sbSelectedImgId.value = nextSelected
+    if (removingCurrent || ref.source === 'storyboard') {
+      const patch = {
+        image_url: null,
+        local_path: null,
+        composed_image: null,
+        first_frame_image_id: null,
+        main_panel_idx: null,
+      }
+      const updated = await storyboardsAPI.update(sb.id, patch)
+      const list = store.currentEpisode?.storyboards
+      if (Array.isArray(list)) {
+        const row = list.find((x) => Number(x.id) === Number(sb.id))
+        if (row) Object.assign(row, updated || patch)
+      }
+      if (sbSelectedImgId.value[sb.id] != null) {
+        const nextSelected = { ...sbSelectedImgId.value }
+        delete nextSelected[sb.id]
+        sbSelectedImgId.value = nextSelected
+      }
     }
     await loadSingleStoryboardMedia(sb.id)
+    restoreSelectionsFromBackend()
     ElMessage.success('分镜图已删除')
   } catch (err) {
     if (err !== 'cancel' && err !== 'close') {
@@ -5209,8 +5413,10 @@ async function onGenerateSbFramePair(sb) {
 
 // ──────────────────────────────────────────────────────────────────────
 
-async function onGenerateSbImage(sb) {
+async function onGenerateSbImage(sb, { count = 1 } = {}) {
   if (!dramaId.value || !sb?.id) return
+  const createCount = normalizeStoryboardGenerateCount(sb, count)
+  if (createCount <= 0) return
   sb.errorMsg = ''
   sb.error_msg = ''
   const meta = buildSbGenMeta(sb, GEN_RESOURCE.SB_IMAGE, '分镜图')
@@ -5231,25 +5437,42 @@ async function onGenerateSbImage(sb) {
       ElMessage.warning('保存分镜角色失败，请稍后重试')
       return
     }
-    const res = await imagesAPI.create({
-      storyboard_id: sb.id,
-      drama_id: dramaId.value,
-      prompt: sb.polished_prompt || sb.image_prompt || sb.description || '',
-      model: undefined,
-      style: getSelectedStyle(),
-      frame_type: gridMode.value !== 'single' ? gridMode.value : undefined,
-      aspect_ratio: projectAspectRatio.value || '16:9',
-    })
-    ElMessage.success('分镜图生成任务已提交')
-    if (res?.task_id) {
-      const pollRes = await pollTask(res.task_id, () => loadSingleStoryboardMedia(sb.id), meta)
-      if (pollRes?.status === 'failed') {
-        sb.errorMsg = pollRes.error || '生成失败'
-      } else {
-        ElMessage.success('分镜图生成完成')
-      }
-    } else {
+    const frameType = gridMode.value !== 'single' ? gridMode.value : undefined
+    const createResults = []
+    for (let i = 0; i < createCount; i++) {
+      createResults.push(await imagesAPI.create({
+        storyboard_id: sb.id,
+        drama_id: dramaId.value,
+        prompt: sb.polished_prompt || sb.image_prompt || sb.description || '',
+        model: undefined,
+        style: getSelectedStyle(),
+        frame_type: frameType,
+        aspect_ratio: projectAspectRatio.value || '16:9',
+      }))
+    }
+    ElMessage.success(createCount > 1 ? `已提交 ${createCount} 张分镜参考图任务` : '分镜图生成任务已提交')
+    const pollResults = await Promise.all(
+      createResults.map((res, idx) => {
+        if (!res?.task_id) return Promise.resolve({ status: 'completed', result: null })
+        const itemMeta = createCount > 1
+          ? { ...meta, label: `${meta.label} ${idx + 1}/${createCount}` }
+          : meta
+        return pollTask(res.task_id, () => loadSingleStoryboardMedia(sb.id), itemMeta)
+      })
+    )
+    if (!createResults.every((res) => res?.task_id)) {
       await loadSingleStoryboardMedia(sb.id)
+    }
+    const failed = pollResults.filter((item) => item?.status === 'failed')
+    if (failed.length) {
+      sb.errorMsg = failed[0]?.error || `有 ${failed.length} 张生成失败`
+      ElMessage.warning(
+        createCount > 1
+          ? `已完成 ${createCount - failed.length}/${createCount} 张分镜参考图`
+          : (sb.errorMsg || '生成失败')
+      )
+    } else {
+      ElMessage.success(createCount > 1 ? `分镜参考图生成完成，共 ${createCount} 张` : '分镜图生成完成')
     }
   } catch (e) {
     console.error(e)
@@ -5263,6 +5486,10 @@ async function onGenerateSbImage(sb) {
 
 function onUploadSbImageClick(sb, slot = 'first') {
   if (!sb?.id) return
+  if (!storyboardUseFirstLastFrame.value && storyboardMainRefLimitReached(sb)) {
+    ElMessage.warning(`单条分镜最多保留 ${MAX_STORYBOARD_REFERENCE_IMAGES} 张参考图，请先删除不需要的图片`)
+    return
+  }
   sbImageUploadForId.value = sb.id
   sbImageUploadSlotById.value = { ...sbImageUploadSlotById.value, [sb.id]: slot }
   if (!storyboardUseFirstLastFrame.value) {
@@ -5277,6 +5504,13 @@ function onUploadSbImageClick(sb, slot = 'first') {
 async function doUploadSbImage(sbId, file, slot = 'first') {
   if (!file || !sbId || !dramaId.value) return
   const useSlot = storyboardUseFirstLastFrame.value ? slot : 'first'
+  if (!storyboardUseFirstLastFrame.value) {
+    const sb = (store.storyboards || []).find((b) => Number(b.id) === Number(sbId))
+    if (sb && storyboardMainRefLimitReached(sb)) {
+      ElMessage.warning(`单条分镜最多保留 ${MAX_STORYBOARD_REFERENCE_IMAGES} 张参考图，请先删除不需要的图片`)
+      return
+    }
+  }
   if (storyboardUseFirstLastFrame.value) {
     sbImageUploadSlotById.value = { ...sbImageUploadSlotById.value, [sbId]: useSlot }
   } else {
@@ -5297,7 +5531,11 @@ async function doUploadSbImage(sbId, file, slot = 'first') {
       local_path: localPath || undefined,
       frame_type: storyboardUseFirstLastFrame.value ? frameTypeForSlot(useSlot) : undefined,
     })
-    ElMessage.success(useSlot === 'last' ? '尾帧上传成功' : '首帧上传成功')
+    ElMessage.success(
+      storyboardUseFirstLastFrame.value
+        ? (useSlot === 'last' ? '尾帧上传成功' : '首帧上传成功')
+        : '分镜图上传成功'
+    )
     if (uploaded?.id) {
       const sb = (store.storyboards || []).find((b) => b.id === sbId)
       if (sb) onSelectSbFrameImage(sb, uploaded, useSlot)
@@ -7037,8 +7275,7 @@ function getSbUniversalOmniRefSlots(sb) {
       })
     }
   }
-  const storyboardRef = getSbStoryboardImageReference(sb)
-  if (storyboardRef) {
+  for (const storyboardRef of getSbStoryboardImageReferences(sb)) {
     out.push({
       index: idx++,
       kind: 'storyboard',
@@ -7047,6 +7284,20 @@ function getSbUniversalOmniRefSlots(sb) {
     })
   }
   return out
+}
+
+/** 分镜主参考图列表：当前主图优先，其余历史图随后；用于视频多图参考与全能模式附加参考。 */
+function collectSbStoryboardReferenceAbsoluteUrls(sb, { limit = MAX_STORYBOARD_REFERENCE_IMAGES } = {}) {
+  if (!sb?.id) return []
+  const urls = []
+  const seen = new Set()
+  for (const ref of getSbStoryboardImageReferences(sb, { limit })) {
+    const abs = toAbsoluteImageUrl(assetImageUrl(ref))
+    if (!abs || seen.has(abs)) continue
+    seen.add(abs)
+    urls.push(abs)
+  }
+  return urls
 }
 
 /** 全能模式：场景/角色/物品/分镜图 → 绝对 URL 列表（分镜图追加在最后，避免改变既有 @图片N 顺序） */
@@ -7068,8 +7319,9 @@ function collectSbOmniReferenceAbsoluteUrls(sb) {
   for (const p of getSbSelectedProps(sb.id)) {
     if (hasAssetImage(p)) pushAbs(assetImageUrl(p))
   }
-  const storyboardRefUrl = getSbStoryboardImageReferenceUrl(sb)
-  if (storyboardRefUrl) pushAbs(storyboardRefUrl)
+  for (const storyboardRefUrl of collectSbStoryboardReferenceAbsoluteUrls(sb)) {
+    pushAbs(storyboardRefUrl)
+  }
   return urls.slice(0, 10)
 }
 
@@ -7480,6 +7732,7 @@ async function onGenerateSbVideo(sb) {
   try {
     let absoluteUrl = ''
     let referenceUrls = undefined
+    const classicStoryboardRefs = collectSbStoryboardReferenceAbsoluteUrls(sb)
     if (universalOmniApi) {
       referenceUrls = omniRefs.length ? omniRefs : undefined
       absoluteUrl = omniRefs[0] || ''
@@ -7494,8 +7747,8 @@ async function onGenerateSbVideo(sb) {
       }
     } else {
       const firstFrameUrl = await getMainImageUrlForVideo(sb)
-      absoluteUrl = toAbsoluteImageUrl(firstFrameUrl)
-      referenceUrls = absoluteUrl ? [absoluteUrl] : undefined
+      absoluteUrl = classicStoryboardRefs[0] || toAbsoluteImageUrl(firstFrameUrl)
+      referenceUrls = classicStoryboardRefs.length ? classicStoryboardRefs : (absoluteUrl ? [absoluteUrl] : undefined)
     }
     const { first: vFirst, last: vLast } = sbVideoFirstLastUrls(sb, universalOmniApi, null)
     if (!universalOmniApi && vLast && referenceUrls && !referenceUrls.includes(vLast)) {
@@ -7907,9 +8160,10 @@ async function startBatchVideoGeneration() {
             }
           }
           const { first: vFirst, last: vLast } = sbVideoFirstLastUrls(sb, universal, contiguityFirstFrameUrl || undefined)
+          const classicStoryboardRefs = collectSbStoryboardReferenceAbsoluteUrls(sb)
           let refUrls = universal
             ? (omniRefs.length ? omniRefs : undefined)
-            : (absoluteUrl ? [absoluteUrl] : undefined)
+            : (classicStoryboardRefs.length ? classicStoryboardRefs : (absoluteUrl ? [absoluteUrl] : undefined))
           if (!universal && vLast && refUrls && !refUrls.includes(vLast)) {
             refUrls = [...refUrls, vLast]
           }
@@ -8605,9 +8859,10 @@ async function runOneClickPipeline(textOnly = false) {
             const firstFrameUrl = await getMainImageUrlForVideo(sb)
             const absoluteUrl = universal ? (omniRefs[0] || '') : toAbsoluteImageUrl(firstFrameUrl)
             const { first: vFirst, last: vLast } = sbVideoFirstLastUrls(sb, universal, null)
+            const classicStoryboardRefs = collectSbStoryboardReferenceAbsoluteUrls(sb)
             let refUrls = universal
               ? (omniRefs.length ? omniRefs : undefined)
-              : (absoluteUrl ? [absoluteUrl] : undefined)
+              : (classicStoryboardRefs.length ? classicStoryboardRefs : (absoluteUrl ? [absoluteUrl] : undefined))
             if (!universal && vLast && refUrls && !refUrls.includes(vLast)) {
               refUrls = [...refUrls, vLast]
             }
@@ -8947,9 +9202,10 @@ async function runRepairPipeline() {
             const firstFrameUrl = await getMainImageUrlForVideo(sb)
             const absoluteUrl = universal ? (omniRefs[0] || '') : toAbsoluteImageUrl(firstFrameUrl)
             const { first: vFirst, last: vLast } = sbVideoFirstLastUrls(sb, universal, null)
+            const classicStoryboardRefs = collectSbStoryboardReferenceAbsoluteUrls(sb)
             let refUrls = universal
               ? (omniRefs.length ? omniRefs : undefined)
-              : (absoluteUrl ? [absoluteUrl] : undefined)
+              : (classicStoryboardRefs.length ? classicStoryboardRefs : (absoluteUrl ? [absoluteUrl] : undefined))
             if (!universal && vLast && refUrls && !refUrls.includes(vLast)) {
               refUrls = [...refUrls, vLast]
             }
@@ -10704,11 +10960,22 @@ html.light .sb-panel::-webkit-scrollbar-thumb {
   margin-bottom: 8px;
 }
 .sb-thumb-row:last-child { margin-bottom: 0; }
+.sb-thumb-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
 .sb-thumb-label {
   font-size: 0.8rem;
   color: #71717a;
   flex-shrink: 0;
   width: 36px;
+}
+.sb-thumb-counter {
+  font-size: 0.72rem;
+  color: #a78bfa;
+  white-space: nowrap;
 }
 .sb-thumb-list {
   display: flex;
@@ -10853,6 +11120,45 @@ html.light .sb-image-area:hover {
 }
 .sb-image-file-input { position: absolute; width: 0; height: 0; opacity: 0; pointer-events: none; }
 .sb-gen-btn { margin-top: 4px; }
+.sb-gen-btn-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+.sb-gen-btn-group--inline {
+  flex: 0 0 auto;
+}
+.sb-gen-btn-group--video {
+  justify-content: center;
+}
+.sb-gen-count-btn {
+  min-width: 34px;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.sb-gen-limit-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #9ca3af;
+  text-align: center;
+}
+.sb-ref-count-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  min-height: 28px;
+  border-radius: 999px;
+  background: rgba(167, 139, 250, 0.12);
+  color: #c4b5fd;
+  font-size: 11px;
+  white-space: nowrap;
+}
+html.light .sb-ref-count-chip {
+  background: rgba(124, 58, 237, 0.08);
+  color: #7c3aed;
+}
 .sb-image-area img.sb-generated-img { cursor: pointer; }
 .sb-panel.sb-image.sb-image--universal {
   min-height: 300px;

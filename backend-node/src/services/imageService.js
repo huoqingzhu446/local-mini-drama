@@ -63,6 +63,7 @@ const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
 
 const LAST_FRAME_TYPES = new Set(['last', 'storyboard_last', 'tail', 'last_frame']);
+const MAX_STORYBOARD_REFERENCE_IMAGES = 6;
 
 function isLastFrameType(frameType) {
   if (frameType == null || frameType === '') return false;
@@ -84,6 +85,50 @@ function rowUseFirstFrameLayoutLock(row) {
   const v = row.use_first_frame_layout_lock;
   if (v === 0 || v === false) return false;
   return true;
+}
+
+function isStoryboardMainFrameType(frameType) {
+  return frameType == null || frameType === '' || frameType === 'main';
+}
+
+function buildStoryboardReferenceLimitError() {
+  const err = new Error(`单条分镜最多保留 ${MAX_STORYBOARD_REFERENCE_IMAGES} 张参考图，请先删除不需要的图片后再继续。`);
+  err.code = 'storyboard_ref_limit';
+  return err;
+}
+
+function assertStoryboardReferenceCapacity(db, storyboardId, incomingCount = 1) {
+  const sid = Number(storyboardId);
+  if (!Number.isFinite(sid) || sid <= 0) return;
+  const addCount = Math.max(1, Number(incomingCount) || 1);
+  const sb = db.prepare(
+    `SELECT image_url, local_path, composed_image, first_frame_image_id
+     FROM storyboards WHERE id = ? AND deleted_at IS NULL`
+  ).get(sid);
+  if (!sb) return;
+  const rows = db.prepare(
+    `SELECT id, image_url, local_path
+     FROM image_generations
+     WHERE storyboard_id = ?
+       AND deleted_at IS NULL
+       AND status IN ('pending', 'processing', 'completed')
+       AND (frame_type IS NULL OR frame_type = '' OR frame_type = 'main')`
+  ).all(sid);
+  let existingCount = rows.length;
+  const fallbackPath = (sb.local_path || '').trim();
+  const fallbackUrl = (sb.image_url || sb.composed_image || '').trim();
+  const hasFallback = fallbackPath || fallbackUrl;
+  if (hasFallback) {
+    const matched = rows.some((row) =>
+      (sb.first_frame_image_id != null && Number(row.id) === Number(sb.first_frame_image_id)) ||
+      (fallbackPath && row.local_path && row.local_path === fallbackPath) ||
+      (fallbackUrl && row.image_url && row.image_url === fallbackUrl)
+    );
+    if (!matched) existingCount += 1;
+  }
+  if (existingCount + addCount > MAX_STORYBOARD_REFERENCE_IMAGES) {
+    throw buildStoryboardReferenceLimitError();
+  }
 }
 
 /**
@@ -530,6 +575,9 @@ function mergePromptWithStyle(prompt, style) {
 }
 
 function create(db, log, req) {
+  if (req.storyboard_id != null && isStoryboardMainFrameType(req.frame_type)) {
+    assertStoryboardReferenceCapacity(db, req.storyboard_id, 1);
+  }
   const now = new Date().toISOString();
   const task = taskService.createTask(db, log, 'image_generation', String(req.drama_id || ''));
   const taskId = task.id;
@@ -1631,6 +1679,9 @@ function getBackgroundsForEpisode(db, episodeId) {
 }
 
 function upload(db, log, req) {
+  if (req.storyboard_id != null && isStoryboardMainFrameType(req.frame_type)) {
+    assertStoryboardReferenceCapacity(db, req.storyboard_id, 1);
+  }
   const now = new Date().toISOString();
   const frameType = req.frame_type ?? null;
   const info = db.prepare(
