@@ -59,11 +59,11 @@ function updateDrama(db, log) {
   };
 }
 
-function deleteDrama(db, log) {
+function deleteDrama(db, log, cfg) {
   return (req, res) => {
-    const ok = dramaService.deleteDrama(db, log, req.params.id);
-    if (!ok) return response.notFound(res, '剧本不存在');
-    response.success(res, { message: '删除成功' });
+    const result = dramaService.deleteDrama(db, log, cfg, req.params.id, req.body || {});
+    if (!result) return response.notFound(res, '剧本不存在');
+    response.success(res, result);
   };
 }
 
@@ -286,7 +286,7 @@ module.exports = function dramaRoutes(db, cfg, log) {
     getDrama: getDrama(db, cfg),
     listDramas: listDramas(db, log),
     updateDrama: updateDrama(db, log),
-    deleteDrama: deleteDrama(db, log),
+    deleteDrama: deleteDrama(db, log, cfg),
     getDramaStats: getDramaStats(db, log),
     saveOutline: saveOutline(db, log),
     getCharacters: getCharacters(db),

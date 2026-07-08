@@ -351,9 +351,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, h } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, ElCheckbox } from 'element-plus'
 import { Edit, Delete, Setting, Plus, User, PictureFilled, Box, Sunny, Moon, ChatDotSquare, Download, Upload, QuestionFilled, FolderOpened, MagicStick, Files } from '@element-plus/icons-vue'
 import { useTheme } from '@/composables/useTheme'
 import { dramaAPI } from '@/api/drama'
@@ -801,18 +801,37 @@ async function onImportFile(e) {
 }
 
 async function onDelete(d) {
+  const shortTitle = `${(d.title || '未命名').slice(0, 20)}${(d.title && d.title.length > 20) ? '…' : ''}`
+  let deleteGeneratedMedia = false
   try {
-    await ElMessageBox.confirm(
-      `确定要删除项目「${(d.title || '未命名').slice(0, 20)}${(d.title && d.title.length > 20) ? '…' : ''}」吗？此操作不可恢复。`,
-      '删除确认',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
-    )
+    await ElMessageBox({
+      title: '删除确认',
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      closeOnClickModal: false,
+      message: h('div', { class: 'delete-drama-confirm' }, [
+        h('p', { class: 'delete-drama-confirm__title' }, `确定要删除项目「${shortTitle}」吗？此操作不可恢复。`),
+        h(ElCheckbox, {
+          modelValue: deleteGeneratedMedia,
+          'onUpdate:modelValue': (val) => { deleteGeneratedMedia = !!val },
+        }, () => '同时删除本项目已产生的图片和视频资源'),
+        h('p', { class: 'delete-drama-confirm__hint' }, '勾选后会一并清理本项目目录下已生成的图片、视频和候选素材文件。'),
+      ]),
+      showCancelButton: true,
+    })
   } catch {
     return
   }
   try {
-    await dramaAPI.delete(d.id)
-    ElMessage.success('已删除')
+    const result = await dramaAPI.delete(d.id, { delete_generated_media: deleteGeneratedMedia })
+    if (result?.media_cleanup?.warning) {
+      ElMessage.warning(result.media_cleanup.warning)
+    } else if (result?.deleted_generated_media) {
+      ElMessage.success('项目和已生成资源已删除')
+    } else {
+      ElMessage.success('已删除')
+    }
     loadList()
   } catch (e) {
     ElMessage.error(e.message || '删除失败')
@@ -838,6 +857,19 @@ onMounted(async () => {
     radial-gradient(ellipse 70% 45% at 50% -10%, rgba(99, 102, 241, 0.18) 0%, transparent 70%),
     radial-gradient(ellipse 50% 35% at 85% 55%, rgba(139, 92, 246, 0.1) 0%, transparent 60%),
     radial-gradient(ellipse 40% 30% at 10% 80%, rgba(79, 70, 229, 0.08) 0%, transparent 60%);
+}
+
+.delete-drama-confirm__title {
+  margin: 0 0 12px;
+  line-height: 1.6;
+  color: #27272a;
+}
+
+.delete-drama-confirm__hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #71717a;
 }
 .header {
   background: rgba(12, 12, 18, 0.82);

@@ -1,5 +1,8 @@
 // 对应 Go application/services/drama_service.go
 
+const fs = require('fs');
+const path = require('path');
+
 const storageLayout = require('./storageLayout');
 const { resolveStylePreset } = require('../constants/generationStylePresets');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
@@ -26,6 +29,359 @@ function parseJsonColumn(value) {
   } catch (_) {
     return null;
   }
+}
+
+function parseBooleanFlag(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return ['1', 'true', 'yes', 'on'].includes(normalized);
+  }
+  return false;
+}
+
+function tableExists(db, table) {
+  try {
+    const row = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+    ).get(table);
+    return !!row;
+  } catch (_) {
+    return false;
+  }
+}
+
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function buildStorageRoot(cfg) {
+  const raw = (cfg?.storage?.local_path || './data/storage').toString();
+  return path.isAbsolute(raw) ? raw : path.join(process.cwd(), raw);
+}
+
+function selectNumericIds(db, sql, params = []) {
+  return db.prepare(sql).all(...params)
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isFinite(id) && id > 0);
+}
+
+function buildInClause(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return null;
+  return '(' + ids.map(() => '?').join(',') + ')';
+}
+
+function applySetClauses(db, table, whereSql, whereParams, setValues, now, deletedAt = null) {
+  if (!tableExists(db, table)) return 0;
+  const columns = tableColumns(db, table);
+  const updates = [];
+  const params = [];
+  for (const [key, value] of Object.entries(setValues || {})) {
+    if (!columns.has(key)) continue;
+    updates.push(`${key} = ?`);
+    params.push(value);
+  }
+  if (deletedAt !== null && columns.has('deleted_at')) {
+    updates.push('deleted_at = ?');
+    params.push(deletedAt);
+  }
+  if (columns.has('updated_at')) {
+    updates.push('updated_at = ?');
+    params.push(now);
+  }
+  if (updates.length === 0) return 0;
+  const stmt = db.prepare(`UPDATE ${table} SET ${updates.join(', ')} WHERE ${whereSql}`);
+  const result = stmt.run(...params, ...whereParams);
+  return result.changes || 0;
+}
+
+function collectDramaMediaScope(db, dramaId) {
+  const episodeIds = selectNumericIds(db, 'SELECT id FROM episodes WHERE drama_id = ?', [dramaId]);
+  const episodeClause = buildInClause(episodeIds);
+  const storyboardIds = episodeClause
+    ? selectNumericIds(db, `SELECT id FROM storyboards WHERE episode_id IN ${episodeClause}`, episodeIds)
+    : [];
+  const sceneIds = selectNumericIds(db, 'SELECT id FROM scenes WHERE drama_id = ?', [dramaId]);
+  const characterIds = selectNumericIds(db, 'SELECT id FROM characters WHERE drama_id = ?', [dramaId]);
+  return {
+    episodeIds,
+    storyboardIds,
+    sceneIds,
+    characterIds,
+  };
+}
+
+function cleanupDramaGeneratedMediaRecords(db, log, dramaRow) {
+  const dramaId = Number(dramaRow.id);
+  const now = new Date().toISOString();
+  const scope = collectDramaMediaScope(db, dramaId);
+  const counts = {
+    storyboards_cleared: 0,
+    episodes_cleared: 0,
+    characters_cleared: 0,
+    scenes_cleared: 0,
+    props_cleared: 0,
+    character_libraries_deleted: 0,
+    scene_libraries_deleted: 0,
+    prop_libraries_deleted: 0,
+    image_generations_deleted: 0,
+    video_generations_deleted: 0,
+    video_merges_deleted: 0,
+    assets_deleted: 0,
+    codex_image_jobs_deleted: 0,
+  };
+
+  counts.episodes_cleared = applySetClauses(
+    db,
+    'episodes',
+    'drama_id = ?',
+    [dramaId],
+    {
+      video_url: null,
+      thumbnail: null,
+    },
+    now
+  );
+
+  if (scope.episodeIds.length > 0) {
+    const episodeClause = buildInClause(scope.episodeIds);
+    counts.storyboards_cleared = applySetClauses(
+      db,
+      'storyboards',
+      `episode_id IN ${episodeClause}`,
+      scope.episodeIds,
+      {
+        image_url: null,
+        local_path: null,
+        composed_image: null,
+        main_panel_idx: null,
+        video_url: null,
+        audio_local_path: null,
+        narration_audio_local_path: null,
+        first_frame_image_id: null,
+        last_frame_image_id: null,
+        last_frame_image_url: null,
+        last_frame_local_path: null,
+      },
+      now
+    );
+  }
+
+  counts.characters_cleared = applySetClauses(
+    db,
+    'characters',
+    'drama_id = ?',
+    [dramaId],
+    {
+      image_url: null,
+      local_path: null,
+      four_view_image_url: null,
+      extra_images: null,
+      ref_image: null,
+    },
+    now
+  );
+
+  counts.scenes_cleared = applySetClauses(
+    db,
+    'scenes',
+    'drama_id = ?',
+    [dramaId],
+    {
+      image_url: null,
+      local_path: null,
+      extra_images: null,
+      ref_image: null,
+    },
+    now
+  );
+
+  counts.props_cleared = applySetClauses(
+    db,
+    'props',
+    'drama_id = ?',
+    [dramaId],
+    {
+      image_url: null,
+      local_path: null,
+      extra_images: null,
+      ref_image: null,
+    },
+    now
+  );
+
+  counts.character_libraries_deleted = applySetClauses(
+    db,
+    'character_libraries',
+    'drama_id = ?',
+    [dramaId],
+    {
+      image_url: null,
+      local_path: null,
+      four_view_image_url: null,
+    },
+    now,
+    now
+  );
+
+  counts.scene_libraries_deleted = applySetClauses(
+    db,
+    'scene_libraries',
+    'drama_id = ?',
+    [dramaId],
+    {
+      image_url: null,
+      local_path: null,
+    },
+    now,
+    now
+  );
+
+  counts.prop_libraries_deleted = applySetClauses(
+    db,
+    'prop_libraries',
+    'drama_id = ?',
+    [dramaId],
+    {
+      image_url: null,
+      local_path: null,
+    },
+    now,
+    now
+  );
+
+  const imageWhere = ['drama_id = ?'];
+  const imageParams = [dramaId];
+  if (scope.episodeIds.length > 0) {
+    imageWhere.push(`episode_id IN ${buildInClause(scope.episodeIds)}`);
+    imageParams.push(...scope.episodeIds);
+  }
+  if (scope.storyboardIds.length > 0) {
+    imageWhere.push(`storyboard_id IN ${buildInClause(scope.storyboardIds)}`);
+    imageParams.push(...scope.storyboardIds);
+  }
+  if (scope.sceneIds.length > 0) {
+    imageWhere.push(`scene_id IN ${buildInClause(scope.sceneIds)}`);
+    imageParams.push(...scope.sceneIds);
+  }
+  if (scope.characterIds.length > 0) {
+    imageWhere.push(`character_id IN ${buildInClause(scope.characterIds)}`);
+    imageParams.push(...scope.characterIds);
+  }
+  counts.image_generations_deleted = applySetClauses(
+    db,
+    'image_generations',
+    imageWhere.join(' OR '),
+    imageParams,
+    {
+      image_url: null,
+      local_path: null,
+    },
+    now,
+    now
+  );
+
+  const videoWhere = ['drama_id = ?'];
+  const videoParams = [dramaId];
+  if (scope.storyboardIds.length > 0) {
+    videoWhere.push(`storyboard_id IN ${buildInClause(scope.storyboardIds)}`);
+    videoParams.push(...scope.storyboardIds);
+  }
+  counts.video_generations_deleted = applySetClauses(
+    db,
+    'video_generations',
+    videoWhere.join(' OR '),
+    videoParams,
+    {
+      video_url: null,
+      local_path: null,
+      image_url: null,
+      first_frame_url: null,
+      last_frame_url: null,
+      reference_image_urls: null,
+    },
+    now,
+    now
+  );
+
+  counts.video_merges_deleted = applySetClauses(
+    db,
+    'video_merges',
+    'drama_id = ?',
+    [dramaId],
+    {
+      merged_url: null,
+    },
+    now,
+    now
+  );
+
+  counts.assets_deleted = applySetClauses(
+    db,
+    'assets',
+    'drama_id = ?',
+    [dramaId],
+    {
+      url: null,
+      local_path: null,
+    },
+    now,
+    now
+  );
+
+  counts.codex_image_jobs_deleted = applySetClauses(
+    db,
+    'codex_image_jobs',
+    'drama_id = ?',
+    [dramaId],
+    {
+      candidates: null,
+      selected_candidate_id: null,
+      applied_image_url: null,
+      applied_local_path: null,
+      manifest_path: null,
+    },
+    now,
+    now
+  );
+
+  try {
+    log.info('Drama generated media records cleaned', { drama_id: dramaId, counts });
+  } catch (_) {}
+  return {
+    requested: true,
+    counts,
+    project_subdir: storageLayout.buildProjectRelativeDir(dramaRow),
+  };
+}
+
+function deleteDramaStorageDir(log, cfg, projectSubdir) {
+  const summary = {
+    project_subdir: projectSubdir || null,
+    project_directory_found: false,
+    project_directory_removed: false,
+    warning: null,
+  };
+  if (!projectSubdir) return summary;
+  const storageRoot = buildStorageRoot(cfg);
+  const absDir = path.join(storageRoot, projectSubdir.replace(/\//g, path.sep));
+  summary.project_directory_found = fs.existsSync(absDir);
+  if (!summary.project_directory_found) return summary;
+  try {
+    fs.rmSync(absDir, { recursive: true, force: true });
+    summary.project_directory_removed = !fs.existsSync(absDir);
+  } catch (err) {
+    summary.warning = err.message || '项目媒体目录删除失败';
+    try {
+      log.warn('Drama generated media directory delete failed', { project_subdir: projectSubdir, error: err.message });
+    } catch (_) {}
+  }
+  return summary;
 }
 
 function createDrama(db, log, req) {
@@ -290,14 +646,51 @@ function generateStoryboard(db, log, episodeId, options) {
   );
 }
 
-function deleteDrama(db, log, dramaId) {
-  const result = db.prepare('UPDATE dramas SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-    new Date().toISOString(),
-    Number(dramaId)
+function deleteDrama(db, log, cfg, dramaId, options = {}) {
+  const did = Number(dramaId);
+  const dramaRow = db.prepare(
+    'SELECT id, title, created_at, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL'
+  ).get(did);
+  if (!dramaRow) return false;
+
+  const deleteGeneratedMedia = parseBooleanFlag(
+    options.delete_generated_media ?? options.deleteGeneratedMedia
   );
-  if (result.changes === 0) return false;
-  log.info('Drama deleted', { drama_id: dramaId });
-  return true;
+
+  const outcome = db.transaction(() => {
+    const mediaCleanup = deleteGeneratedMedia
+      ? cleanupDramaGeneratedMediaRecords(db, log, dramaRow)
+      : { requested: false, counts: null, project_subdir: null };
+    const now = new Date().toISOString();
+    const result = db.prepare(
+      'UPDATE dramas SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL'
+    ).run(now, did);
+    if (result.changes === 0) return { ok: false };
+    return { ok: true, mediaCleanup };
+  })();
+
+  if (!outcome.ok) return false;
+
+  const storageCleanup = deleteGeneratedMedia
+    ? deleteDramaStorageDir(log, cfg, outcome.mediaCleanup.project_subdir)
+    : null;
+
+  log.info('Drama deleted', {
+    drama_id: did,
+    delete_generated_media: deleteGeneratedMedia,
+    project_directory_removed: storageCleanup?.project_directory_removed ?? false,
+  });
+
+  return {
+    message: deleteGeneratedMedia ? '项目及其已生成资源已删除' : '删除成功',
+    deleted_generated_media: deleteGeneratedMedia,
+    media_cleanup: deleteGeneratedMedia
+      ? {
+          ...outcome.mediaCleanup,
+          ...storageCleanup,
+        }
+      : { requested: false },
+  };
 }
 
 function getDramaStats(db) {
