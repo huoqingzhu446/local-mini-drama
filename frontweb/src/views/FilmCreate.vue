@@ -795,7 +795,35 @@
                       </el-button>
                       <el-button size="small" :loading="addingSceneToMaterialId === scene.id" :disabled="!hasAssetImage(scene)" @click="onAddSceneToMaterialLibrary(scene)">
                         加入素材库
-                      </el-button></div>
+                      </el-button>
+                      <el-tooltip content="基于当前主图生成9宫格空间/机位/材质参考板，不替换主图" placement="top">
+                        <el-button
+                          size="small"
+                          type="warning"
+                          plain
+                          :loading="generatingSceneReferenceGridIds.has(scene.id)"
+                          :disabled="!hasAssetImage(scene)"
+                          @click="onGenerateSceneReferenceGridImage(scene)"
+                        >
+                          {{ hasSceneReferenceGridImage(scene) ? '重生成9宫格' : '生成9宫格参考图' }}
+                        </el-button>
+                      </el-tooltip>
+                      <CodexImageJobButton
+                        entity-type="scene"
+                        :entity-id="scene.id"
+                        :drama-id="dramaId"
+                        :episode-id="currentEpisodeId"
+                        frame-type="reference_grid"
+                        label="Codex 9宫格"
+                        idle-tooltip="加入 Codex 队列：基于当前场景生成9宫格参考板，不替换主图"
+                        :style="getSelectedStyle()"
+                        :aspect-ratio="projectAspectRatio"
+                        :quality="projectImageQuality"
+                        :disabled="!hasAssetImage(scene)"
+                        @used="onCodexImageUsed"
+                        @preview="openImagePreview"
+                      />
+                    </div>
                     <div v-if="getSceneAffectedStoryboards(scene.id).length" class="asset-storyboard-link">
                       <span class="asl-label">影响的分镜：</span>
                       <span
@@ -841,6 +869,15 @@
                           <el-icon :size="10"><ZoomIn /></el-icon>
                         </button>
                         <button class="extra-thumb-remove" title="移除" @click.stop="onRemoveExtraImage('scene', scene, ep)">×</button>
+                      </div>
+                    </div>
+                    <div v-if="hasSceneReferenceGridImage(scene)" class="scene-reference-grid-strip">
+                      <span class="scene-reference-grid-label">9宫格参考</span>
+                      <div class="extra-thumb scene-reference-grid-thumb" title="场景9宫格参考板（视频辅助参考，不替换主图）">
+                        <img :src="sceneReferenceGridUrl(scene)" alt="" @click="openImagePreview(sceneReferenceGridUrl(scene))" />
+                        <button class="thumb-preview-btn" title="放大预览" @click.stop="openImagePreview(sceneReferenceGridUrl(scene))">
+                          <el-icon :size="10"><ZoomIn /></el-icon>
+                        </button>
                       </div>
                     </div>
                     <div class="asset-cover-actions">
@@ -1333,7 +1370,7 @@
                     <el-tooltip placement="top" :show-after="280" :show-arrow="false" popper-class="sb-universal-tooltip-popper">
                       <template #content>
                         <div class="sb-universal-tooltip">
-                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考；模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等以控制台为准）：此处为提交主提示词；只要本框有内容，生视频时<strong>只</strong>发送这段，不会拼接下方「视频提示词」里的动作/对话/旁白。参考图顺序一般为：场景 → 角色（多张）→ 物品 → 分镜图（若已生成，可多张，按当前主图 → 历史图顺序追加在最后，最多 6 张，不改变前面编号）；请用 <strong>@图片1</strong>、<strong>@图片2</strong>…（<strong>@图片N 后建议加半角空格</strong>）对应参考图，勿用 @姓名 指图；有场景图时 <strong>@图片1</strong> 只表环境，人物从 <strong>@图片2</strong> 起。若场景参考是<strong>四宫格/多视角拼图</strong>，仅借空间与氛围，须在文案中写明<strong>单镜头完整画幅、禁止分屏宫格</strong>，避免成片模仿拼图布局。全能提示词下拉中「生成」会按<strong>本条分镜总时长</strong>与本集剧本、镜序、邻镜信息，自动决定子分镜数 M（第2行「由以下M个分镜…」），第4行起为「分镜1：T1秒:」…多行，且各段秒数之和等于本镜时长；第3行仍为环境/参考图约束；「生成」与「润色」均为<strong>流式输出</strong>到本框；「润色」在此基础上增强。若本框留空，则退回仅用「视频提示词」。
+                          全能生视频链路（<strong>AI 配置 · 视频</strong> 中选接口规范：<code>kling_omni</code> 可灵 Omni，或 <code>volcengine_omni</code> 火山即梦 Seedance 2.0 多图参考；模型如 <code>kling-video-o1</code>、<code>doubao-seedance-2-0-260128</code> 等以控制台为准）：此处为提交主提示词；只要本框有内容，生视频时<strong>只</strong>发送这段，不会拼接下方「视频提示词」里的动作/对话/旁白。参考图顺序一般为：场景主图 → 场景9宫格参考图（若已生成）→ 角色（多张）→ 物品 → 分镜图（若已生成，可多张，按当前主图 → 历史图顺序追加在最后，最多 6 张，不改变前面编号）；请用 <strong>@图片1</strong>、<strong>@图片2</strong>…（<strong>@图片N 后建议加半角空格</strong>）对应参考图，勿用 @姓名 指图；有场景图时 <strong>@图片1</strong> 只表环境；若存在9宫格参考图，<strong>@图片2</strong> 只用于空间、材质、光影和机位参考，人物按 @ 选择器中的角色槽位编号绑定。若场景参考是<strong>四宫格/九宫格/多视角拼图</strong>，仅借空间与氛围，须在文案中写明<strong>单镜头完整画幅、禁止分屏宫格</strong>，避免成片模仿拼图布局。全能提示词下拉中「生成」会按<strong>本条分镜总时长</strong>与本集剧本、镜序、邻镜信息，自动决定子分镜数 M（第2行「由以下M个分镜…」），第4行起为「分镜1：T1秒:」…多行，且各段秒数之和等于本镜时长；第3行仍为环境/参考图约束；「生成」与「润色」均为<strong>流式输出</strong>到本框；「润色」在此基础上增强。若本框留空，则退回仅用「视频提示词」。
                         </div>
                       </template>
                       <el-icon class="sb-universal-hint-icon" tabindex="0" role="img" aria-label="片段说明">
@@ -3885,7 +3922,7 @@ const {
 const {
   showEditScene, editSceneForm, editSceneSaving, editScenePromptGenerating,
   extractingSceneDesc, addSceneRefImage, addSceneRefFileInput,
-  scenesExtracting, generatingSceneIds,
+  scenesExtracting, generatingSceneIds, generatingSceneReferenceGridIds,
   // 场景多视角额外 state（由 FilmCreate 管理）
   showSceneLibrary, sceneLibraryList, sceneLibraryLoading, sceneLibraryPage, sceneLibraryPageSize,
   sceneLibraryTotal, sceneLibraryKeyword, sceneLibraryTab,
@@ -3894,7 +3931,7 @@ const {
   editSceneLibrarySaving, addingSceneToLibraryId, addingSceneToMaterialId, addingSceneFromLibraryId,
   onExtractScenes: onExtractScenesRaw, openAddScene, stopScenePromptPoll, editScene, doGenerateScenePrompt, doGenerateSceneSinglePrompt,
   saveSceneRefImageIfAny, clearSceneRefImage, doExtractSceneFromImage, submitEditScene,
-  onCloseSceneDialog, onDeleteScene, onGenerateSceneImage,
+  onCloseSceneDialog, onDeleteScene, onGenerateSceneImage, onGenerateSceneReferenceGridImage,
   loadSceneLibraryList, debouncedLoadSceneLibrary, loadDramaAllSceneList, debouncedLoadDramaAllSceneList,
   onSceneLibraryDialogOpen, onSceneLibraryTabChange, isSceneAddToEpisodeLoading,
   openEditSceneLibrary, submitEditSceneLibrary,
@@ -3992,7 +4029,7 @@ const navSteps = computed(() => {
   // 场景
   const sceneList = scenes.value || []
   const sceneDone = sceneList.length > 0 && sceneList.every(s => hasAssetImage(s))
-  const sceneGen = scenesExtracting.value || generatingSceneIds.size > 0
+  const sceneGen = scenesExtracting.value || generatingSceneIds.size > 0 || generatingSceneReferenceGridIds.size > 0
     || epRunning.some((t) => t.resourceType === GEN_RESOURCE.SCENE_IMAGE || t.resourceType === GEN_RESOURCE.EXTRACT_SCENES)
   const sceneStatus = sceneGen ? 'generating' : sceneDone ? 'done' : sceneList.length > 0 ? 'partial' : 'pending'
 
@@ -4923,6 +4960,7 @@ function getGeneratingSetsBag() {
     generatingCharIds,
     generatingPropIds,
     generatingSceneIds,
+    generatingSceneReferenceGridIds,
     generatingSbImageIds,
     generatingSbFirstImageIds,
     generatingSbLastImageIds,
@@ -6539,7 +6577,16 @@ function parseExtraImages(item) {
 function localPathToUrl(p) {
   if (!p) return ''
   if (p.startsWith('http')) return p
+  if (p.startsWith('/')) return p
   return '/static/' + p.replace(/^\//, '')
+}
+
+function sceneReferenceGridUrl(scene) {
+  return localPathToUrl(scene?.reference_grid_local_path || scene?.reference_grid_image_url || '')
+}
+
+function hasSceneReferenceGridImage(scene) {
+  return !!sceneReferenceGridUrl(scene)
 }
 
 // 查找角色/道具/场景在 store 中的当前对象
@@ -7338,12 +7385,20 @@ function getSbUniversalOmniRefSlots(sb) {
   let idx = 1
   const scene = getSbSelectedScene(sb.id)
   if (scene && hasAssetImage(scene)) {
-    out.push({
-      index: idx++,
-      kind: 'scene',
-      name: (scene.name || '场景').toString(),
-      thumbUrl: assetImageUrl(scene),
-    })
+      out.push({
+        index: idx++,
+        kind: 'scene',
+        name: (scene.location || scene.name || '场景').toString(),
+        thumbUrl: assetImageUrl(scene),
+      })
+      if (hasSceneReferenceGridImage(scene)) {
+        out.push({
+          index: idx++,
+          kind: 'scene_grid',
+          name: `${scene.location || scene.name || '场景'}9宫格参考`,
+          thumbUrl: sceneReferenceGridUrl(scene),
+        })
+      }
   }
   for (const c of getSbSelectedCharacters(sb.id)) {
     if (hasAssetImage(c)) {
@@ -7402,7 +7457,10 @@ function collectSbOmniReferenceAbsoluteUrls(sb) {
     urls.push(abs)
   }
   const scene = getSbSelectedScene(sb.id)
-  if (scene && hasAssetImage(scene)) pushAbs(assetImageUrl(scene))
+  if (scene && hasAssetImage(scene)) {
+    pushAbs(assetImageUrl(scene))
+    if (hasSceneReferenceGridImage(scene)) pushAbs(sceneReferenceGridUrl(scene))
+  }
   for (const c of getSbSelectedCharacters(sb.id)) {
     if (hasAssetImage(c)) pushAbs(assetImageUrl(c))
   }
@@ -10772,6 +10830,32 @@ html.light .asset-cover-actions { border-top-color: rgba(139,92,246,0.1); }
 .sb-thumb-item:hover .extra-thumb-remove,
 .sb-img-thumb:hover .thumb-preview-btn { opacity: 1; }
 html.light .extra-images-strip { background: rgba(139,92,246,0.05); }
+.scene-reference-grid-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(245, 158, 11, 0.1);
+  border-top: 1px solid rgba(245, 158, 11, 0.16);
+}
+.scene-reference-grid-label {
+  flex: 1;
+  min-width: 0;
+  color: #f59e0b;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.scene-reference-grid-thumb {
+  width: 58px;
+  height: 38px;
+  cursor: zoom-in;
+  border-color: rgba(245, 158, 11, 0.45);
+}
+html.light .scene-reference-grid-strip {
+  background: rgba(245, 158, 11, 0.08);
+  border-top-color: rgba(245, 158, 11, 0.2);
+}
 .empty-tip {
   color: #5a5a66;
   font-size: 0.9rem;

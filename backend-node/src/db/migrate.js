@@ -225,8 +225,12 @@ function ensureAllColumns(database) {
     { name: 'polished_prompt_style_signature', type: 'TEXT' }, // polished_prompt 对应的统一视觉风格签名
     { name: 'polished_prompt_single', type: 'TEXT' }, // 文字AI润色后的完整单图图片提示词，Codex/单图生图优先使用
     { name: 'polished_prompt_single_style_signature', type: 'TEXT' }, // polished_prompt_single 对应的统一视觉风格签名
+    { name: 'polished_prompt_nine', type: 'TEXT' }, // 场景九宫格参考板完整图片提示词
+    { name: 'polished_prompt_nine_style_signature', type: 'TEXT' }, // polished_prompt_nine 对应的统一视觉风格签名
     { name: 'image_url',        type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
+    { name: 'reference_grid_image_url', type: 'TEXT' }, // 场景九宫格参考板 URL，不覆盖主图
+    { name: 'reference_grid_local_path', type: 'TEXT' }, // 场景九宫格参考板本地路径
     { name: 'extra_images',     type: 'TEXT' },
     { name: 'ref_image',        type: 'TEXT' },  // 用户上传的参考图（本地相对路径或 URL）
     { name: 'negative_prompt',  type: 'TEXT' },

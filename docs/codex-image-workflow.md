@@ -39,6 +39,7 @@
   - 前端 API 封装。
 - `frontweb/src/views/FilmCreate.vue`
   - 角色生成、道具生成、场景生成、分镜图片区域接入 Codex 按钮和候选图组件。
+  - 场景主图完成后，可单独将“场景9宫格参考图”加入 Codex 队列；该任务使用 `entity_type=scene`、`frame_type=reference_grid`，候选图使用后只写回 `scenes.reference_grid_image_url/local_path`，不覆盖场景主图。
   - 资源管理顶部提供“本集缺图入 Codex”，只把当前集缺主图的角色、道具、场景加入队列。
   - 分镜生成区域提供“Codex 批量分镜图”，批量把当前集缺图分镜加入队列。
   - 全能模式下分镜中间栏显示“片段描述”，右侧视频栏提供单条“生成分镜图”和 `Codex` 入队入口；生成后的分镜图会显示在左侧参考图区域，并作为全能视频的追加参考图。
@@ -76,6 +77,16 @@ backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboard
 1. 页面入队
 
    在角色、道具、场景卡片上点击 `Codex`，或点击分区的 `Codex 批量`。资源管理顶部的“本集缺图入 Codex”会扫描当前集角色、道具、场景，只入队缺主图的资源。
+
+   场景9宫格参考图是辅助图，不属于缺主图扫描范围。场景已有主图后，点击 `Codex 9宫格` 会创建独立任务：
+
+   ```text
+   entity_type = scene
+   entity_id   = scenes.id
+   frame_type  = reference_grid
+   ```
+
+   该任务的候选图使用后只更新 `scenes.reference_grid_image_url/reference_grid_local_path`，后续全能视频会按“场景主图 → 场景9宫格参考图 → 角色/道具/分镜图”的顺序引用；它不会替换 `scenes.image_url/local_path`。
 
    分镜区域也可以入队：
 
@@ -136,7 +147,8 @@ backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboard
    正常交互是用户在页面候选图上点击“使用”。后端会：
 
    - 将候选图复制到正式 `characters` / `props` / `scenes` / `storyboards` 目录。
-   - 角色、道具、场景：更新业务表的 `image_url`、`local_path`、`extra_images`。
+   - 角色、道具、普通场景主图：更新业务表的 `image_url`、`local_path`、`extra_images`。
+   - 场景9宫格参考图：更新 `reference_grid_image_url`、`reference_grid_local_path`，不改主图和 `extra_images`。
    - 分镜：调用 `imageService.upload()` 创建已完成的 `image_generations` 记录，再按 `frame_type` 绑定主图/首帧/尾帧。
    - 将 job 标记为 `used`。
    - 刷新 `jobs.json`，已使用任务不再出现在待生成队列里。

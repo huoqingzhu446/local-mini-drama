@@ -39,5 +39,8 @@ export const sceneAPI = {
   },
   generateFourViewImage(sceneId, model, style) {
     return request.post(`/scenes/${sceneId}/generate-four-view-image`, { model, style })
+  },
+  generateReferenceGridImage(sceneId, { model, style, quality } = {}) {
+    return request.post(`/scenes/${sceneId}/generate-reference-grid-image`, { model, style, quality })
   }
 }

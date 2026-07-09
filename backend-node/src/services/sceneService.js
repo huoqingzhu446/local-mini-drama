@@ -68,8 +68,22 @@ function updateScene(db, log, sceneId, req) {
       params.push(signature);
     }
   }
+  if (req.polished_prompt_nine != null) {
+    updates.push('polished_prompt_nine = ?');
+    params.push(req.polished_prompt_nine);
+    if (sceneColumns.has('polished_prompt_nine_style_signature')) {
+      const dramaRow = sceneRow?.drama_id
+        ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
+        : null;
+      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
+      updates.push('polished_prompt_nine_style_signature = ?');
+      params.push(signature);
+    }
+  }
   if (req.image_url != null) { updates.push('image_url = ?'); params.push(req.image_url); }
   if (req.local_path !== undefined) { updates.push('local_path = ?'); params.push(req.local_path); }
+  if (req.reference_grid_image_url !== undefined) { updates.push('reference_grid_image_url = ?'); params.push(req.reference_grid_image_url ?? null); }
+  if (req.reference_grid_local_path !== undefined) { updates.push('reference_grid_local_path = ?'); params.push(req.reference_grid_local_path ?? null); }
   if (req.extra_images !== undefined) { updates.push('extra_images = ?'); params.push(req.extra_images ?? null); }
   if (req.ref_image !== undefined) { updates.push('ref_image = ?'); params.push(req.ref_image ?? null); }
   if (updates.length === 0) return { ok: true };
@@ -158,9 +172,12 @@ function listByDramaId(db, dramaId) {
     prompt: row.prompt,
     polished_prompt: row.polished_prompt || null,
     polished_prompt_single: row.polished_prompt_single || null,
+    polished_prompt_nine: row.polished_prompt_nine || null,
     description: row.description || null,
     image_url: row.image_url,
     local_path: row.local_path,
+    reference_grid_image_url: row.reference_grid_image_url || null,
+    reference_grid_local_path: row.reference_grid_local_path || null,
     extra_images: row.extra_images || null,
     status: row.status,
     created_at: row.created_at,
@@ -178,8 +195,11 @@ function getSceneById(db, id) {
     prompt: row.prompt,
     polished_prompt: row.polished_prompt || null,
     polished_prompt_single: row.polished_prompt_single || null,
+    polished_prompt_nine: row.polished_prompt_nine || null,
     image_url: row.image_url,
     local_path: row.local_path,
+    reference_grid_image_url: row.reference_grid_image_url || null,
+    reference_grid_local_path: row.reference_grid_local_path || null,
     extra_images: row.extra_images || null,
     status: row.status,
     created_at: row.created_at,
@@ -229,6 +249,29 @@ function buildSceneSingleImagePrompt(description, styleEn, styleZh, visualBible)
 
   const tailParts = [];
   if (zh || en) tailParts.push(`Reiterate: same art style as above (${en || zh}). No people, no text.`);
+  const tail = tailParts.length ? `\n\n---\n\n${tailParts.join(' ')}` : '';
+
+  return `${styleHeader}${bibleHeader}${imageLayoutInstruction}\n\n---\n\n${description}${tail}`;
+}
+
+/**
+ * 将文字AI的九宫格场景参考板描述 + 布局指令 + 风格 合并为完整的图片AI提示词
+ */
+function buildSceneNineGridImagePrompt(description, styleEn, styleZh, visualBible) {
+  const imageLayoutInstruction = promptI18n.getSceneGenerateNineImagePrompt();
+  const zh = (styleZh || '').trim();
+  const en = (styleEn || '').trim();
+  const bible = (visualBible || '').trim();
+
+  const styleLines = [];
+  if (zh) styleLines.push(`【画风·最高优先级】九格统一：${zh}`);
+  if (en && en !== zh) styleLines.push(`MANDATORY ART STYLE (all 9 panels): ${en}.`);
+  else if (en && !zh) styleLines.push(`MANDATORY ART STYLE (all 9 panels): ${en}.`);
+  const styleHeader = styleLines.length ? `${styleLines.join('\n')}\n\n` : '';
+  const bibleHeader = bible ? `【统一视觉风格圣经】\n${bible}\n\n` : '';
+
+  const tailParts = [];
+  if (zh || en) tailParts.push(`Reiterate: same art style as above (${en || zh}). Same physical scene across all 9 panels. No people, no text.`);
   const tail = tailParts.length ? `\n\n---\n\n${tailParts.join(' ')}` : '';
 
   return `${styleHeader}${bibleHeader}${imageLayoutInstruction}\n\n---\n\n${description}${tail}`;
@@ -371,6 +414,75 @@ async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, s
   }
   log.info('[场景单图提示词] 生成并保存完成', { scene_id: sceneId, length: polishedPrompt.length });
   return { ok: true, polished_prompt_single: polishedPrompt };
+}
+
+/**
+ * 仅生成（并保存）场景九宫格参考板完整图片提示词到 scenes.polished_prompt_nine。
+ */
+async function generateSceneNinePromptOnly(db, log, cfg, sceneId, modelName, style) {
+  const sceneColumns = tableColumns(db, 'scenes');
+  const sceneRow = db.prepare(
+    'SELECT id, drama_id, location, time, prompt, image_url, local_path FROM scenes WHERE id = ? AND deleted_at IS NULL'
+  ).get(Number(sceneId));
+  if (!sceneRow) return { ok: false, error: 'scene not found' };
+
+  const dramaFull = db.prepare('SELECT id, style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id);
+  let mergedCfg = mergeCfgStyleWithDrama(cfg, dramaFull || {});
+  mergedCfg = applySceneStyleOverride(mergedCfg, style);
+
+  const location = (sceneRow.location || '').trim();
+  const time = (sceneRow.time || '').trim();
+  const rawPrompt = (sceneRow.prompt || '').trim();
+  const hasMainImage = !!(sceneRow.local_path || sceneRow.image_url);
+
+  const sceneDesc = [
+    location ? `场景地点：${location}` : '',
+    time ? `时间/时段：${time}` : '',
+    rawPrompt ? `场景描述：${rawPrompt}` : '',
+    hasMainImage ? '已有场景主图：请以主图为视觉锚点扩展九宫格，不重做场景设定。' : '',
+  ].filter(Boolean).join('\n') || location || '未知场景';
+
+  const systemPrompt = promptI18n.getScenePolishPromptNine(mergedCfg);
+  const userPrompt = `请根据以下场景信息，生成九宫格场景参考板的提示词：\n\n${sceneDesc}`;
+
+  log.info('[场景九宫格提示词] Step1 开始生成九宫格描述', { scene_id: sceneId, location, time, has_main_image: hasMainImage });
+
+  let nineViewDescription;
+  try {
+    nineViewDescription = await aiClient.generateText(db, log, 'text', userPrompt, systemPrompt, {
+      model: modelName || undefined,
+      max_tokens: 5000,
+    });
+  } catch (err) {
+    log.error('[场景九宫格提示词] 文字AI失败', { error: err.message });
+    return { ok: false, error: err.message };
+  }
+
+  if (!nineViewDescription || !nineViewDescription.trim()) {
+    return { ok: false, error: 'AI返回内容为空' };
+  }
+
+  const { en: styleEn, zh: styleZh } = sceneScopedStyle(mergedCfg.style);
+  const polishedPrompt = buildSceneNineGridImagePrompt(
+    nineViewDescription.trim(),
+    styleEn,
+    styleZh,
+    mergedCfg?.style?.visual_bible || ''
+  );
+  const styleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+
+  if (sceneColumns.has('polished_prompt_nine_style_signature')) {
+    db.prepare('UPDATE scenes SET polished_prompt_nine = ?, polished_prompt_nine_style_signature = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, styleSignature || null, new Date().toISOString(), Number(sceneId)
+    );
+  } else {
+    db.prepare('UPDATE scenes SET polished_prompt_nine = ?, updated_at = ? WHERE id = ?').run(
+      polishedPrompt, new Date().toISOString(), Number(sceneId)
+    );
+  }
+
+  log.info('[场景九宫格提示词] 生成并保存完成', { scene_id: sceneId, length: polishedPrompt.length });
+  return { ok: true, polished_prompt_nine: polishedPrompt };
 }
 
 /**
@@ -564,6 +676,64 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style,
 }
 
 /**
+ * 场景九宫格参考板生成：基于当前场景主图生成辅助参考图，不覆盖主图。
+ */
+async function generateSceneReferenceGridImage(db, log, cfg, sceneId, modelName, style, quality) {
+  const sceneColumns = tableColumns(db, 'scenes');
+  const sceneRow = db.prepare(
+    `SELECT id, drama_id, location, time, prompt, image_url, local_path,
+            ${sceneColumns.has('polished_prompt_nine') ? 'polished_prompt_nine' : 'NULL AS polished_prompt_nine'},
+            ${sceneColumns.has('polished_prompt_nine_style_signature') ? 'polished_prompt_nine_style_signature' : 'NULL AS polished_prompt_nine_style_signature'}
+     FROM scenes WHERE id = ? AND deleted_at IS NULL`
+  ).get(Number(sceneId));
+  if (!sceneRow) return { ok: false, error: 'scene not found' };
+  const dramaFull = db.prepare('SELECT id, style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id);
+  if (!dramaFull) return { ok: false, error: 'unauthorized' };
+
+  const mainRef = sceneRow.local_path || sceneRow.image_url;
+  if (!mainRef) return { ok: false, error: 'scene main image required' };
+
+  let mergedCfg = mergeCfgStyleWithDrama(cfg, dramaFull);
+  mergedCfg = applySceneStyleOverride(mergedCfg, style);
+  let imagePrompt;
+
+  const currentStyleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  if (
+    sceneRow.polished_prompt_nine &&
+    String(sceneRow.polished_prompt_nine).trim() &&
+    isStyleSignatureCurrent(sceneRow.polished_prompt_nine_style_signature, currentStyleSignature)
+  ) {
+    imagePrompt = String(sceneRow.polished_prompt_nine).trim();
+    log.info('[场景九宫格参考板] 使用已保存的 polished_prompt_nine，跳过文字AI', { scene_id: sceneId });
+  } else {
+    const out = await generateSceneNinePromptOnly(db, log, cfg, sceneId, modelName, style);
+    if (!out.ok) return out;
+    imagePrompt = out.polished_prompt_nine;
+  }
+
+  const imageService = require('./imageService');
+  const imageGen = imageService.create(db, log, {
+    drama_id: sceneRow.drama_id,
+    scene_id: sceneId,
+    prompt: imagePrompt,
+    model: modelName || undefined,
+    size: '1792x1024',
+    quality: quality || 'standard',
+    provider: 'openai',
+    frame_type: 'scene_reference_grid',
+    reference_images: [mainRef],
+  });
+
+  log.info('[场景九宫格参考板] 图片生成任务已提交', {
+    scene_id: sceneId,
+    image_gen_id: imageGen?.id,
+    main_ref: String(mainRef).slice(0, 100),
+  });
+
+  return { ok: true, image_generation: imageGen };
+}
+
+/**
  * 从场景现有图片中反向提取场景描述，更新 prompt 字段。
  */
 async function extractSceneFromImage(db, log, cfg, sceneId) {
@@ -610,7 +780,9 @@ module.exports = {
   getSceneById,
   generateSceneFourViewImage,
   generateSceneSingleImage,
+  generateSceneReferenceGridImage,
   generateScenePromptOnly,
   generateSceneSinglePromptOnly,
+  generateSceneNinePromptOnly,
   extractSceneFromImage,
 };

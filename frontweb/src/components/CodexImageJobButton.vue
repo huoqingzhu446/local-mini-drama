@@ -58,6 +58,8 @@ const props = defineProps({
   style: { type: String, default: '' },
   aspectRatio: { type: String, default: '' },
   quality: { type: String, default: 'standard' },
+  label: { type: String, default: '' },
+  idleTooltip: { type: String, default: '' },
   disabled: { type: Boolean, default: false }
 })
 
@@ -77,7 +79,7 @@ const buttonText = computed(() => {
   if (status === 'completed') return '待使用'
   if (status === 'used') return '再生成'
   if (status === 'failed' || status === 'cancelled') return '重试'
-  return 'Codex'
+  return props.label || 'Codex'
 })
 
 const tooltipText = computed(() => {
@@ -87,7 +89,7 @@ const tooltipText = computed(() => {
   if (status === 'completed') return '候选图已生成，请选择使用'
   if (status === 'used') return '已使用候选图，可重新加入队列'
   if (status === 'failed') return job.value?.error_msg || '任务失败，可重试'
-  return '加入 Codex 生图队列'
+  return props.idleTooltip || '加入 Codex 生图队列'
 })
 
 function latestJobFromList(res) {

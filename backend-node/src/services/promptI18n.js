@@ -327,7 +327,7 @@ Each beat: rich motion picture prose (push in, pull back, rack focus), not a sta
 **硬性约束**：T1+T2+…+TM 必须严格等于本镜 JSON 的 duration（秒）；每行一条子分镜，禁止额外说明行。
 
 子分镜正文写法（电影化中文长句，参考产品范例）：
-- **参考图**：仅用 @图片1、@图片2…（阿拉伯数字）；@图片1 只写环境/光影/陈设；角色从 @图片2 起按 characters[] 顺序；有道具则继续 @图片3 …
+- **参考图**：仅用 @图片1、@图片2…（阿拉伯数字）；场景/场景参考板槽位只写环境、光影、陈设、空间关系；角色和道具必须按 IMAGE_SLOT_MAP / characters[] 的实际槽位编号绑定。
 - **运镜**：每段含至少两步运镜（如 缓推、横移、跟拍、拉回、俯拍特写），与人物动作同步。
 - **对白**：有 dialogue 时必须写出原文，格式如 @图片2 的嗓音…："对白原文" 或 @图片2 说："对白原文"；无对白则句末写 **无对白。**
 - **解说**：有 narration 时写在合适子分镜：**旁白（画面无声）："解说原文"**
@@ -1076,6 +1076,79 @@ function getScenePolishPromptSingle(cfg) {
 }
 
 /**
+ * 场景九宫格参考板提示词生成：文本AI将场景描述转换为空间/机位/细节参考板
+ */
+function getScenePolishPromptNine(cfg) {
+  const style = styleTextZhForScope(cfg, 'scene');
+  const visualBible = visualBibleTextForPrompt(cfg);
+  return `# 场景九宫格参考板生成器
+
+## 你的身份
+你是专业的 AI 视频美术指导和虚拟制片场景设计师，负责把单场景描述扩展成「给视频模型理解空间」的九宫格参考板提示词。
+
+## 核心规则
+
+### 统一性
+- 九宫格必须是**同一个真实连续场景**，不是九个不同设计方案。
+- 建筑结构、时代地域、材质、主色、天气、光线时段、透视逻辑必须统一。
+- 允许变化的只有机位、焦距、观察区域和景别。
+- 禁止出现角色、人物剪影、人体阴影、文字标注、水印、可读招牌。
+- 若用户已有场景主图，九宫格应以主图为视觉锚点扩展，不重做场景设定。${style ? '\n- **画风风格**：' + style : ''}${visualBible ? '\n- **统一视觉风格圣经（必须内化进最终提示词）**：' + visualBible : ''}
+
+### 九格内容设计
+- 第1格：超广角建立镜头，完整空间格局、建筑边界、远景、入口出口。
+- 第2格：主活动区中景，人物未来站位、对话、冲突、行动的位置，但画面无人物。
+- 第3格：入口/通道/过渡区，方便角色进入、离开、追逐、转场。
+- 第4格：反向机位，从第1格相反方向看同一空间，补足空间关系。
+- 第5格：Hero Master Shot，最适合作为视频背景参考的核心构图，风格与主图最接近。
+- 第6格：标志性环境细节，材质、陈设、纹理、符号性物件。
+- 第7格：高俯视空间关系，地面路径、区域分布、建筑/家具/地形排布。
+- 第8格：低机位纵深镜头，高度、压迫感、空间层次、天花/屋檐/山体/建筑纵深。
+- 第9格：氛围空镜，同一时段光影下的情绪帧，可包含烟雾、光束、雨、尘埃、风等环境效果。
+
+### 避免与生图侧重复
+- 不要写「3x3 grid」「无边框」「无文字水印」等版面和负面清单；生图 API 会统一注入。
+- 输出只写场景设定与每格画面内容，保持专业、具体、可生成。
+
+## 输出格式
+
+【场景统一设定】
+场景类型:
+地点特征:
+空间结构:
+默认光线/天气:
+材质与色彩:
+气氛基调:
+
+【第1格-超广角建立镜头】
+...
+
+【第2格-主活动区中景】
+...
+
+【第3格-入口/通道/过渡区】
+...
+
+【第4格-反向机位】
+...
+
+【第5格-Hero Master Shot】
+...
+
+【第6格-标志性环境细节】
+...
+
+【第7格-高俯视空间关系】
+...
+
+【第8格-低机位纵深镜头】
+...
+
+【第9格-氛围空镜】
+...`;
+}
+
+/**
  * 场景四视图提示词生成：文本AI将场景描述转化为四格场景参考图提示词
  */
 function getScenePolishPrompt(cfg) {
@@ -1164,6 +1237,19 @@ ONE single continuous image (no grid, no split panels, no collage).
 Show the complete scene in one unified view: wide establishing shot capturing the full space, key architectural features, lighting, atmosphere, and environmental details.
 No people: no characters, silhouettes, human shadows. No text/labels/watermarks/location lettering.
 Follow ART STYLE / 画风 block at the start of the user message if present.`;
+}
+
+/**
+ * 场景九宫格参考板图片生成：图片AI的system prompt
+ */
+function getSceneGenerateNineImagePrompt() {
+  return `Scene environment reference board — image only, no text reply.
+
+ONE image: EXACTLY a 3×3 grid with 9 equal landscape panels. Use the provided scene image, if any, as the canonical visual anchor: same location, same architecture, same material language, same palette, same lighting logic. Panel 5 should be the closest hero master frame to the reference image.
+
+Panel order: 1 ultra-wide establishing shot; 2 main activity zone medium-wide; 3 entrance/corridor/transition path; 4 reverse angle; 5 hero master shot; 6 signature environmental detail close-up; 7 elevated high-angle spatial layout; 8 low-angle depth/scale shot; 9 atmospheric empty shot.
+
+No people: no characters, silhouettes, human shadows. No text/labels/watermarks/location lettering. No random redesign between panels. Same physical scene across all panels; only camera angle, focal length, and viewing area change. No borders, no dividing lines, no frames, no gaps; panels must be seamlessly adjacent. Follow ART STYLE / 画风 block at the start of the user message if present.`;
 }
 
 /**
@@ -1402,7 +1488,7 @@ DIALOGUE — CRITICAL (when USER message contains DIALOGUE_VERBATIM):
 
 Reference images — CRITICAL (applies to every子分镜 line’s prose):
 - Use ONLY IMAGE_SLOT_MAP tokens @图片1, @图片2, … (Arabic digits).
-- Follow CHARACTER_IMAGE_BINDING. When @图片1 is 场景, never put character face/body/costume on @图片1; characters start at @图片2 as mapped.
+- Follow CHARACTER_IMAGE_BINDING. Scene and scene-reference-board slots describe environment only; never bind character face/body/costume to those slots. Characters use the exact role slots listed in IMAGE_SLOT_MAP.
 - Spacing: ASCII space after each @图片N before following Chinese/Latin.
 - No @姓名 as image token; no markdown.
 
@@ -1625,8 +1711,10 @@ module.exports = {
   getRoleGenerateImagePrompt,
   getScenePolishPrompt,
   getScenePolishPromptSingle,
+  getScenePolishPromptNine,
   getSceneGenerateImagePrompt,
   getSceneGenerateSingleImagePrompt,
+  getSceneGenerateNineImagePrompt,
   getImagePolishPrompt,
   getUniversalOmniSegmentPrompt,
   getUniversalOmniPolishPrompt,

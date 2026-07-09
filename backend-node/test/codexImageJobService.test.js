@@ -193,6 +193,66 @@ test('Codex scene job works with old scenes schema missing polished_prompt_singl
   db.close();
 });
 
+test('Codex scene reference grid job applies candidate without replacing main scene image', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-codex-scene-grid-job-'));
+  const cfg = {
+    database: { path: path.join(tmpDir, 'drama_generator.db') },
+    storage: { local_path: path.join(tmpDir, 'storage'), base_url: 'http://localhost:5679/static' },
+    style: { default_image_ratio: '16:9', default_style: 'photorealistic short drama still' },
+  };
+  fs.mkdirSync(cfg.storage.local_path, { recursive: true });
+  const db = makeDb(tmpDir);
+  db.exec(`
+    ALTER TABLE scenes ADD COLUMN polished_prompt_nine TEXT;
+    ALTER TABLE scenes ADD COLUMN reference_grid_image_url TEXT;
+    ALTER TABLE scenes ADD COLUMN reference_grid_local_path TEXT;
+  `);
+  db.prepare(
+    `INSERT INTO dramas (id, title, style, metadata, created_at)
+     VALUES (1, 'Palace Drama', 'realistic', ?, '2026-07-06T00:00:00.000Z')`
+  ).run(JSON.stringify({ aspect_ratio: '16:9' }));
+  db.prepare(
+    `INSERT INTO scenes (id, drama_id, episode_id, location, time, prompt, image_url, local_path, polished_prompt_nine)
+     VALUES (9, 1, 1, '夏朝宫殿', '夜晚', '青铜灯火映照的古代宫殿内景', '/static/projects/palace/scenes/main.png', 'projects/palace/scenes/main.png', 'Create a 3x3 palace environment reference board')`
+  ).run();
+
+  const created = codexImageJobService.createJob(db, null, cfg, {
+    entity_type: 'scene',
+    entity_id: 9,
+    drama_id: 1,
+    episode_id: 1,
+    frame_type: 'reference_grid',
+  });
+
+  assert.equal(created.ok, true);
+  assert.equal(created.job.frame_type, 'reference_grid');
+  assert.match(created.job.prompt, /3x3 scene reference board/);
+  assert.match(created.job.prompt, /Create a 3x3 palace environment reference board/);
+  assert.deepEqual(created.manifest.jobs[0].reference_images, ['projects/palace/scenes/main.png']);
+
+  const candidateSource = path.join(tmpDir, 'scene-grid.png');
+  fs.writeFileSync(candidateSource, Buffer.from('fake scene grid image bytes'));
+  const imported = codexImageJobService.importResults(db, null, cfg, {
+    results: [{ job_id: created.job.id, candidates: [{ path: candidateSource }] }],
+  });
+  assert.equal(imported.errors.length, 0);
+
+  const used = codexImageJobService.useCandidate(db, null, cfg, created.job.id, {
+    candidate_id: imported.imported[0].candidates[0].id,
+  });
+  assert.equal(used.ok, true);
+  assert.match(used.local_path, /projects\/0001_20260706_Palace_Drama\/scenes\/codex_scene_9_/);
+
+  const row = db.prepare(
+    'SELECT image_url, local_path, reference_grid_image_url, reference_grid_local_path FROM scenes WHERE id = 9'
+  ).get();
+  assert.equal(row.image_url, '/static/projects/palace/scenes/main.png');
+  assert.equal(row.local_path, 'projects/palace/scenes/main.png');
+  assert.equal(row.reference_grid_image_url, `/static/${used.local_path}`);
+  assert.equal(row.reference_grid_local_path, used.local_path);
+  db.close();
+});
+
 test('Codex storyboard last-frame candidate creates image_generation and binds tail frame', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-codex-storyboard-job-'));
   const cfg = {

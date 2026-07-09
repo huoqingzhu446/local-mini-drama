@@ -9,6 +9,14 @@
 const promptStyleService = require('./promptStyleService');
 const MAX_STORYBOARD_REFERENCE_IMAGES = 6;
 
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  } catch (_) {
+    return new Set();
+  }
+}
+
 function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   const bodyIn = reqBody && typeof reqBody === 'object' ? reqBody : {};
   const forceWithoutReferenceImages = !!bodyIn.force_without_reference_images;
@@ -83,8 +91,14 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   let sceneBlock = '';
   if (sb.scene_id) {
     try {
+      const sceneCols = tableColumns(db, 'scenes');
       sceneRow = db
-        .prepare('SELECT location, time, prompt, image_url, local_path FROM scenes WHERE id = ? AND deleted_at IS NULL')
+        .prepare(
+          `SELECT location, time, prompt, image_url, local_path,
+                  ${sceneCols.has('reference_grid_image_url') ? 'reference_grid_image_url' : 'NULL AS reference_grid_image_url'},
+                  ${sceneCols.has('reference_grid_local_path') ? 'reference_grid_local_path' : 'NULL AS reference_grid_local_path'}
+           FROM scenes WHERE id = ? AND deleted_at IS NULL`
+        )
         .get(sb.scene_id);
       if (sceneRow) {
         const scBits = [
@@ -92,6 +106,9 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
           chunk('SCENE_TIME', sceneRow.time),
           chunk('SCENE_PROMPT', sceneRow.prompt),
           hasMediaRef(sceneRow) ? 'SCENE_HAS_REFERENCE_IMAGE: yes' : 'SCENE_HAS_REFERENCE_IMAGE: no',
+          sceneRow.reference_grid_local_path || sceneRow.reference_grid_image_url
+            ? 'SCENE_HAS_9_GRID_REFERENCE_BOARD: yes'
+            : 'SCENE_HAS_9_GRID_REFERENCE_BOARD: no',
         ].filter(Boolean);
         sceneBlock = scBits.join('\n');
       }
@@ -212,6 +229,9 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   };
   if (sceneRow && hasMediaRef(sceneRow)) {
     pushSlot('场景', String(sceneRow.location || '').trim() || '场景环境');
+    if (sceneRow.reference_grid_local_path || sceneRow.reference_grid_image_url) {
+      pushSlot('场景九宫格参考板', `${String(sceneRow.location || '').trim() || '场景'}的空间/机位/材质辅助参考`);
+    }
   }
   for (const ent of charOrderEntries) {
     let row = null;
@@ -279,16 +299,16 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
   }
 
   const charSlots = slots.filter((s) => s.kind === '角色');
-  const sceneFirst = slots.length > 0 && slots[0].kind === '场景';
+  const sceneFirst = slots.length > 0 && String(slots[0].kind || '').startsWith('场景');
   const charBindingBlock =
     charSlots.length > 0
       ? [
           sceneFirst
-            ? 'CHARACTER_IMAGE_BINDING（@图片1 仅为场景/环境；人物从 @图片2 起依次对应下列姓名，勿把人绑在 @图片1）:'
+            ? 'CHARACTER_IMAGE_BINDING（场景/场景参考板槽位只表环境；人物只能绑定到下列「角色」槽位，勿把人绑在场景图上）:'
             : 'CHARACTER_IMAGE_BINDING（首张参考图非场景，以 IMAGE_SLOT_MAP 为准；人物与下列 @图片N 一一对应）:',
           ...charSlots.map((s) =>
             sceneFirst
-              ? `「${s.summary}」→ ${s.tag}（外貌/动作绑定 ${s.tag} ，示例：${s.tag} 的侧脸；禁止「@图片1 中的${s.summary}」）`
+              ? `「${s.summary}」→ ${s.tag}（外貌/动作绑定 ${s.tag} ，示例：${s.tag} 的侧脸；禁止写成场景图中的${s.summary}）`
               : `「${s.summary}」→ ${s.tag}（外貌/动作绑定 ${s.tag} ，示例：${s.tag} 的侧脸）`
           ),
         ].join('\n')
@@ -325,8 +345,10 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
       ...slots.map((s) => `${s.tag} = ${s.kind}「${s.summary}」`),
     ].join('\n');
     line3Required =
-      slots[0].kind === '场景'
-        ? '环境、光影与陈设定性参考 @图片1。若 @图片1 为宫格或多画面拼图，禁止成片复刻其分格或并列布局，仅提取统一的室内空间与光线语义；须单镜头完整连续画面。'
+      String(slots[0].kind || '').startsWith('场景')
+        ? (slots[1]?.kind === '场景九宫格参考板'
+            ? '环境主构图以 @图片1 为准；@图片2 是场景九宫格参考板，只用于理解空间结构、材质、光影和机位可能性；最终视频必须是单镜头完整连续画幅，禁止分屏、禁止宫格、禁止复刻参考板布局。'
+            : '环境、光影与陈设定性参考 @图片1。若 @图片1 为宫格或多画面拼图，禁止成片复刻其分格或并列布局，仅提取统一的室内空间与光线语义；须单镜头完整连续画面。')
         : '本片段以首张参考图 @图片1 作为画面锚点展开。';
   }
 
@@ -371,9 +393,9 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
           '- 禁止用 @场景、@姓名、@道具名 等形式指代参考图；将来有图时须一律改为 @图片N（与 MAP 一致）。',
         ]
       : [
-          '- 绑定到某张参考图时，只能写 IMAGE_SLOT_MAP 里列出的 @图片N（阿拉伯数字，如 @图片1、@图片2）。',
-          '- 禁止用 @场景、@姓名、@林薇、@道具名 等形式指代参考图；需要指图时一律 @图片N。',
-          '- 若 @图片1 为「场景」：只写环境/光影/陈设；人物外貌与动作按 CHARACTER_IMAGE_BINDING 从 @图片2 起。若首张参考图即角色，则以 MAP 为准。',
+        '- 绑定到某张参考图时，只能写 IMAGE_SLOT_MAP 里列出的 @图片N（阿拉伯数字，如 @图片1、@图片2）。',
+        '- 禁止用 @场景、@姓名、@林薇、@道具名 等形式指代参考图；需要指图时一律 @图片N。',
+        '- 若参考槽位为「场景」或「场景九宫格参考板」：只写环境/光影/陈设/空间关系；人物外貌与动作必须按 CHARACTER_IMAGE_BINDING 中的角色槽位绑定。',
           '- 场景参考若为四宫格/九宫格等拼图：见 SCENE_REFERENCE_LAYOUT；成片须单镜头连续画面，禁止模仿拼图布局。',
           '- 若存在「分镜图」槽位：它是本镜整体构图/画面气质锚点，可辅助视频起始画面与运镜，不要当作新增角色或独立场景。',
         ]),
@@ -391,7 +413,7 @@ function buildUniversalSegmentUserPromptBundle(db, sbId, reqBody, opts = {}) {
     return { ok: false, code: 'bad_request', message: '分镜中暂无可用信息，请先填写动作、对白、视频提示词或绑定场景/角色等' };
   }
 
-  const hasSceneSlot = slots.some((s) => s.kind === '场景');
+  const hasSceneSlot = slots.some((s) => String(s.kind || '').startsWith('场景'));
   const sceneLayoutBlock = hasSceneSlot
     ? [
         'SCENE_REFERENCE_LAYOUT（场景参考图可能是多宫格/多视角拼图，仅作内容与空间参考，成片禁止模仿拼图）:',

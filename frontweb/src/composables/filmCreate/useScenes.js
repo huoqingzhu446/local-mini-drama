@@ -39,6 +39,14 @@ export function useScenes(deps) {
     }
   }
 
+  function buildSceneReferenceGridMeta(scene) {
+    const meta = buildSceneImageMeta(scene)
+    return {
+      ...meta,
+      label: meta.label.replace('场景图:', '场景9宫格参考图:'),
+    }
+  }
+
   function dataUrlToFile(dataUrl, filename) {
     const arr = dataUrl.split(',')
     const mime = (arr[0].match(/:(.*?);/) || [])[1] || 'image/png'
@@ -64,6 +72,7 @@ export function useScenes(deps) {
     isEpisodeExtractRunning(genStore, dramaId.value, currentEpisodeId.value, GEN_RESOURCE.EXTRACT_SCENES)
   )
   const generatingSceneIds = reactive(new Set())
+  const generatingSceneReferenceGridIds = reactive(new Set())
 
   // ── 场景库状态 ────────────────────────────────────────
   const showSceneLibrary = ref(false)
@@ -138,8 +147,11 @@ export function useScenes(deps) {
       prompt: scene.prompt || '',
       polished_prompt: scene.polished_prompt || '',
       polished_prompt_single: scene.polished_prompt_single || '',
+      polished_prompt_nine: scene.polished_prompt_nine || '',
       image_url: scene.image_url || '',
       local_path: scene.local_path || '',
+      reference_grid_image_url: scene.reference_grid_image_url || '',
+      reference_grid_local_path: scene.reference_grid_local_path || '',
       ref_image: scene.ref_image || '',
     }
     showEditScene.value = true
@@ -256,7 +268,8 @@ export function useScenes(deps) {
           time: form.time || undefined,
           prompt: form.prompt || undefined,
           polished_prompt: form.polished_prompt || undefined,
-          polished_prompt_single: form.polished_prompt_single || undefined
+          polished_prompt_single: form.polished_prompt_single || undefined,
+          polished_prompt_nine: form.polished_prompt_nine || undefined
         })
         await saveSceneRefImageIfAny(form.id)
         ElMessage.success('场景已保存')
@@ -346,6 +359,50 @@ export function useScenes(deps) {
       ElMessage.error(e.message || '提交失败')
     } finally {
       generatingSceneIds.delete(scene.id)
+      genStore.markDone(meta)
+    }
+  }
+
+  async function onGenerateSceneReferenceGridImage(scene) {
+    if (!scene?.id) return
+    if (!hasAssetImage(scene)) {
+      ElMessage.warning('请先生成或上传场景主图，再生成9宫格参考图')
+      return
+    }
+    scene.errorMsg = ''
+    scene.error_msg = ''
+    const meta = buildSceneReferenceGridMeta(scene)
+    generatingSceneReferenceGridIds.add(scene.id)
+    genStore.markRunning(meta)
+    try {
+      const res = await sceneAPI.generateReferenceGridImage(scene.id, {
+        model: undefined,
+        style: getSelectedStyle(),
+        quality: getSelectedImageQuality?.()
+      })
+      const taskId = res?.image_generation?.task_id ?? res?.task_id
+      if (taskId) {
+        const pollRes = await pollTask(taskId, () => loadDrama(), meta)
+        if (pollRes?.status === 'failed') {
+          scene.errorMsg = pollRes.error || '9宫格参考图生成失败'
+        } else {
+          ElMessage.success('场景9宫格参考图已生成')
+        }
+      } else {
+        await loadDrama()
+        await pollUntilResourceHasImage(() => {
+          const list = store.drama?.scenes ?? store.currentEpisode?.scenes ?? []
+          const s = list.find((x) => Number(x.id) === Number(scene.id))
+          return !!(s && (s.reference_grid_image_url || s.reference_grid_local_path))
+        })
+        ElMessage.success('场景9宫格参考图已生成')
+      }
+    } catch (e) {
+      console.error(e)
+      scene.errorMsg = e.message || '9宫格参考图生成失败'
+      ElMessage.error(e.message || '提交失败')
+    } finally {
+      generatingSceneReferenceGridIds.delete(scene.id)
       genStore.markDone(meta)
     }
   }
@@ -581,6 +638,7 @@ export function useScenes(deps) {
     // 生成状态
     scenesExtracting,
     generatingSceneIds,
+    generatingSceneReferenceGridIds,
     // 库状态
     showSceneLibrary,
     sceneLibraryList,
@@ -623,6 +681,7 @@ export function useScenes(deps) {
     onCloseSceneDialog,
     onDeleteScene,
     onGenerateSceneImage,
+    onGenerateSceneReferenceGridImage,
     loadSceneLibraryList,
     debouncedLoadSceneLibrary,
     loadDramaAllSceneList,

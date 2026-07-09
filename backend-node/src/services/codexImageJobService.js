@@ -114,6 +114,7 @@ function normalizeFrameType(frameType) {
   let ft = String(frameType || 'main').trim();
   if (ft === 'storyboard_first' || ft === 'first_frame' || ft === 'head') ft = 'first';
   if (ft === 'storyboard_last' || ft === 'last_frame' || ft === 'tail') ft = 'last';
+  if (ft === 'scene_reference_grid' || ft === 'nine_grid' || ft === 'scene_nine_grid') ft = 'reference_grid';
   return ft || 'main';
 }
 
@@ -326,8 +327,11 @@ function loadEntity(db, entityType, entityId) {
       `SELECT id, drama_id, episode_id, location, time, prompt,
               ${columnOrNull(columns, 'polished_prompt')},
               ${columnOrNull(columns, 'polished_prompt_single')},
+              ${columnOrNull(columns, 'polished_prompt_nine')},
               ${columnOrNull(columns, 'negative_prompt')},
               image_url, local_path,
+              ${columnOrNull(columns, 'reference_grid_image_url')},
+              ${columnOrNull(columns, 'reference_grid_local_path')},
               ${columnOrNull(columns, 'extra_images')},
               ${columnOrNull(columns, 'ref_image')}
        FROM scenes WHERE id = ? AND deleted_at IS NULL`
@@ -412,6 +416,19 @@ function pickPromptSource(entityType, row, opts = {}) {
     return { key: 'name', text: row.name || '' };
   }
   if (entityType === 'scene') {
+    const ft = normalizeFrameType(opts.frame_type);
+    if (ft === 'reference_grid') {
+      if (row.polished_prompt_nine && String(row.polished_prompt_nine).trim()) {
+        return { key: 'polished_prompt_nine', text: String(row.polished_prompt_nine).trim() };
+      }
+      const sceneBits = [
+        row.location ? `Scene location: ${row.location}` : '',
+        row.time ? `Time of day / period: ${row.time}` : '',
+        row.prompt ? `Scene description: ${row.prompt}` : '',
+        row.polished_prompt_single ? `Existing single-scene prompt: ${String(row.polished_prompt_single).trim()}` : '',
+      ].filter(Boolean).join('\n');
+      return { key: 'reference_grid_fields', text: sceneBits || [row.location, row.time].filter(Boolean).join(' ') };
+    }
     if (row.polished_prompt_single && String(row.polished_prompt_single).trim()) return { key: 'polished_prompt_single', text: String(row.polished_prompt_single).trim() };
     if (row.prompt && String(row.prompt).trim()) return { key: 'prompt', text: String(row.prompt).trim() };
     return {
@@ -449,9 +466,11 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
   const quality = normalizeImageQuality(opts.quality);
   const name = entityDisplayName(entityType, row);
   const frameType = normalizeFrameType(opts.frame_type);
+  const isSceneReferenceGrid = entityType === 'scene' && frameType === 'reference_grid';
+  const sceneReferenceImage = isSceneReferenceGrid ? (row.local_path || row.image_url || '') : '';
   const assetKind = entityType === 'character' ? 'short drama character concept asset'
     : entityType === 'prop' ? 'short drama prop asset'
-      : entityType === 'scene' ? 'short drama scene/background asset'
+      : entityType === 'scene' ? (isSceneReferenceGrid ? 'short drama scene 9-grid reference board' : 'short drama scene/background asset')
         : `short drama storyboard ${frameType} frame asset`;
   const lines = [
     `Use case: illustration-story`,
@@ -463,13 +482,41 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
     visualBibleBlock || '',
     `Aspect ratio: ${aspectRatio}`,
     codexQualityInstruction(quality),
+    isSceneReferenceGrid && sceneReferenceImage ? `Reference scene main image: ${sceneReferenceImage}` : '',
     '',
     'Primary request:',
-    source.text || name,
+    isSceneReferenceGrid
+      ? [
+          'Create ONE 3x3 scene reference board with EXACTLY 9 equal landscape panels.',
+          'All panels must show the SAME physical scene as a unified video-production environment bible.',
+          sceneReferenceImage ? 'Use the reference scene main image as the visual anchor: keep the same architecture, material language, palette, lighting logic, historical period, and atmosphere.' : '',
+          '',
+          'Panel order:',
+          '1 ultra-wide establishing shot showing the full spatial layout, boundaries, distant background, entrances and exits.',
+          '2 main activity zone medium-wide shot showing where future characters can stand, talk, fight, or move, but with no people.',
+          '3 entrance / corridor / transition path for entering, leaving, chase, or scene transition blocking.',
+          '4 reverse angle of the same space, seen from the opposite direction to clarify continuity.',
+          '5 hero master shot, the strongest single-frame video background composition, closest to the main scene image.',
+          '6 signature environmental detail close-up: material, furnishing, texture, symbolic object, architectural motif.',
+          '7 elevated high-angle spatial layout showing floor paths, area distribution, furniture/building/terrain arrangement.',
+          '8 low-angle depth and scale shot showing vertical structure, ceiling/eaves/mountain/building depth.',
+          '9 atmospheric empty shot using the same time/light/weather, emphasizing haze, beams, dust, rain, wind, or mood.',
+          '',
+          source.text || name,
+        ].filter(Boolean).join('\n')
+      : (source.text || name),
     '',
     'Production constraints:',
     'Create a clean, high-quality concept image suitable for a local short-drama asset library.',
-    'Keep the main subject clear, recognizable, and centered with enough framing margin.',
+    isSceneReferenceGrid
+      ? 'This is a scene design/reference board for AI video; it is allowed and required to be a 3x3 grid.'
+      : 'Keep the main subject clear, recognizable, and centered with enough framing margin.',
+    isSceneReferenceGrid
+      ? 'No people, no characters, no silhouettes, no human shadows. No readable text, labels, captions, UI, logos, signature, or watermark.'
+      : '',
+    isSceneReferenceGrid
+      ? 'No random redesign between panels; only camera angle, focal length, and viewed area may change. No borders, no divider lines, no frames, no gaps.'
+      : '',
     entityType === 'storyboard' ? 'Render one cinematic frame only; no collage, no split screen, no storyboard grid, no multiple panels.' : '',
     'No visible subtitles, labels, watermarks, UI, logos, signature, or random text.',
     'Avoid extra unrelated characters or objects unless explicitly required by the description.',
@@ -500,6 +547,13 @@ function activeJobForEntity(db, entityType, entityId, frameType, styleSignature,
 }
 
 function jobManifestItem(job) {
+  const sourceSnapshot = job.source_snapshot || {};
+  const entity = sourceSnapshot.entity || {};
+  const referenceImages = [];
+  if (job.entity_type === 'scene' && normalizeFrameType(job.frame_type) === 'reference_grid') {
+    const ref = entity.local_path || entity.image_url || '';
+    if (ref) referenceImages.push(ref);
+  }
   return {
     id: job.id,
     entity_type: job.entity_type,
@@ -513,6 +567,7 @@ function jobManifestItem(job) {
     quality: job.quality || undefined,
     style: job.style || undefined,
     style_signature: job.style_signature || undefined,
+    reference_images: referenceImages.length ? referenceImages : undefined,
     target_category: CATEGORY_BY_ENTITY[job.entity_type] || job.entity_type,
     status: job.status,
   };
@@ -781,8 +836,30 @@ function applyToProp(db, job, localPath, imageUrl) {
 }
 
 function applyToScene(db, job, localPath, imageUrl) {
-  const row = db.prepare('SELECT id, local_path, image_url, extra_images FROM scenes WHERE id = ? AND deleted_at IS NULL').get(job.entity_id);
+  const columns = tableColumns(db, 'scenes');
+  const row = db.prepare(
+    `SELECT id,
+            ${columnOrNull(columns, 'local_path')},
+            ${columnOrNull(columns, 'image_url')},
+            ${columnOrNull(columns, 'extra_images')}
+     FROM scenes WHERE id = ? AND deleted_at IS NULL`
+  ).get(job.entity_id);
   if (!row) return { ok: false, error: 'scene not found' };
+  if (normalizeFrameType(job.frame_type) === 'reference_grid') {
+    if (!columns.has('reference_grid_image_url') || !columns.has('reference_grid_local_path')) {
+      return { ok: false, error: 'scene reference grid columns missing' };
+    }
+    const set = ['reference_grid_image_url = ?', 'reference_grid_local_path = ?'];
+    const params = [imageUrl || null, localPath || null];
+    if (columns.has('status')) set.push("status = 'generated'");
+    if (columns.has('updated_at')) {
+      set.push('updated_at = ?');
+      params.push(new Date().toISOString());
+    }
+    params.push(job.entity_id);
+    db.prepare(`UPDATE scenes SET ${set.join(', ')} WHERE id = ?`).run(...params);
+    return { ok: true };
+  }
   const extraJson = appendOldPrimaryToExtras(row, localPath, imageUrl);
   db.prepare(
     "UPDATE scenes SET image_url = ?, local_path = ?, extra_images = ?, status = 'generated', updated_at = ? WHERE id = ?"

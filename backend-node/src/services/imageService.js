@@ -65,6 +65,7 @@ const promptI18n = require('./promptI18n');
 const { normalizeImageQuality } = require('../utils/imageQuality');
 
 const LAST_FRAME_TYPES = new Set(['last', 'storyboard_last', 'tail', 'last_frame']);
+const SCENE_REFERENCE_GRID_FRAME_TYPE = 'scene_reference_grid';
 const MAX_STORYBOARD_REFERENCE_IMAGES = 6;
 
 function isLastFrameType(frameType) {
@@ -87,6 +88,14 @@ function rowUseFirstFrameLayoutLock(row) {
   const v = row.use_first_frame_layout_lock;
   if (v === 0 || v === false) return false;
   return true;
+}
+
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  } catch (_) {
+    return new Set();
+  }
 }
 
 function isStoryboardMainFrameType(frameType) {
@@ -844,7 +853,13 @@ async function processImageGeneration(db, log, imageGenId) {
         const refs = [];
         const refLabels = [];
         if (sb.scene_id) {
-          const scene = db.prepare('SELECT image_url, local_path, location FROM scenes WHERE id = ? AND deleted_at IS NULL').get(sb.scene_id);
+          const sceneCols = tableColumns(db, 'scenes');
+          const scene = db.prepare(
+            `SELECT image_url, local_path, location,
+                    ${sceneCols.has('reference_grid_image_url') ? 'reference_grid_image_url' : 'NULL AS reference_grid_image_url'},
+                    ${sceneCols.has('reference_grid_local_path') ? 'reference_grid_local_path' : 'NULL AS reference_grid_local_path'}
+             FROM scenes WHERE id = ? AND deleted_at IS NULL`
+          ).get(sb.scene_id);
           if (scene) {
             const locationName = scene.location || 'scene';
             // 优先使用 scenes 表当前主图（image_url / local_path），只有当前字段为空才降级使用历史 quad_panel_0 面板
@@ -865,6 +880,15 @@ async function processImageGeneration(db, log, imageGenId) {
             if (sceneRef && imageClient.canAddStoryboardObjectRef(refLabels, refLimits)) {
               refs.push(sceneRef);
               refLabels.push(`Image ${refs.length}: scene background reference for "${locationName}"${isPanel ? ' (establishing wide shot from history panel)' : ' (current scene image)'} `);
+            }
+            const sceneGridRef = scene.reference_grid_local_path || scene.reference_grid_image_url;
+            if (
+              sceneGridRef &&
+              !imageClient.refListHasCanonical(refs, sceneGridRef) &&
+              imageClient.canAddStoryboardObjectRef(refLabels, refLimits)
+            ) {
+              refs.push(sceneGridRef);
+              refLabels.push(`Image ${refs.length}: scene background reference board for "${locationName}" (9-grid spatial/camera/material reference only; final image/video must remain one continuous full frame, no grid or split-screen)`);
             }
           }
         }
@@ -1539,25 +1563,40 @@ async function processImageGeneration(db, log, imageGenId) {
     }
     
     if (row.scene_id != null && row.storyboard_id == null) {
-      // 旧图追加到 extra_images，与上传逻辑保持一致
-      const oldScene = db.prepare('SELECT local_path, image_url, extra_images FROM scenes WHERE id = ?').get(row.scene_id);
-      const oldPath = oldScene?.local_path || oldScene?.image_url || '';
-      let sceneExtras = [];
-      try { sceneExtras = oldScene?.extra_images ? JSON.parse(oldScene.extra_images) : []; } catch (_) {}
-      if (!Array.isArray(sceneExtras)) sceneExtras = [];
-      if (oldPath && !sceneExtras.includes(oldPath)) sceneExtras.push(oldPath);
-      const sceneExtraJson = sceneExtras.length ? JSON.stringify(sceneExtras) : null;
-      try {
-        db.prepare("UPDATE scenes SET image_url = ?, local_path = ?, extra_images = ?, status = 'generated', updated_at = ? WHERE id = ?").run(
-          persistedImageUrl, localPath, sceneExtraJson, now2, row.scene_id
-        );
-      } catch (e) {
-        if ((e.message || '').includes('extra_images')) {
-          db.prepare("UPDATE scenes SET image_url = ?, local_path = ?, status = 'generated', updated_at = ? WHERE id = ?").run(
+      if (row.frame_type === SCENE_REFERENCE_GRID_FRAME_TYPE) {
+        try {
+          db.prepare("UPDATE scenes SET reference_grid_image_url = ?, reference_grid_local_path = ?, status = 'generated', updated_at = ? WHERE id = ?").run(
             persistedImageUrl, localPath, now2, row.scene_id
           );
-        } else {
-          throw e;
+        } catch (e) {
+          if ((e.message || '').includes('reference_grid_')) {
+            log.warn('[图生] 场景九宫格参考板字段缺失，跳过回写 scenes.reference_grid_*', { id: imageGenId, scene_id: row.scene_id });
+          } else {
+            throw e;
+          }
+        }
+        log.info('[图生] 场景九宫格参考板已回写', { id: imageGenId, scene_id: row.scene_id, local_path: localPath });
+      } else {
+        // 旧图追加到 extra_images，与上传逻辑保持一致
+        const oldScene = db.prepare('SELECT local_path, image_url, extra_images FROM scenes WHERE id = ?').get(row.scene_id);
+        const oldPath = oldScene?.local_path || oldScene?.image_url || '';
+        let sceneExtras = [];
+        try { sceneExtras = oldScene?.extra_images ? JSON.parse(oldScene.extra_images) : []; } catch (_) {}
+        if (!Array.isArray(sceneExtras)) sceneExtras = [];
+        if (oldPath && !sceneExtras.includes(oldPath)) sceneExtras.push(oldPath);
+        const sceneExtraJson = sceneExtras.length ? JSON.stringify(sceneExtras) : null;
+        try {
+          db.prepare("UPDATE scenes SET image_url = ?, local_path = ?, extra_images = ?, status = 'generated', updated_at = ? WHERE id = ?").run(
+            persistedImageUrl, localPath, sceneExtraJson, now2, row.scene_id
+          );
+        } catch (e) {
+          if ((e.message || '').includes('extra_images')) {
+            db.prepare("UPDATE scenes SET image_url = ?, local_path = ?, status = 'generated', updated_at = ? WHERE id = ?").run(
+              persistedImageUrl, localPath, now2, row.scene_id
+            );
+          } else {
+            throw e;
+          }
         }
       }
     }
