@@ -7526,6 +7526,17 @@ function isSeedance2VideoModel(modelName) {
   return /2[-_]0/.test(m) || /seedance[-_]?2|seedance2/.test(m)
 }
 
+function isOfficialVolcengineArkBaseUrl(baseUrl) {
+  const raw = String(baseUrl || '').trim()
+  if (!raw) return false
+  try {
+    const host = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).hostname.toLowerCase()
+    return /^ark(?:[.-][a-z0-9-]+)*\.volces\.com$/.test(host)
+  } catch {
+    return /^https?:\/\/ark(?:[.-][a-z0-9-]+)*\.volces\.com(?:\/|$)/i.test(raw)
+  }
+}
+
 /** 全能分镜 + 当前视频配置是否可走多图参考（火山 Seedance 2.0、可灵 Omni、Agnes Video 等） */
 function canUseUniversalOmniVideoApi(cfg) {
   if (!cfg) return false
@@ -7535,6 +7546,9 @@ function canUseUniversalOmniVideoApi(cfg) {
   if (proto === 'kling_omni') return true
   if (proto === 'volcengine_omni') {
     return isSeedance2VideoModel(model)
+  }
+  if (proto === 'volcengine' && isSeedance2VideoModel(model) && isOfficialVolcengineArkBaseUrl(cfg.base_url)) {
+    return true
   }
   if (proto === 'agnes' || provider === 'agnes' || /agnes-video/.test(model)) {
     return true

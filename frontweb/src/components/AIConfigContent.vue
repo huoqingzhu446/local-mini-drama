@@ -581,6 +581,22 @@ input_reference = (图片文件，可选)</pre>
           title="用于创作页「角色生成 → SD2认证」"
           description="保存后，系统从此处读取网关与 Token 调用 POST /api/business/v1/assets 登记角色图；可用「列出素材」核对素材状态。角色主图需为外网可访问的 http(s) 地址（图床或本服务 storage.base_url）。"
         />
+        <template v-if="form.service_type === 'video' && ['volcengine', 'volcengine_omni'].includes(form.api_protocol)">
+          <el-form-item>
+            <template #label>
+              <span class="form-label-tip">音画同出</span>
+            </template>
+            <el-switch
+              v-model="form.volcengine_generate_audio"
+              active-text="开启"
+              inactive-text="关闭"
+            />
+            <p class="field-tip">
+              开启后，火山方舟请求将提交 <code>generate_audio: true</code>；关闭时提交 <code>generate_audio: false</code>。
+              仅 <code>Seedance 1.5 Pro</code> 和 <code>Seedance 2.0</code> 系列模型支持。
+            </p>
+          </el-form-item>
+        </template>
         <template v-if="form.service_type === 'video' && form.api_protocol === 'kling_omni'">
           <el-form-item>
             <template #label>
@@ -1205,6 +1221,7 @@ const form = ref({
   kling_secret_key: '',
   kling_secret_key_base64: false,
   kling_omni_sound: false,
+  volcengine_generate_audio: true,
   // TTS 专属字段
   voice_id: '',
   group_id: '',
@@ -1764,6 +1781,7 @@ function resetForm() {
     kling_secret_key: '',
     kling_secret_key_base64: false,
     kling_omni_sound: false,
+    volcengine_generate_audio: true,
   }
   formRef.value?.resetFields?.()
 }
@@ -1785,6 +1803,7 @@ function openEdit(row) {
   let kling_secret_key = ''
   let kling_secret_key_base64 = false
   let kling_omni_sound = false
+  let volcengine_generate_audio = true
   const deepseekSettings = resolveDeepSeekFormSettings(row)
   if (row.settings) {
     try {
@@ -1799,6 +1818,15 @@ function openEdit(row) {
         kling_secret_key_base64 = !!s.kling_secret_key_base64
         const sound = String(s.kling_omni_sound ?? s.kling_sound ?? s.sound ?? '').toLowerCase()
         kling_omni_sound = s.kling_omni_sound === true || sound === 'on' || sound === 'true' || sound === '1'
+      }
+      if (row.service_type === 'video' && ['volcengine', 'volcengine_omni'].includes(row.api_protocol)) {
+        const audio = s.volcengine_generate_audio ?? s.generate_audio
+        const audioText = String(audio ?? '').toLowerCase()
+        volcengine_generate_audio = !(
+          audio === false
+          || audio === 0
+          || ['off', 'false', '0', 'no', 'disabled'].includes(audioText)
+        )
       }
     } catch (_) {}
   }
@@ -1823,6 +1851,7 @@ function openEdit(row) {
     kling_secret_key,
     kling_secret_key_base64,
     kling_omni_sound,
+    volcengine_generate_audio,
   }
   dialogVisible.value = true
 }
@@ -1863,6 +1892,17 @@ async function submit() {
       else delete baseS.kling_secret_key_base64
       baseS.kling_omni_sound = form.value.kling_omni_sound ? 'on' : 'off'
       settings = Object.keys(baseS).length ? JSON.stringify(baseS) : null
+    } else if (
+      form.value.service_type === 'video'
+      && ['volcengine', 'volcengine_omni'].includes(form.value.api_protocol)
+    ) {
+      let baseS = {}
+      if (editingId.value) {
+        const prev = list.value.find((r) => r.id === editingId.value)
+        baseS = parseSettings(prev?.settings)
+      }
+      baseS.volcengine_generate_audio = !!form.value.volcengine_generate_audio
+      settings = JSON.stringify(baseS)
     } else if (isDeepSeekOfficialForm.value) {
       const prev = editingId.value ? list.value.find((r) => r.id === editingId.value) : null
       const baseS = parseSettings(prev?.settings)

@@ -281,6 +281,54 @@ function resolveKlingOmniSound(cfg) {
   return 'off';
 }
 
+function isVolcengineAudioCapableModel(modelName) {
+  const model = String(modelName || '').toLowerCase();
+  return (
+    /seedance[-_]?2|seedance2|2[-_]0[-_]/.test(model)
+    || /seedance[-_]?1[-_.]?5.*pro|1-5-pro|251215/.test(model)
+  );
+}
+
+function isSeedance2Model(modelName) {
+  const model = String(modelName || '').toLowerCase();
+  return /seedance[-_]?2|seedance2|2[-_]0[-_]/.test(model);
+}
+
+function isOfficialVolcengineArkBaseUrl(baseUrl) {
+  const raw = String(baseUrl || '').trim();
+  if (!raw) return false;
+  try {
+    const host = new URL(/^https?:\/\//i.test(raw) ? raw : 'https://' + raw).hostname.toLowerCase();
+    return /^ark(?:[.-][a-z0-9-]+)*\.volces\.com$/.test(host);
+  } catch (_) {
+    return /^https?:\/\/ark(?:[.-][a-z0-9-]+)*\.volces\.com(?:\/|$)/i.test(raw);
+  }
+}
+
+function shouldRouteVolcengineSeedance2ToOmni(config, protocol, modelName) {
+  if (protocol === 'volcengine_omni') return true;
+  return (
+    protocol === 'volcengine'
+    && isSeedance2Model(modelName)
+    && isOfficialVolcengineArkBaseUrl(config?.base_url)
+  );
+}
+
+function resolveVolcengineGenerateAudio(cfg, modelName) {
+  if (!isVolcengineAudioCapableModel(modelName)) return undefined;
+
+  const settings = parseConfigSettingsJson(cfg);
+  const raw =
+    process.env.VOLCENGINE_GENERATE_AUDIO
+    ?? settings.volcengine_generate_audio
+    ?? settings.generate_audio;
+  if (raw == null || raw === '') return true;
+  if (raw === false || raw === 0) return false;
+
+  const value = String(raw).trim().toLowerCase();
+  return !['off', 'false', '0', 'no', 'disabled'].includes(value);
+}
+
 function resolveKlingOmniMode(cfg, resolutionOpt) {
   const settings = parseConfigSettingsJson(cfg);
   const configured = String(settings.kling_omni_mode || '').trim().toLowerCase();
@@ -551,6 +599,8 @@ async function callVolcengineOmniVideoApi(config, log, opts) {
   const finalModel = normalizeVolcModel(model);
   const ratio = aspect_ratio || '16:9';
   const effectiveDuration = normalizeVolcOmniDuration(finalModel, duration);
+  const generateAudio = resolveVolcengineGenerateAudio(config, finalModel);
+  const isSeedance2 = isSeedance2Model(finalModel);
 
   const refList = Array.isArray(reference_urls) ? reference_urls.filter(Boolean) : [];
   const primary = (image_url || '').trim();
@@ -565,9 +615,11 @@ async function callVolcengineOmniVideoApi(config, log, opts) {
     duration: effectiveDuration,
     watermark: watermark != null ? Boolean(watermark) : false,
   };
+  if (generateAudio !== undefined) body.generate_audio = generateAudio;
   if (resolution) body.resolution = resolution;
-  if (seed != null) body.seed = Number(seed);
-  if (camera_fixed != null) body.camera_fixed = Boolean(camera_fixed);
+  // 方舟 Seedance 2.0 的全能接口不支持 seed、camera_fixed；传入会导致参数校验失败。
+  if (!isSeedance2 && seed != null) body.seed = Number(seed);
+  if (!isSeedance2 && camera_fixed != null) body.camera_fixed = Boolean(camera_fixed);
 
   if (urls.length) {
     for (let i = 0; i < urls.length; i++) {
@@ -606,11 +658,9 @@ async function callVolcengineOmniVideoApi(config, log, opts) {
       };
       body.content.push(part);
     }
-    if (body.content.length > 1) body.task_type = 'i2v';
   }
 
   // Seedance 2.0 音色参考音频支持（仅 Seedance 2.x 模型有效）
-  const isSeedance2 = /seedance[-_]?2|seedance2|2[-_]0[-_]/.test(finalModel);
   if (isSeedance2 && opts.voice_reference_url) {
     let voiceUrl = String(opts.voice_reference_url).trim();
     if (voiceUrl) {
@@ -679,6 +729,7 @@ async function callVolcengineOmniVideoApi(config, log, opts) {
     duration: effectiveDuration,
     image_count: urls.length,
     has_voice_ref: !!voice_reference_url,
+    generate_audio: generateAudio,
     video_gen_id,
   });
   logVideoPostRequest(log, 'VolcOmni', url, body, video_gen_id, {
@@ -687,6 +738,7 @@ async function callVolcengineOmniVideoApi(config, log, opts) {
     duration: effectiveDuration,
     image_count: urls.length,
     has_voice_ref: !!voice_reference_url,
+    generate_audio: generateAudio,
   });
 
   const res = await fetch(url, {
@@ -3397,7 +3449,10 @@ async function callVideoApi(db, log, opts) {
   }
   const model = getModelFromConfig(config, preferredModel);
   const provider = (config.provider || '').toLowerCase();
-  const protocol = resolveVideoProtocol(config, preferredModel);
+  let protocol = resolveVideoProtocol(config, preferredModel);
+  if (shouldRouteVolcengineSeedance2ToOmni(config, protocol, model)) {
+    protocol = 'volcengine_omni';
+  }
   if (db && opts.drama_id && VIDEO_PROTOCOLS_SUPPORT_SD2_ASSET_SCHEME.has(protocol)) {
     opts = applySeedance2CertifiedAssetUrlsToVideoOpts(db, log, opts);
   }
@@ -3621,6 +3676,7 @@ async function callVideoApi(db, log, opts) {
   const isVolc = protocol === 'volcengine';
   // ???? model ???????????? API ?? ID?
   const finalModel = isVolc ? normalizeVolcModel(model) : model;
+  const generateAudio = isVolc ? resolveVolcengineGenerateAudio(config, finalModel) : undefined;
 
   // ========== 首尾帧支持（完善版） ==========
   // 优先使用显式传入的 first_frame_url / last_frame_url（首尾帧模式核心）
@@ -3668,6 +3724,7 @@ async function callVideoApi(db, log, opts) {
     duration: effectiveDuration,
     watermark: (watermark != null) ? Boolean(watermark) : false,
   };
+  if (generateAudio !== undefined) body.generate_audio = generateAudio;
   if (resolution) body.resolution = resolution;
   if (seed != null) body.seed = Number(seed);
   if (camera_fixed != null) body.camera_fixed = Boolean(camera_fixed);
@@ -3713,6 +3770,7 @@ async function callVideoApi(db, log, opts) {
     has_first_frame: !!firstForApi,
     has_last_frame: !!lastForApi,
     frame_count: (firstForApi ? 1 : 0) + (lastForApi ? 1 : 0),
+    generate_audio: generateAudio,
   });
   const res = await fetch(url, {
     method: 'POST',
@@ -4087,10 +4145,16 @@ async function pollVideoTask(db, log, videoGenId, taskId, config, maxAttempts = 
 module.exports = {
   getDefaultVideoConfig,
   callVideoApi,
+  callVolcengineOmniVideoApi,
   pollVideoTask,
   normalizeAspectRatioForApi,
   isPlausibleHttpVideoUrl,
   pickProxyVideoUrl,
   buildAgnesVideoImagePayload,
   formatVideoPostBodyForLog,
+  isVolcengineAudioCapableModel,
+  isSeedance2Model,
+  isOfficialVolcengineArkBaseUrl,
+  shouldRouteVolcengineSeedance2ToOmni,
+  resolveVolcengineGenerateAudio,
 };
