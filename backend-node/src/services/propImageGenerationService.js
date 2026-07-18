@@ -6,6 +6,10 @@ const propService = require('./propService');
 const uploadService = require('./uploadService');
 const storageLayout = require('./storageLayout');
 const { aspectRatioToSize } = require('./imageService');
+const promptCompiler = require('./promptCompiler');
+const generationContextService = require('./generationContextService');
+const visualStyleVersionService = require('./visualStyleVersionService');
+const { normalizeImageQuality } = require('../utils/imageQuality');
 const {
   isStyleSignatureCurrent,
   scopedStyleTextsFromStyleObject,
@@ -24,6 +28,69 @@ function appendPrompt(base, extra) {
 
 function propScopedStyle(styleObj) {
   return scopedStyleTextsFromStyleObject(styleObj || {}, 'prop');
+}
+
+function tableColumns(db, table) {
+  try { return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name)); }
+  catch (_) { return new Set(); }
+}
+
+function parseJson(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+/**
+ * 道具旧流程直接调用 callImageApi，导致 prompt 没有和场景/分镜一样的
+ * 视觉版本快照。这里先创建 image_generations provenance 行，再发起请求；
+ * 这样失败、重试和审计都能追溯到同一份不可变上下文。
+ */
+function createPropImageGenerationRecord(db, options) {
+  const columns = tableColumns(db, 'image_generations');
+  const now = new Date().toISOString();
+  const entries = [
+    ['prop_id', Number(options.prop_id) || null],
+    ['drama_id', Number(options.drama_id) || 0],
+    ['provider', options.provider || 'openai'],
+    ['prompt', options.prompt || ''],
+    ['negative_prompt', options.negative_prompt || null],
+    ['model', options.model || null],
+    ['frame_type', 'main'],
+    ['reference_images', Array.isArray(options.reference_images) && options.reference_images.length ? JSON.stringify(options.reference_images.slice(0, 10)) : null],
+    ['size', options.size || null],
+    ['quality', normalizeImageQuality(options.quality, '') || null],
+    ['status', 'processing'],
+    ['task_id', options.task_id || null],
+    ['created_at', now],
+    ['updated_at', now],
+    ['style_version_id', options.compiled?.style_version_id || null],
+    ['context_snapshot_id', options.context_snapshot_id || null],
+    ['prompt_hash', options.compiled?.prompt_hash || null],
+    ['reference_pack', options.compiled?.reference_pack ? JSON.stringify(options.compiled.reference_pack) : null],
+    ['compiler_version', options.compiled?.compiler_version || null],
+  ];
+  const fields = [];
+  const values = [];
+  for (const [field, value] of entries) {
+    if (columns.has(field)) { fields.push(field); values.push(value); }
+  }
+  const info = db.prepare(`INSERT INTO image_generations (${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`).run(...values);
+  return Number(info.lastInsertRowid);
+}
+
+function updatePropImageGeneration(db, id, fields) {
+  if (!id) return;
+  const columns = tableColumns(db, 'image_generations');
+  const set = [];
+  const values = [];
+  for (const [field, value] of Object.entries(fields || {})) {
+    if (columns.has(field)) { set.push(`${field} = ?`); values.push(value); }
+  }
+  if (!set.length) return;
+  set.push('updated_at = ?');
+  values.push(new Date().toISOString(), Number(id));
+  db.prepare(`UPDATE image_generations SET ${set.join(', ')} WHERE id = ?`).run(...values);
 }
 
 async function processPropImageGeneration(db, log, taskId, propId, opts) {
@@ -57,7 +124,9 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
       },
     });
   }
-  const currentStyleSignature = (cfg?.style?.prop_style_signature || cfg?.style?.style_signature || '').trim();
+  let activeStyleSignature = '';
+  try { activeStyleSignature = visualStyleVersionService.ensureActiveVersion(db, Number(prop.drama_id))?.signature || ''; } catch (_) {}
+  const currentStyleSignature = activeStyleSignature || (cfg?.style?.prop_style_signature || cfg?.style?.style_signature || '').trim();
   const propPromptMissing = !prop.prompt || !String(prop.prompt).trim();
   const propPromptStale = !propPromptMissing && !isStyleSignatureCurrent(prop.prompt_style_signature, currentStyleSignature);
   if (propPromptMissing || propPromptStale) {
@@ -74,13 +143,6 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     prop.prompt = refreshed.prompt;
     prop.prompt_style_signature = refreshed.prompt_style_signature || currentStyleSignature;
   }
-  const baseStyle = styleOverride || propScopedStyle(cfg?.style).en;
-  const visualBible = (cfg?.style?.visual_bible || '').trim();
-  let style = '';
-  style = appendPrompt(style, baseStyle);
-  if (!styleOverride) {
-    style = appendPrompt(style, cfg?.style?.default_prop_style || '');
-  }
   // 优先用项目 aspect_ratio 推导尺寸；兜底 1920x1920（满足 ≥3,686,400 像素要求）
   let imageSize = null;
   if (prop.drama_id) {
@@ -93,14 +155,91 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     } catch (_) {}
   }
   if (!imageSize) imageSize = cfg?.style?.default_image_size || '1920x1920';
-  let fullPrompt = appendPrompt(String(prop.prompt).trim(), style);
-  if (visualBible) {
-    fullPrompt = `Visual bible (must follow exactly): ${visualBible}\n${fullPrompt}`;
-  }
+
   // 与角色/场景一致：使用前端「图片生成模型」选择的 model；未传时用 YAML default_image_provider 兜底
   const model = (opts && opts.model) ? String(opts.model).trim() || null : null;
   const preferredProvider = !model && cfg?.ai?.default_image_provider ? cfg.ai.default_image_provider : null;
   const userNeg = imageClient.resolveAssetUserNegativeForApi(model, prop.negative_prompt);
+
+  // 道具与场景/分镜共用版本化提示词编译器。显式 style 仍作为手动
+  // 覆盖传入，但始终会被包在当前激活版本的 GLOBAL ART DIRECTION
+  // 与 STYLE LOCK 之下。
+  let compiled = null;
+  try {
+    const out = promptCompiler.compile(db, cfg, {
+      entity_type: 'prop',
+      entity_id: Number(propId),
+      drama_id: prop.drama_id,
+      frame_type: 'main',
+      style: styleOverride || undefined,
+      prompt: styleOverride ? String(prop.prompt || '').trim() : undefined,
+      negative_prompt: prop.negative_prompt || undefined,
+      aspect_ratio: cfg?.style?.default_image_ratio || undefined,
+      quality: opts?.quality || undefined,
+    });
+    if (out?.ok) compiled = out;
+  } catch (err) {
+    log.warn('[道具图生] 统一提示词编译失败，使用兼容回退', { prop_id: propId, error: err.message });
+  }
+
+  const fallbackStyle = styleOverride || propScopedStyle(cfg?.style).en;
+  const fallbackPrompt = appendPrompt(String(prop.prompt).trim(), fallbackStyle);
+  const fullPrompt = compiled?.compiled_prompt || fallbackPrompt;
+  const effectiveNegative = compiled?.compiled_negative_prompt || userNeg || '';
+  const referenceImages = compiled?.reference_images || [];
+  let contextSnapshot = null;
+  if (compiled?.ok) {
+    try {
+      contextSnapshot = generationContextService.createSnapshot(db, {
+        drama_id: compiled.drama_id || prop.drama_id,
+        episode_id: compiled.episode_id,
+        scene_id: compiled.scene_id,
+        storyboard_id: compiled.storyboard_id,
+        entity_type: compiled.entity_type,
+        entity_id: compiled.entity_id,
+        frame_type: compiled.frame_type,
+        style_version_id: compiled.style_version_id,
+        style_signature: compiled.style_signature,
+        prompt_source: compiled.prompt_source,
+        source_prompt: compiled.source_prompt,
+        compiled_prompt: compiled.compiled_prompt,
+        compiled_negative_prompt: compiled.compiled_negative_prompt,
+        reference_pack: compiled.reference_pack,
+        source_snapshot: compiled.source_snapshot,
+        prompt_hash: compiled.prompt_hash,
+        reference_hash: compiled.reference_hash,
+        compiler_version: compiled.compiler_version,
+        diagnostics: compiled.diagnostics,
+      });
+    } catch (err) {
+      log.warn('[道具图生] 生成上下文快照写入失败', { prop_id: propId, error: err.message });
+    }
+  }
+  if (contextSnapshot) {
+    try { generationContextService.markEntityCompiled(db, compiled); } catch (_) {}
+  }
+
+  let imageGenerationId = null;
+  try {
+    imageGenerationId = createPropImageGenerationRecord(db, {
+      prop_id: propId,
+      drama_id: prop.drama_id,
+      provider: preferredProvider || 'openai',
+      prompt: fullPrompt,
+      negative_prompt: effectiveNegative,
+      model,
+      size: imageSize,
+      quality: opts?.quality,
+      reference_images: referenceImages,
+      compiled,
+      context_snapshot_id: contextSnapshot?.id || null,
+      task_id: taskId,
+    });
+  } catch (err) {
+    // provenance 不是请求成功的前置条件；旧库缺列时仍允许兼容生图，
+    // 但会在日志中明确暴露，方便迁移审计。
+    log.warn('[道具图生] image_generations provenance 写入失败', { prop_id: propId, error: err.message });
+  }
 
   let result;
   try {
@@ -111,10 +250,13 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
       model: model || undefined,
       quality: opts?.quality || undefined,
       preferred_provider: preferredProvider || undefined,
-      user_negative_prompt: userNeg || undefined,
+      user_negative_prompt: effectiveNegative || undefined,
+      reference_image_urls: referenceImages.length ? referenceImages : undefined,
+      image_gen_id: imageGenerationId || undefined,
     });
   } catch (err) {
     const errMsg = '图片生成请求失败: ' + (err.message || '未知错误');
+    updatePropImageGeneration(db, imageGenerationId, { status: 'failed', error_msg: errMsg });
     log.error('Prop image API failed', { prop_id: propId, error: err.message });
     taskService.updateTaskError(db, taskId, errMsg);
     try {
@@ -124,6 +266,7 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
   }
 
   if (result.error) {
+    updatePropImageGeneration(db, imageGenerationId, { status: 'failed', error_msg: result.error });
     taskService.updateTaskError(db, taskId, result.error);
     try {
       db.prepare('UPDATE props SET error_msg = ?, updated_at = ? WHERE id = ?').run(result.error, new Date().toISOString(), propId);
@@ -132,6 +275,7 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
   }
   if (!result.image_url) {
     const errMsg = '未返回图片地址';
+    updatePropImageGeneration(db, imageGenerationId, { status: 'failed', error_msg: errMsg });
     taskService.updateTaskError(db, taskId, errMsg);
     try {
       db.prepare('UPDATE props SET error_msg = ?, updated_at = ? WHERE id = ?').run(errMsg, new Date().toISOString(), propId);
@@ -178,12 +322,23 @@ async function processPropImageGeneration(db, log, taskId, propId, opts) {
     }
   }
 
+  updatePropImageGeneration(db, imageGenerationId, {
+    status: 'completed',
+    image_url: result.image_url,
+    local_path: localPath,
+    completed_at: now,
+    error_msg: null,
+  });
+
   taskService.updateTaskResult(db, taskId, {
     image_url: result.image_url,
     local_path: localPath,
     prop_id: propId,
+    image_generation_id: imageGenerationId,
+    context_snapshot_id: contextSnapshot?.id || null,
+    prompt_hash: compiled?.prompt_hash || null,
   });
-  log.info('Prop image generation completed', { prop_id: propId, image_url: result.image_url, local_path: localPath });
+  log.info('Prop image generation completed', { prop_id: propId, image_generation_id: imageGenerationId, image_url: result.image_url, local_path: localPath });
 }
 
 function generatePropImage(db, log, propId, opts) {
@@ -205,4 +360,6 @@ function generatePropImage(db, log, propId, opts) {
 module.exports = {
   generatePropImage,
   processPropImageGeneration,
+  createPropImageGenerationRecord,
+  updatePropImageGeneration,
 };

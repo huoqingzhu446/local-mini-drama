@@ -12,6 +12,31 @@
 - 从数据库或接口读取角色、道具、场景、分镜描述后批量生成概念图。
 - 保留“候选图 -> 用户点击使用 -> 写回业务表”的人工确认流程。
 
+## 统一视觉上下文 V2（2026-07）
+
+Codex 任务和普通图片生成现在共享同一个版本化上下文编译器：
+
+- `drama_visual_style_versions` 保存项目视觉方案的草稿、激活版本和签名；只有激活版本会影响新任务。
+- `generation_context_snapshots` 在任务创建时冻结最终 prompt、负面词、参考包、风格版本和哈希，后续处理不会重新读取旧的 `polished_prompt` 覆盖它。
+- 分镜参考包固定遵循“尾帧首帧构图锁（如适用）→ 场景主图 → 场景九宫格 → 显式角色 → 显式道具”的顺序，按供应商上限去重和截断。
+- 当 `polished_prompt_style_signature` 与活动版本不一致时，编译器只把原始剧本/动作/镜头字段作为内容，旧润色文本不再作为全局画风；手动覆盖也会被包在当前风格锁之下。
+- `jobs.json` 除了兼容旧的 `reference_images`，还会导出 `references`、`style_version_id`、`context_snapshot_id`、`prompt_hash` 和 `compiler_version`。
+- 角色、道具、场景、分镜的普通图、四视图和九宫格流程都写入 `generation_context_snapshots`；道具额外写入 `image_generations.prop_id` provenance。
+- V2 项目的旧主图/旧候选图如果没有当前版本 provenance，默认从新参考包中跳过并记录 `STALE_REFERENCE`。需要临时使用旧图时，必须显式传 `allow_stale_references=true`。
+- 生成任务完成编译后，实体会标记为 `compiled_v2`；这表示“已有冻结上下文”，不代表覆盖了旧的历史 prompt 文本。
+
+切换项目风格时先保存草稿，再显式激活。激活会把相关角色/道具/场景/分镜提示词标记为 `stale_style`，取消旧的 pending/generating/completed Codex 任务；旧候选图不会自动覆盖业务图，使用过期候选图需要显式传 `allow_stale`。
+
+历史项目迁移脚本：
+
+```bash
+cd backend-node
+node scripts/migrate-visual-style-v2.js --drama 4 --episode 7
+node scripts/migrate-visual-style-v2.js --drama 4 --episode 7 --apply
+```
+
+默认跳过已有正式分镜图；明确要重做时再追加 `--requeue-existing`。迁移前数据库备份写入 `data/backups/`，临时副本演练时 `--db` 也会同步改变 jobs manifest 目录。
+
 ## 代码入口
 
 后端：

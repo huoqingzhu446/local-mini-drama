@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="680" viewBox="0 0 1500 680">
+  <rect width="1500" height="680" fill="#F4F1EA"/>
+
+  <text x="750" y="70" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="30" font-weight="700" fill="#171A1F">17 / 19 / 21 类品牌图标概念</text>
+  <text x="750" y="108" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="17" fill="#6A6E73">单色、几何化、适合产品压印与包装应用</text>
+
+  <!-- NORKAI -->
+  <g transform="translate(60 145)">
+    <rect width="430" height="455" rx="18" fill="#FFFFFF"/>
+    <g transform="translate(115 38)">
+      <path d="M100 0 190 52v104l-90 52-90-52V52Z" fill="#152E2C"/>
+      <path d="M51 145V59h28l70 89V62" fill="none" stroke="#F2B84B" stroke-width="22" stroke-linecap="square" stroke-linejoin="miter"/>
+    </g>
+    <text x="215" y="300" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="38" font-weight="800" letter-spacing="4" fill="#152E2C">诺铠</text>
+    <text x="215" y="342" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="700" letter-spacing="6" fill="#152E2C">NORKAI</text>
+    <line x1="150" y1="370" x2="280" y2="370" stroke="#F2B84B" stroke-width="4"/>
+    <text x="215" y="407" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="16" fill="#696E72">盾形六边体 × 字母 N</text>
+    <text x="215" y="433" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="14" fill="#92969A">防护 · 耐用 · 工程感</text>
+  </g>
+
+  <!-- KYLOSEN -->
+  <g transform="translate(535 145)">
+    <rect width="430" height="455" rx="18" fill="#FFFFFF"/>
+    <g transform="translate(110 38)" fill="#233C66">
+      <path d="M0 18h52v75L119 18h69l-82 88 90 102h-70l-74-88v88H0Z"/>
+      <path d="M109 93 180 18h30v190h-30v-79Z" fill="#B86B4B"/>
+    </g>
+    <text x="215" y="300" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="38" font-weight="800" letter-spacing="4" fill="#233C66">凯洛森</text>
+    <text x="215" y="342" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="700" letter-spacing="5" fill="#233C66">KYLOSEN</text>
+    <line x1="150" y1="370" x2="280" y2="370" stroke="#B86B4B" stroke-width="4"/>
+    <text x="215" y="407" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="16" fill="#696E72">结构拼接 × 字母 K</text>
+    <text x="215" y="433" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="14" fill="#92969A">建筑 · 连接 · 稳定感</text>
+  </g>
+
+  <!-- CELOVI -->
+  <g transform="translate(1010 145)">
+    <rect width="430" height="455" rx="18" fill="#FFFFFF"/>
+    <g transform="translate(115 38)">
+      <circle cx="100" cy="104" r="82" fill="none" stroke="#294E45" stroke-width="24" stroke-dasharray="430 86" transform="rotate(34 100 104)"/>
+      <path d="M46 72 100 164l56-92" fill="none" stroke="#D58D78" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="100" cy="104" r="11" fill="#294E45"/>
+    </g>
+    <text x="215" y="300" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="38" font-weight="800" letter-spacing="4" fill="#294E45">赛珞维</text>
+    <text x="215" y="342" text-anchor="middle" font-family="Arial, sans-serif" font-size="21" font-weight="700" letter-spacing="6" fill="#294E45">CELOVI</text>
+    <line x1="150" y1="370" x2="280" y2="370" stroke="#D58D78" stroke-width="4"/>
+    <text x="215" y="407" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="16" fill="#696E72">圆环 C × 字母 V</text>
+    <text x="215" y="433" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="14" fill="#92969A">家居 · 环保 · 亲和感</text>
+  </g>
+
+  <text x="750" y="645" text-anchor="middle" font-family="Arial, 'PingFang SC', sans-serif" font-size="14" fill="#7E8286">概念稿仅用于方向选择；正式申请前建议进行图形及文字商标近似检索</text>
+</svg>

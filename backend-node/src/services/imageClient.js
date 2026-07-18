@@ -10,6 +10,8 @@ const { loadConfig } = require('../config');
 const { postJSONWithTimeout } = require('./aiClient');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
 const { normalizeImageQuality } = require('../utils/imageQuality');
+const promptCompiler = require('./promptCompiler');
+const generationContextService = require('./generationContextService');
 
 /** 图生 POST 使用 Node http(s)，默认 10 分钟，避免 undici fetch 大包体/慢链路下模糊失败 */
 const IMAGE_HTTP_TIMEOUT_MS = 600000;
@@ -1611,6 +1613,43 @@ async function callImageApi(db, log, opts) {
   return { image_url: imageUrl };
 }
 
+function imageGenerationTableColumns(db) {
+  try { return new Set(db.prepare('PRAGMA table_info(image_generations)').all().map((row) => row.name)); }
+  catch (_) { return new Set(); }
+}
+
+function compileAssetContext(db, opts = {}) {
+  if (opts.skip_visual_context) return null;
+  const entityType = opts.character_id != null ? 'character' : opts.scene_id != null ? 'scene' : opts.prop_id != null ? 'prop' : null;
+  const entityId = entityType === 'character'
+    ? Number(opts.character_id)
+    : entityType === 'scene'
+      ? Number(opts.scene_id)
+      : Number(opts.prop_id);
+  if (!entityType || !Number.isFinite(entityId) || entityId <= 0) return null;
+  try {
+    return promptCompiler.compile(db, loadConfig(), {
+      entity_type: entityType,
+      entity_id: entityId,
+      drama_id: opts.drama_id,
+      frame_type: opts.frame_type || 'main',
+      // 只有调用方明确声明“手动内容覆盖”时才把请求 prompt 当成
+      // source_prompt；角色/场景四视图流程传入的旧缓存 prompt 必须先
+      // 经过实体签名校验，不能绕过 V2 的 stale 回退逻辑。
+      prompt: opts.prompt_is_manual ? opts.prompt : undefined,
+      style: opts.style,
+      negative_prompt: opts.user_negative_prompt,
+      aspect_ratio: opts.aspect_ratio,
+      quality: opts.quality,
+      style_version_id: opts.style_version_id,
+      reference_images: opts.reference_image_urls || opts.reference_images,
+      allow_stale_references: opts.allow_stale_references || opts.allowStaleReferences,
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * 创建 image_generation 记录并异步调用 API，完成后更新记录与角色 image_url。
  * 与场景图一致：创建 task 并写入 task_id，便于前端轮询 /tasks/:task_id 获知完成或报错。
@@ -1619,6 +1658,7 @@ function createAndGenerateImage(db, log, opts) {
   const {
     drama_id,
     character_id,
+    prop_id,
     scene_id,
     image_type,
     prompt,
@@ -1628,46 +1668,83 @@ function createAndGenerateImage(db, log, opts) {
     provider,
     user_negative_prompt,
   } = opts;
-  const negRow = (user_negative_prompt && String(user_negative_prompt).trim()) || null;
+  const compiled = compileAssetContext(db, opts);
+  const effectivePrompt = compiled?.ok ? compiled.compiled_prompt : (prompt || '');
+  const effectiveNegative = compiled?.ok ? (compiled.compiled_negative_prompt || null) : ((user_negative_prompt && String(user_negative_prompt).trim()) || null);
+  const effectiveReferences = compiled?.reference_images || opts.reference_image_urls || opts.reference_images || [];
+  const negRow = effectiveNegative;
   const quality = normalizeImageQuality(rawQuality, '');
   const now = new Date().toISOString();
   const dramaIdNum = Number(drama_id) || 0;
   const charIdNum = character_id != null ? Number(character_id) : null;
   const sceneIdNum = scene_id != null ? Number(scene_id) : null;
+  const propIdNum = prop_id != null ? Number(prop_id) : null;
 
   let resourceId;
   if (charIdNum != null) resourceId = `character_${charIdNum}`;
   else if (sceneIdNum != null) resourceId = `scene_${sceneIdNum}`;
+  else if (propIdNum != null) resourceId = `prop_${propIdNum}`;
   else resourceId = String(dramaIdNum);
   const task = taskService.createTask(db, log, 'image_generation', resourceId);
   const taskId = task.id;
 
   let imageGenId;
+  let contextSnapshot = null;
+  if (compiled?.ok) {
+    try {
+      contextSnapshot = generationContextService.createSnapshot(db, {
+        drama_id: compiled.drama_id || dramaIdNum,
+        episode_id: compiled.episode_id,
+        scene_id: compiled.scene_id,
+        storyboard_id: compiled.storyboard_id,
+        entity_type: compiled.entity_type,
+        entity_id: compiled.entity_id,
+        frame_type: compiled.frame_type,
+        style_version_id: compiled.style_version_id,
+        style_signature: compiled.style_signature,
+        prompt_source: compiled.prompt_source,
+        source_prompt: compiled.source_prompt,
+        compiled_prompt: compiled.compiled_prompt,
+        compiled_negative_prompt: compiled.compiled_negative_prompt,
+        reference_pack: compiled.reference_pack,
+        source_snapshot: compiled.source_snapshot,
+        prompt_hash: compiled.prompt_hash,
+        reference_hash: compiled.reference_hash,
+        compiler_version: compiled.compiler_version,
+        diagnostics: compiled.diagnostics,
+      });
+    } catch (err) {
+      log?.warn?.('[图生] 资源上下文快照写入失败', { error: err.message });
+    }
+  }
+  if (contextSnapshot) {
+    try { generationContextService.markEntityCompiled(db, compiled); } catch (_) {}
+  }
   try {
-    const info = db.prepare(
-      `INSERT INTO image_generations (drama_id, character_id, scene_id, provider, prompt, negative_prompt, model, size, quality, status, task_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`
-    ).run(
-      dramaIdNum,
-      charIdNum,
-      sceneIdNum,
-      provider || 'openai',
-      prompt || '',
-      negRow,
-      model || null,
-      size || null,
-      quality || null,
-      taskId,
-      now,
-      now
-    );
+    const columns = imageGenerationTableColumns(db);
+    const entries = [
+      ['drama_id', dramaIdNum], ['character_id', charIdNum], ['scene_id', sceneIdNum], ['prop_id', propIdNum], ['provider', provider || 'openai'],
+      ['prompt', effectivePrompt], ['negative_prompt', negRow], ['model', model || null], ['size', size || null],
+      ['quality', quality || null], ['status', 'pending'], ['task_id', taskId], ['created_at', now], ['updated_at', now],
+      ['reference_images', effectiveReferences.length ? JSON.stringify(effectiveReferences.slice(0, 10)) : null],
+      ['style_version_id', compiled?.style_version_id || opts.style_version_id || null],
+      ['context_snapshot_id', contextSnapshot?.id || null], ['prompt_hash', compiled?.prompt_hash || null],
+      ['reference_pack', compiled?.reference_pack ? JSON.stringify(compiled.reference_pack) : null],
+      ['compiler_version', compiled?.compiler_version || null],
+    ];
+    const fields = [];
+    const values = [];
+    for (const [field, value] of entries) {
+      if (columns.has(field)) { fields.push(field); values.push(value); }
+    }
+    const info = db.prepare(`INSERT INTO image_generations (${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`).run(...values);
     imageGenId = info.lastInsertRowid;
   } catch (e) {
     if ((e.message || '').includes('scene_id') || (e.message || '').includes('character_id')) {
       const info = db.prepare(
         `INSERT INTO image_generations (drama_id, provider, prompt, model, size, quality, status, task_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`
-      ).run(dramaIdNum, provider || 'openai', prompt || '', model || null, size || null, quality || null, taskId, now, now);
+      ).run(dramaIdNum, provider || 'openai', effectivePrompt, model || null, size || null, quality || null, taskId, now, now);
       imageGenId = info.lastInsertRowid;
     } else {
       throw e;
@@ -1678,15 +1755,18 @@ function createAndGenerateImage(db, log, opts) {
     try {
       db.prepare('UPDATE image_generations SET status = ? WHERE id = ?').run('processing', imageGenId);
       const result = await callImageApi(db, log, {
-        prompt,
+        prompt: effectivePrompt,
         model,
         size,
         quality,
         drama_id: drama_id,
         character_id: character_id,
+        prop_id: prop_id,
         image_type,
         image_gen_id: imageGenId,
-        user_negative_prompt: user_negative_prompt || undefined,
+        user_negative_prompt: effectiveNegative || undefined,
+        reference_image_urls: effectiveReferences,
+        imageServiceType: sceneIdNum != null || propIdNum != null ? 'image' : 'image',
       });
       const now2 = new Date().toISOString();
       if (result.error) {
@@ -1704,6 +1784,11 @@ function createAndGenerateImage(db, log, opts) {
             db.prepare('UPDATE scenes SET error_msg = ?, updated_at = ? WHERE id = ?').run(result.error, now2, sceneIdNum);
           } catch (_) {}
         }
+        if (propIdNum != null) {
+          try {
+            db.prepare('UPDATE props SET error_msg = ?, updated_at = ? WHERE id = ?').run(result.error, now2, propIdNum);
+          } catch (_) {}
+        }
         log.error('Image generation failed', { image_gen_id: imageGenId, error: result.error });
         return;
       }
@@ -1714,7 +1799,7 @@ function createAndGenerateImage(db, log, opts) {
         const storagePath = path.isAbsolute(cfg.storage?.local_path)
           ? cfg.storage.local_path
           : path.join(process.cwd(), cfg.storage?.local_path || './data/storage');
-        const category = sceneIdNum != null ? 'scenes' : (charIdNum != null ? 'characters' : 'images');
+        const category = sceneIdNum != null ? 'scenes' : (charIdNum != null ? 'characters' : (propIdNum != null ? 'props' : 'images'));
         const projectSubdir = storageLayout.getProjectStorageSubdir(db, dramaIdNum);
         localPath = await uploadService.downloadImageToLocal(
           storagePath,
@@ -1798,6 +1883,27 @@ function createAndGenerateImage(db, log, opts) {
         }
         log.info('Scene image updated', { scene_id: sceneIdNum, image_url: result.image_url, local_path: localPath });
       }
+      if (propIdNum != null) {
+        try {
+          const oldProp = db.prepare('SELECT local_path, image_url, extra_images FROM props WHERE id = ?').get(propIdNum);
+          const oldPath = oldProp?.local_path || oldProp?.image_url || '';
+          let extras = [];
+          try { extras = oldProp?.extra_images ? JSON.parse(oldProp.extra_images) : []; } catch (_) {}
+          if (!Array.isArray(extras)) extras = [];
+          if (oldPath && !extras.includes(oldPath)) extras.push(oldPath);
+          const extraJson = extras.length ? JSON.stringify(extras) : null;
+          db.prepare('UPDATE props SET image_url = ?, local_path = ?, extra_images = ?, updated_at = ? WHERE id = ?').run(
+            result.image_url, localPath, extraJson, now2, propIdNum
+          );
+        } catch (e) {
+          if ((e.message || '').includes('extra_images')) {
+            db.prepare('UPDATE props SET image_url = ?, local_path = ?, updated_at = ? WHERE id = ?').run(result.image_url, localPath, now2, propIdNum);
+          } else {
+            throw e;
+          }
+        }
+        log.info('Prop image updated', { prop_id: propIdNum, image_url: result.image_url, local_path: localPath });
+      }
       log.info('Image generation completed', { image_gen_id: imageGenId, local_path: localPath });
     } catch (err) {
       const now2 = new Date().toISOString();
@@ -1824,12 +1930,17 @@ function createAndGenerateImage(db, log, opts) {
           db.prepare('UPDATE scenes SET error_msg = ?, updated_at = ? WHERE id = ?').run(errMsg, now2, sceneIdNum);
         } catch (_) {}
       }
+      if (propIdNum != null) {
+        try {
+          db.prepare('UPDATE props SET error_msg = ?, updated_at = ? WHERE id = ?').run(errMsg, now2, propIdNum);
+        } catch (_) {}
+      }
       log.error('Image generation error', { image_gen_id: imageGenId, task_id: taskId, error: err.message });
     }
   });
 
   const row = db.prepare('SELECT * FROM image_generations WHERE id = ?').get(imageGenId);
-  return row ? rowToItem(row) : { id: imageGenId, task_id: taskId, status: 'pending', drama_id: dramaIdNum, character_id: charIdNum, scene_id: sceneIdNum, prompt, model, size, quality, created_at: now, updated_at: now };
+  return row ? rowToItem(row) : { id: imageGenId, task_id: taskId, status: 'pending', drama_id: dramaIdNum, character_id: charIdNum, scene_id: sceneIdNum, prompt: effectivePrompt, model, size, quality, created_at: now, updated_at: now };
 }
 
 function rowToItem(r) {
@@ -1838,6 +1949,7 @@ function rowToItem(r) {
     storyboard_id: r.storyboard_id,
     drama_id: r.drama_id,
     character_id: r.character_id,
+    prop_id: r.prop_id,
     provider: r.provider,
     prompt: r.prompt,
     model: r.model,
@@ -1851,6 +1963,11 @@ function rowToItem(r) {
     created_at: r.created_at,
     updated_at: r.updated_at,
     completed_at: r.completed_at,
+    style_version_id: r.style_version_id == null ? null : Number(r.style_version_id),
+    context_snapshot_id: r.context_snapshot_id || null,
+    prompt_hash: r.prompt_hash || '',
+    reference_pack: r.reference_pack ? (() => { try { return JSON.parse(r.reference_pack); } catch (_) { return null; } })() : null,
+    compiler_version: r.compiler_version || '',
   };
 }
 

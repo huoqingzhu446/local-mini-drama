@@ -10,6 +10,8 @@ const angleService = require('../services/angleService');
 const promptStyleService = require('../services/promptStyleService');
 const { buildUniversalSegmentUserPromptBundle } = require('../services/universalSegmentPromptBundle');
 const { normalizeUniversalSegmentShotDurations } = require('../services/universalSegmentDurationNormalize');
+const visualStyleVersionService = require('../services/visualStyleVersionService');
+const promptCompiler = require('../services/promptCompiler');
 
 /** 润色接口：邻镜结构化摘要（含全能片段与其它提示词字段） */
 function formatNeighborShotPolishContext(row) {
@@ -430,6 +432,7 @@ function routes(db, log) {
         let styleZh = '';
         let styleEn = '';
         let styleSignature = '';
+        let activeStyleVersion = null;
         let visualBibleBlock = '';
         try {
           const loadConfig = require('../config').loadConfig;
@@ -439,9 +442,12 @@ function routes(db, log) {
             ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(dramaId)
             : null;
           cfg = mergeCfgStyleWithDrama(cfg, dr || {});
+          if (dramaId) {
+            try { activeStyleVersion = visualStyleVersionService.ensureActiveVersion(db, dramaId); } catch (_) {}
+          }
           styleEn = (cfg?.style?.default_style_en || cfg?.style?.default_style || '').trim();
           styleZh = (cfg?.style?.default_style_zh || '').trim();
-          styleSignature = (cfg?.style?.style_signature || '').trim();
+          styleSignature = (activeStyleVersion?.signature || cfg?.style?.style_signature || '').trim();
           visualBibleBlock = buildVisualStyleConstraintBlock(cfg, {
             language: 'en',
             heading: 'VISUAL_BIBLE (must stay consistent across characters, props, scenes, and storyboard images):',
@@ -541,15 +547,18 @@ function routes(db, log) {
             return [];
           }
         })());
+        const setParts = ['polished_prompt = ?'];
+        const setParams = [polished];
         if (storyboardCols.has('polished_prompt_style_signature')) {
-          db.prepare('UPDATE storyboards SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-            polished, styleSignature || null, nowIso, sbId
-          );
-        } else {
-          db.prepare('UPDATE storyboards SET polished_prompt = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL').run(
-            polished, nowIso, sbId
-          );
+          setParts.push('polished_prompt_style_signature = ?');
+          setParams.push(styleSignature || null);
         }
+        if (storyboardCols.has('prompt_state')) {
+          setParts.push("prompt_state = 'current'");
+        }
+        setParts.push('updated_at = ?');
+        setParams.push(nowIso, sbId);
+        db.prepare(`UPDATE storyboards SET ${setParts.join(', ')} WHERE id = ? AND deleted_at IS NULL`).run(...setParams);
         log.info('[分镜] polishPrompt 完成', { id: sbId, len: polished.length, has_prev_continuity: !!prevContinuityState });
 
         // 异步提取连戏状态快照并保存（不阻塞响应）

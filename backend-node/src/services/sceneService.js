@@ -8,6 +8,8 @@ const {
   isStyleSignatureCurrent,
   scopedStyleTextsFromStyleObject,
 } = require('../utils/dramaStyleMerge');
+const visualStyleVersionService = require('./visualStyleVersionService');
+const promptCompiler = require('./promptCompiler');
 
 function applySceneStyleOverride(cfg, styleOverride) {
   const o = (styleOverride || '').toString().trim();
@@ -34,6 +36,15 @@ function tableColumns(db, table) {
 function sceneScopedStyle(styleObj) {
   return scopedStyleTextsFromStyleObject(styleObj || {}, 'scene');
 }
+
+function activeSceneStyleSignature(db, dramaId) {
+  try {
+    const version = visualStyleVersionService.ensureActiveVersion(db, Number(dramaId));
+    return version?.signature || '';
+  } catch (_) {
+    return '';
+  }
+}
 function updateScene(db, log, sceneId, req) {
   const row = db.prepare('SELECT id FROM scenes WHERE id = ? AND deleted_at IS NULL').get(Number(sceneId));
   if (!row) return { ok: false, error: 'scene not found' };
@@ -41,9 +52,10 @@ function updateScene(db, log, sceneId, req) {
   const sceneColumns = tableColumns(db, 'scenes');
   const updates = [];
   const params = [];
-  if (req.location != null) { updates.push('location = ?'); params.push(req.location); }
-  if (req.time != null) { updates.push('time = ?'); params.push(req.time); }
-  if (req.prompt != null) { updates.push('prompt = ?'); params.push(req.prompt); }
+  let sceneContentChanged = false;
+  if (req.location != null) { updates.push('location = ?'); params.push(req.location); sceneContentChanged = true; }
+  if (req.time != null) { updates.push('time = ?'); params.push(req.time); sceneContentChanged = true; }
+  if (req.prompt != null) { updates.push('prompt = ?'); params.push(req.prompt); sceneContentChanged = true; }
   if (req.polished_prompt != null) {
     updates.push('polished_prompt = ?');
     params.push(req.polished_prompt);
@@ -51,7 +63,7 @@ function updateScene(db, log, sceneId, req) {
       const dramaRow = sceneRow?.drama_id
         ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
         : null;
-      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
+      const signature = activeSceneStyleSignature(db, sceneRow?.drama_id) || mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
       updates.push('polished_prompt_style_signature = ?');
       params.push(signature);
     }
@@ -63,7 +75,7 @@ function updateScene(db, log, sceneId, req) {
       const dramaRow = sceneRow?.drama_id
         ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
         : null;
-      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
+      const signature = activeSceneStyleSignature(db, sceneRow?.drama_id) || mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
       updates.push('polished_prompt_single_style_signature = ?');
       params.push(signature);
     }
@@ -75,7 +87,7 @@ function updateScene(db, log, sceneId, req) {
       const dramaRow = sceneRow?.drama_id
         ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sceneRow.drama_id)
         : null;
-      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
+      const signature = activeSceneStyleSignature(db, sceneRow?.drama_id) || mergeCfgStyleWithDrama({}, dramaRow || {}).style?.scene_style_signature || null;
       updates.push('polished_prompt_nine_style_signature = ?');
       params.push(signature);
     }
@@ -86,6 +98,18 @@ function updateScene(db, log, sceneId, req) {
   if (req.reference_grid_local_path !== undefined) { updates.push('reference_grid_local_path = ?'); params.push(req.reference_grid_local_path ?? null); }
   if (req.extra_images !== undefined) { updates.push('extra_images = ?'); params.push(req.extra_images ?? null); }
   if (req.ref_image !== undefined) { updates.push('ref_image = ?'); params.push(req.ref_image ?? null); }
+  if (sceneColumns.has('prompt_state')) {
+    if (req.prompt_state !== undefined) {
+      updates.push('prompt_state = ?');
+      params.push(req.prompt_state);
+    } else if (req.polished_prompt != null || req.polished_prompt_single != null || req.polished_prompt_nine != null) {
+      updates.push('prompt_state = ?');
+      params.push('manual_override');
+    } else if (sceneContentChanged) {
+      updates.push('prompt_state = ?');
+      params.push('stale_scene');
+    }
+  }
   if (updates.length === 0) return { ok: true };
   params.push(new Date().toISOString(), sceneId);
   db.prepare('UPDATE scenes SET ' + updates.join(', ') + ', updated_at = ? WHERE id = ?').run(...params);
@@ -97,7 +121,13 @@ function updateScenePrompt(db, log, sceneId, req) {
   const row = db.prepare('SELECT id FROM scenes WHERE id = ? AND deleted_at IS NULL').get(Number(sceneId));
   if (!row) return { ok: false, error: 'scene not found' };
   const prompt = req.prompt != null ? req.prompt : '';
-  db.prepare('UPDATE scenes SET prompt = ?, updated_at = ? WHERE id = ?').run(prompt, new Date().toISOString(), Number(sceneId));
+  const columns = tableColumns(db, 'scenes');
+  const set = ['prompt = ?'];
+  const params = [prompt];
+  if (columns.has('prompt_state')) { set.push("prompt_state = 'stale_scene'"); }
+  set.push('updated_at = ?');
+  params.push(new Date().toISOString(), Number(sceneId));
+  db.prepare(`UPDATE scenes SET ${set.join(', ')} WHERE id = ?`).run(...params);
   log.info('Scene prompt updated', { scene_id: sceneId });
   return { ok: true };
 }
@@ -297,7 +327,7 @@ async function generateScenePromptOnly(db, log, cfg, sceneId, modelName, style) 
 
   const location = (sceneRow.location || '').trim();
   const time = (sceneRow.time || '').trim();
-  const rawPrompt = (sceneRow.prompt || '').trim();
+  const rawPrompt = promptCompiler.sceneContentText(sceneRow, 'main');
   const fourViewCfg = mergedCfg;
 
   // 构建文字AI输入（location + time + 原始描述）
@@ -334,12 +364,15 @@ async function generateScenePromptOnly(db, log, cfg, sceneId, modelName, style) 
     styleZh,
     mergedCfg?.style?.visual_bible || ''
   );
-  const styleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const styleSignature = activeSceneStyleSignature(db, sceneRow.drama_id) || (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
 
   if (sceneColumns.has('polished_prompt_style_signature')) {
-    db.prepare('UPDATE scenes SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
-      polishedPrompt, styleSignature || null, new Date().toISOString(), Number(sceneId)
-    );
+    const set = ['polished_prompt = ?', 'polished_prompt_style_signature = ?'];
+    const params = [polishedPrompt, styleSignature || null];
+    if (sceneColumns.has('prompt_state')) set.push("prompt_state = 'current'");
+    set.push('updated_at = ?');
+    params.push(new Date().toISOString(), Number(sceneId));
+    db.prepare(`UPDATE scenes SET ${set.join(', ')} WHERE id = ?`).run(...params);
   } else {
     db.prepare('UPDATE scenes SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
       polishedPrompt, new Date().toISOString(), Number(sceneId)
@@ -366,7 +399,7 @@ async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, s
 
   const location = (sceneRow.location || '').trim();
   const time = (sceneRow.time || '').trim();
-  const rawPrompt = (sceneRow.prompt || '').trim();
+  const rawPrompt = promptCompiler.sceneContentText(sceneRow, 'main');
 
   const sceneDesc = [
     location ? `场景地点：${location}` : '',
@@ -401,12 +434,15 @@ async function generateSceneSinglePromptOnly(db, log, cfg, sceneId, modelName, s
     styleZh,
     mergedCfg?.style?.visual_bible || ''
   );
-  const styleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const styleSignature = activeSceneStyleSignature(db, sceneRow.drama_id) || (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
 
   if (sceneColumns.has('polished_prompt_single_style_signature')) {
-    db.prepare('UPDATE scenes SET polished_prompt_single = ?, polished_prompt_single_style_signature = ?, updated_at = ? WHERE id = ?').run(
-      polishedPrompt, styleSignature || null, new Date().toISOString(), Number(sceneId)
-    );
+    const set = ['polished_prompt_single = ?', 'polished_prompt_single_style_signature = ?'];
+    const params = [polishedPrompt, styleSignature || null];
+    if (sceneColumns.has('prompt_state')) set.push("prompt_state = 'current'");
+    set.push('updated_at = ?');
+    params.push(new Date().toISOString(), Number(sceneId));
+    db.prepare(`UPDATE scenes SET ${set.join(', ')} WHERE id = ?`).run(...params);
   } else {
     db.prepare('UPDATE scenes SET polished_prompt_single = ?, updated_at = ? WHERE id = ?').run(
       polishedPrompt, new Date().toISOString(), Number(sceneId)
@@ -432,7 +468,7 @@ async function generateSceneNinePromptOnly(db, log, cfg, sceneId, modelName, sty
 
   const location = (sceneRow.location || '').trim();
   const time = (sceneRow.time || '').trim();
-  const rawPrompt = (sceneRow.prompt || '').trim();
+  const rawPrompt = promptCompiler.sceneContentText(sceneRow, 'reference_grid');
   const hasMainImage = !!(sceneRow.local_path || sceneRow.image_url);
 
   const sceneDesc = [
@@ -469,12 +505,15 @@ async function generateSceneNinePromptOnly(db, log, cfg, sceneId, modelName, sty
     styleZh,
     mergedCfg?.style?.visual_bible || ''
   );
-  const styleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const styleSignature = activeSceneStyleSignature(db, sceneRow.drama_id) || (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
 
   if (sceneColumns.has('polished_prompt_nine_style_signature')) {
-    db.prepare('UPDATE scenes SET polished_prompt_nine = ?, polished_prompt_nine_style_signature = ?, updated_at = ? WHERE id = ?').run(
-      polishedPrompt, styleSignature || null, new Date().toISOString(), Number(sceneId)
-    );
+    const set = ['polished_prompt_nine = ?', 'polished_prompt_nine_style_signature = ?'];
+    const params = [polishedPrompt, styleSignature || null];
+    if (sceneColumns.has('prompt_state')) set.push("prompt_state = 'current'");
+    set.push('updated_at = ?');
+    params.push(new Date().toISOString(), Number(sceneId));
+    db.prepare(`UPDATE scenes SET ${set.join(', ')} WHERE id = ?`).run(...params);
   } else {
     db.prepare('UPDATE scenes SET polished_prompt_nine = ?, updated_at = ? WHERE id = ?').run(
       polishedPrompt, new Date().toISOString(), Number(sceneId)
@@ -506,7 +545,7 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
   mergedCfg = applySceneStyleOverride(mergedCfg, style);
   let imagePrompt;
 
-  const currentStyleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = activeSceneStyleSignature(db, sceneRow.drama_id) || (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
   if (
     sceneRow.polished_prompt &&
     String(sceneRow.polished_prompt).trim() &&
@@ -517,7 +556,7 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
   } else {
     const location = (sceneRow.location || '').toString().trim();
     const time = (sceneRow.time || '').toString().trim();
-    const rawPrompt = (sceneRow.prompt || '').toString().trim();
+    const rawPrompt = promptCompiler.sceneContentText(sceneRow, 'main');
     const sceneDesc = [
       location ? `场景地点：${location}` : '',
       time ? `时间/时段：${time}` : '',
@@ -552,9 +591,12 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
     // 顺带保存，供下次复用
     try {
       if (sceneColumns.has('polished_prompt_style_signature')) {
-        db.prepare('UPDATE scenes SET polished_prompt = ?, polished_prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
-          imagePrompt, currentStyleSignature || null, new Date().toISOString(), Number(sceneId)
-        );
+        const set = ['polished_prompt = ?', 'polished_prompt_style_signature = ?'];
+        const params = [imagePrompt, currentStyleSignature || null];
+        if (sceneColumns.has('prompt_state')) set.push("prompt_state = 'current'");
+        set.push('updated_at = ?');
+        params.push(new Date().toISOString(), Number(sceneId));
+        db.prepare(`UPDATE scenes SET ${set.join(', ')} WHERE id = ?`).run(...params);
       } else {
         db.prepare('UPDATE scenes SET polished_prompt = ?, updated_at = ? WHERE id = ?').run(
           imagePrompt, new Date().toISOString(), Number(sceneId)
@@ -573,6 +615,7 @@ async function generateSceneFourViewImage(db, log, cfg, sceneId, modelName, styl
     size: '1792x1024',
     quality: quality || 'standard',
     provider: 'openai',
+    frame_type: 'scene_four_view',
   });
 
   log.info('[场景四视图] Step2 图片生成任务已提交', { scene_id: sceneId, image_gen_id: imageGen?.id });
@@ -602,7 +645,7 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style,
 
   // 注意：单图模式只检查 polished_prompt_single，即使 polished_prompt（四宫格）有值也不复用
   // 这样可以兼容老数据（老数据 polished_prompt 是四宫格内容，不能用于单图）
-  const currentStyleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = activeSceneStyleSignature(db, sceneRow.drama_id) || (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
   if (
     sceneRow.polished_prompt_single &&
     String(sceneRow.polished_prompt_single).trim() &&
@@ -613,7 +656,7 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style,
   } else {
     const location = (sceneRow.location || '').toString().trim();
     const time = (sceneRow.time || '').toString().trim();
-    const rawPrompt = (sceneRow.prompt || '').toString().trim();
+    const rawPrompt = promptCompiler.sceneContentText(sceneRow, 'main');
     const sceneDesc = [
       location ? `场景地点：${location}` : '',
       time ? `时间/时段：${time}` : '',
@@ -647,9 +690,12 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style,
 
     try {
       if (sceneColumns.has('polished_prompt_single_style_signature')) {
-        db.prepare('UPDATE scenes SET polished_prompt_single = ?, polished_prompt_single_style_signature = ?, updated_at = ? WHERE id = ?').run(
-          imagePrompt, currentStyleSignature || null, new Date().toISOString(), Number(sceneId)
-        );
+        const set = ['polished_prompt_single = ?', 'polished_prompt_single_style_signature = ?'];
+        const params = [imagePrompt, currentStyleSignature || null];
+        if (sceneColumns.has('prompt_state')) set.push("prompt_state = 'current'");
+        set.push('updated_at = ?');
+        params.push(new Date().toISOString(), Number(sceneId));
+        db.prepare(`UPDATE scenes SET ${set.join(', ')} WHERE id = ?`).run(...params);
       } else {
         db.prepare('UPDATE scenes SET polished_prompt_single = ?, updated_at = ? WHERE id = ?').run(
           imagePrompt, new Date().toISOString(), Number(sceneId)
@@ -668,6 +714,7 @@ async function generateSceneSingleImage(db, log, cfg, sceneId, modelName, style,
     size: '1792x1024',
     quality: quality || 'standard',
     provider: 'openai',
+    frame_type: 'main',
   });
 
   log.info('[场景单图] Step2 图片生成任务已提交', { scene_id: sceneId, image_gen_id: imageGen?.id });
@@ -697,7 +744,7 @@ async function generateSceneReferenceGridImage(db, log, cfg, sceneId, modelName,
   mergedCfg = applySceneStyleOverride(mergedCfg, style);
   let imagePrompt;
 
-  const currentStyleSignature = (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = activeSceneStyleSignature(db, sceneRow.drama_id) || (mergedCfg?.style?.scene_style_signature || mergedCfg?.style?.style_signature || '').trim();
   if (
     sceneRow.polished_prompt_nine &&
     String(sceneRow.polished_prompt_nine).trim() &&

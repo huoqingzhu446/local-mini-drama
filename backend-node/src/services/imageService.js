@@ -33,6 +33,7 @@ function rowToItem(r) {
     drama_id: r.drama_id,
     scene_id: r.scene_id ?? undefined,
     character_id: r.character_id,
+    prop_id: r.prop_id ?? undefined,
     provider: r.provider,
     prompt: r.prompt,
     model: r.model,
@@ -43,6 +44,11 @@ function rowToItem(r) {
     task_id: r.task_id,
     error_msg: r.error_msg,
     frame_type: r.frame_type ?? undefined,
+    style_version_id: r.style_version_id == null ? null : Number(r.style_version_id),
+    context_snapshot_id: r.context_snapshot_id || null,
+    prompt_hash: r.prompt_hash || '',
+    reference_pack: parseJsonSafe(r.reference_pack, null),
+    compiler_version: r.compiler_version || '',
     created_at: r.created_at,
     updated_at: r.updated_at,
     completed_at: r.completed_at,
@@ -63,6 +69,15 @@ const storageLayout = require('./storageLayout');
 const aiClient = require('./aiClient');
 const promptI18n = require('./promptI18n');
 const { normalizeImageQuality } = require('../utils/imageQuality');
+const promptCompiler = require('./promptCompiler');
+const generationContextService = require('./generationContextService');
+const referencePackService = require('./referencePackService');
+
+function parseJsonSafe(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
 
 const LAST_FRAME_TYPES = new Set(['last', 'storyboard_last', 'tail', 'last_frame']);
 const SCENE_REFERENCE_GRID_FRAME_TYPE = 'scene_reference_grid';
@@ -585,27 +600,72 @@ function mergePromptWithStyle(prompt, style) {
   return base + ', ' + styleText;
 }
 
+function tryLoadImageConfig() {
+  try { return require('../config').loadConfig(); } catch (_) { return {}; }
+}
+
+/** 在创建 image_generations 记录时冻结统一视觉上下文。四宫格/九宫格专用流程
+ * 仍由各自的提示词构建器负责，普通主图/首尾帧走共享编译器。 */
+function compileImageRequestContext(db, req = {}) {
+  if (req.skip_visual_context) return null;
+  const frameType = req.frame_type == null ? 'main' : String(req.frame_type);
+  if (['quad_grid', 'nine_grid', 'quad_panel_0', 'quad_panel_1', 'quad_panel_2', 'quad_panel_3'].includes(frameType)) return null;
+  let entityType = null;
+  let entityId = null;
+  if (req.storyboard_id != null) { entityType = 'storyboard'; entityId = Number(req.storyboard_id); }
+  else if (req.scene_id != null) { entityType = 'scene'; entityId = Number(req.scene_id); }
+  else if (req.character_id != null) { entityType = 'character'; entityId = Number(req.character_id); }
+  else if (req.prop_id != null) { entityType = 'prop'; entityId = Number(req.prop_id); }
+  if (!entityType || !Number.isFinite(entityId) || entityId <= 0) return null;
+  const cfg = req.config || tryLoadImageConfig();
+  let limits = req.reference_limits || req.referenceLimits;
+  if (!limits && entityType === 'storyboard') {
+    try { limits = imageClient.getStoryboardReferenceLimits(cfg, req.model); } catch (_) {}
+  }
+  try {
+    return promptCompiler.compile(db, cfg, {
+      entity_type: entityType,
+      entity_id: entityId,
+      drama_id: req.drama_id,
+      frame_type: frameType,
+      prompt: req.prompt,
+      style: req.style,
+      negative_prompt: req.negative_prompt,
+      aspect_ratio: req.aspect_ratio,
+      quality: req.quality,
+      style_version_id: req.style_version_id,
+      reference_images: req.reference_images,
+      reference_limits: limits,
+      use_first_frame_layout_lock: req.use_first_frame_layout_lock,
+      allow_stale_references: req.allow_stale_references || req.allowStaleReferences,
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
 function create(db, log, req) {
   if (req.storyboard_id != null && isStoryboardMainFrameType(req.frame_type)) {
     assertStoryboardReferenceCapacity(db, req.storyboard_id, 1);
   }
   const now = new Date().toISOString();
+  const compiled = compileImageRequestContext(db, req);
   const task = taskService.createTask(db, log, 'image_generation', String(req.drama_id || ''));
   const taskId = task.id;
   const frameType = req.frame_type ?? null;
   const sceneId = req.scene_id != null ? Number(req.scene_id) : null;
-  const refImagesJson =
-    req.reference_images && Array.isArray(req.reference_images)
-      ? JSON.stringify(req.reference_images.slice(0, 10))
-      : null;
-  if (req.reference_images && Array.isArray(req.reference_images)) {
+  const compiledReferences = compiled?.reference_images || [];
+  const requestedReferences = req.reference_images && Array.isArray(req.reference_images) ? req.reference_images : [];
+  const refImages = compiledReferences.length ? compiledReferences : requestedReferences.slice(0, 10);
+  const refImagesJson = refImages.length ? JSON.stringify(refImages.slice(0, 10)) : null;
+  if (refImages.length) {
     log.info('reference_images 完整路径（请求入参）', {
       image_gen_create: true,
-      count: req.reference_images.length,
-      reference_images: req.reference_images,
+      count: refImages.length,
+      reference_images: refImages,
     });
   }
-  const mergedPrompt = mergePromptWithStyle(req.prompt || '', req.style);
+  const mergedPrompt = compiled?.ok ? compiled.compiled_prompt : mergePromptWithStyle(req.prompt || '', req.style);
   const quality = normalizeImageQuality(req.quality, '');
   // 优先使用请求中直接传入的 size；其次将 aspect_ratio 转成 size；未提供则存 NULL 留给 processImageGeneration 从 drama 元数据读取
   let reqSize = req.size || null;
@@ -613,26 +673,76 @@ function create(db, log, req) {
     reqSize = aspectRatioToSize(req.aspect_ratio) || null;
   }
   const useFirstFrameLayoutLock = resolveUseFirstFrameLayoutLock(req, frameType);
-  const info = db.prepare(
-    `INSERT INTO image_generations (storyboard_id, drama_id, scene_id, provider, prompt, negative_prompt, model, frame_type, reference_images, use_first_frame_layout_lock, size, quality, status, task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`
-  ).run(
-    req.storyboard_id ?? null,
-    Number(req.drama_id) || 0,
-    sceneId,
-    req.provider || 'openai',
-    mergedPrompt,
-    req.negative_prompt ?? null,
-    req.model ?? null,
-    frameType,
-    refImagesJson,
-    useFirstFrameLayoutLock,
-    reqSize,
-    quality || null,
-    taskId,
-    now,
-    now
-  );
+  const columns = tableColumns(db, 'image_generations');
+  const baseEntries = [
+    ['storyboard_id', req.storyboard_id ?? null],
+    ['drama_id', Number(req.drama_id) || 0],
+    ['scene_id', sceneId],
+    ['prop_id', req.prop_id != null ? Number(req.prop_id) : null],
+    ['provider', req.provider || 'openai'],
+    ['prompt', mergedPrompt],
+    ['negative_prompt', compiled?.compiled_negative_prompt || req.negative_prompt || null],
+    ['model', req.model ?? null],
+    ['frame_type', frameType],
+    ['reference_images', refImagesJson],
+    ['use_first_frame_layout_lock', useFirstFrameLayoutLock],
+    ['size', reqSize],
+    ['quality', quality || null],
+    ['status', 'pending'],
+    ['task_id', taskId],
+    ['created_at', now],
+    ['updated_at', now],
+  ];
+  const fields = [];
+  const values = [];
+  for (const [field, value] of baseEntries) {
+    if (columns.has(field)) { fields.push(field); values.push(value); }
+  }
+  const optional = [
+    ['style_version_id', compiled?.style_version_id || req.style_version_id || null],
+    ['context_snapshot_id', null],
+    ['prompt_hash', compiled?.prompt_hash || null],
+    ['reference_pack', compiled?.reference_pack ? JSON.stringify(compiled.reference_pack) : null],
+    ['compiler_version', compiled?.compiler_version || null],
+  ];
+  let contextSnapshot = null;
+  if (compiled?.ok) {
+    try {
+      contextSnapshot = generationContextService.createSnapshot(db, {
+        drama_id: compiled.drama_id || req.drama_id,
+        episode_id: compiled.episode_id,
+        scene_id: compiled.scene_id,
+        storyboard_id: compiled.storyboard_id,
+        entity_type: compiled.entity_type,
+        entity_id: compiled.entity_id,
+        frame_type: compiled.frame_type,
+        style_version_id: compiled.style_version_id,
+        style_signature: compiled.style_signature,
+        prompt_source: compiled.prompt_source,
+        source_prompt: compiled.source_prompt,
+        compiled_prompt: compiled.compiled_prompt,
+        compiled_negative_prompt: compiled.compiled_negative_prompt,
+        reference_pack: compiled.reference_pack,
+        source_snapshot: compiled.source_snapshot,
+        prompt_hash: compiled.prompt_hash,
+        reference_hash: compiled.reference_hash,
+        compiler_version: compiled.compiler_version,
+        diagnostics: compiled.diagnostics,
+      });
+    } catch (err) {
+      log?.warn?.('[图生] 生成上下文快照写入失败', { error: err.message });
+    }
+  }
+  for (const item of optional) {
+    const field = item[0];
+    let value = item[1];
+    if (field === 'context_snapshot_id') value = contextSnapshot?.id || null;
+    if (columns.has(field)) { fields.push(field); values.push(value); }
+  }
+  if (contextSnapshot) {
+    try { generationContextService.markEntityCompiled(db, compiled); } catch (_) {}
+  }
+  const info = db.prepare(`INSERT INTO image_generations (${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`).run(...values);
   const imageGenId = info.lastInsertRowid;
   if (!imageGenId) throw new Error('insert failed');
   setImmediate(() => {
@@ -788,6 +898,7 @@ async function processImageGeneration(db, log, imageGenId) {
     let reference_context_note = null;
     /** 分镜 characters 列已显式配置时，不再用 Step2.3「台词是否出现人名」过滤参考图（以勾选为准） */
     let skipStep23PromptCharFilter = false;
+    let hasFrozenReferencePack = false;
     if (row.reference_images) {
       try {
         const parsed = JSON.parse(row.reference_images);
@@ -798,8 +909,22 @@ async function processImageGeneration(db, log, imageGenId) {
       } catch (_) {}
     }
 
+    if (row.reference_pack) {
+      const pack = parseJsonSafe(row.reference_pack, null);
+      const refs = Array.isArray(pack?.references) ? pack.references : [];
+      const values = refs.map((item) => item?.value || item?.path || item?.url).filter(Boolean);
+      if (values.length) {
+        reference_image_urls = values;
+        reference_context_note = refs.map((item, idx) => `Image ${idx + 1}: ${item.label || item.role || 'project reference'}`).join('\n');
+        reference_source = 'generation-context-snapshot';
+        hasFrozenReferencePack = true;
+        // 快照已经按“显式选择/版本化上下文”编译过，不再被旧的文本补扫和角色过滤改写。
+        skipStep23PromptCharFilter = true;
+      }
+    }
+
     // ── 首尾帧专用：尾帧图生可选注入首帧作为“人物站位+构图锁”参考图（默认开启，可由 use_first_frame_layout_lock=0 关闭）──
-    if (row.storyboard_id) {
+    if (row.storyboard_id && !hasFrozenReferencePack) {
       const isLastFrame = isLastFrameType(row.frame_type);
       const useFirstLayoutLock = rowUseFirstFrameLayoutLock(row);
       if (isLastFrame && useFirstLayoutLock) {
@@ -847,7 +972,7 @@ async function processImageGeneration(db, log, imageGenId) {
     }
 
     // 尾帧可能已注入首帧站位锁参考，仍需合并当前勾选的角色/场景/道具参考图
-    if (row.storyboard_id) {
+    if (row.storyboard_id && !hasFrozenReferencePack) {
       const sb = db.prepare('SELECT scene_id, characters, angle_s, shot_type FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(row.storyboard_id);
       if (sb) {
         const refs = [];
@@ -1234,7 +1359,7 @@ async function processImageGeneration(db, log, imageGenId) {
     // ── Step 3.5: 分镜 prompt 文本AI二次优化（单帧分镜；优先用 image_polish 模型，无则 fallback 默认文本模型）──
     let finalPrompt = row.prompt;
     const isSingleStoryboard = row.storyboard_id && row.frame_type !== 'quad_grid' && row.frame_type !== 'nine_grid';
-    if (isSingleStoryboard && row.prompt) {
+    if (isSingleStoryboard && row.prompt && !row.context_snapshot_id) {
       try {
         // 若分镜已有 polished_prompt（手动编辑或上次优化结果），直接使用，不再重复调 AI
         // 但**首帧/尾帧/关键帧专用提示词优先**：这些是用户通过“生成首/尾帧提示词”+“生成图片”流程明确批准的干净 prompt，
@@ -1728,21 +1853,34 @@ function upload(db, log, req) {
   const now = new Date().toISOString();
   const frameType = req.frame_type ?? null;
   const quality = normalizeImageQuality(req.quality, '');
-  const info = db.prepare(
-    `INSERT INTO image_generations (storyboard_id, drama_id, provider, prompt, image_url, local_path, frame_type, quality, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`
-  ).run(
-    req.storyboard_id ?? null,
-    Number(req.drama_id) || 0,
-    'upload',
-    req.prompt || '',
-    req.image_url || '',
-    req.local_path ?? null,
-    frameType,
-    quality || null,
-    now,
-    now
-  );
+  const columns = tableColumns(db, 'image_generations');
+  const entries = [
+    ['storyboard_id', req.storyboard_id ?? null],
+    ['drama_id', Number(req.drama_id) || 0],
+    ['provider', 'upload'],
+    ['prompt', req.prompt || ''],
+    ['image_url', req.image_url || ''],
+    ['local_path', req.local_path ?? null],
+    ['frame_type', frameType],
+    ['quality', quality || null],
+    ['status', 'completed'],
+    ['created_at', now],
+    ['updated_at', now],
+  ];
+  const contextEntries = [
+    ['style_version_id', req.style_version_id || null],
+    ['context_snapshot_id', req.context_snapshot_id || null],
+    ['prompt_hash', req.prompt_hash || null],
+    ['reference_pack', req.reference_pack ? JSON.stringify(req.reference_pack) : null],
+    ['compiler_version', req.compiler_version || null],
+  ];
+  for (const item of contextEntries) entries.push(item);
+  const fields = [];
+  const values = [];
+  for (const [field, value] of entries) {
+    if (columns.has(field)) { fields.push(field); values.push(value); }
+  }
+  const info = db.prepare(`INSERT INTO image_generations (${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`).run(...values);
   const row = db.prepare('SELECT * FROM image_generations WHERE id = ?').get(info.lastInsertRowid);
   if (row && row.storyboard_id) {
     try {

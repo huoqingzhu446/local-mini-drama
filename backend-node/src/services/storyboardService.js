@@ -100,9 +100,10 @@ function updateStoryboard(db, log, id, req) {
       return [];
     }
   })());
-  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path'];
+  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path', 'prompt_state'];
   const updates = [];
   const params = [];
+  let contentChanged = false;
   // 前端可能传 character_ids，与 characters 统一：存为 JSON 字符串
   const charactersValue = req.character_ids !== undefined ? req.character_ids : req.characters;
   let parsedDramaCharIdsForSync = null;
@@ -118,15 +119,33 @@ function updateStoryboard(db, log, id, req) {
       updates.push(key + ' = ?');
       const val = req[key];
       params.push(val);
+      if (['image_prompt', 'description', 'action', 'dialogue', 'narration', 'result', 'atmosphere', 'location', 'time', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'layout_description'].includes(key)) {
+        contentChanged = true;
+      }
       if (key === 'polished_prompt' && storyboardCols.has('polished_prompt_style_signature')) {
         const dramaRow = sbRow?.drama_id
           ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(sbRow.drama_id)
           : null;
-        const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
-        const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+        let signature = null;
+        try {
+          const styleVersionService = require('./visualStyleVersionService');
+          signature = styleVersionService.ensureActiveVersion(db, Number(sbRow?.drama_id)).signature || null;
+        } catch (_) {
+          const { mergeCfgStyleWithDrama } = require('../utils/dramaStyleMerge');
+          signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.style_signature || null;
+        }
         updates.push('polished_prompt_style_signature = ?');
         params.push(signature);
       }
+    }
+  }
+  if (storyboardCols.has('prompt_state') && req.prompt_state === undefined) {
+    if (req.polished_prompt !== undefined) {
+      updates.push('prompt_state = ?');
+      params.push('manual_override');
+    } else if (contentChanged) {
+      updates.push('prompt_state = ?');
+      params.push('stale_scene');
     }
   }
   if (updates.length === 0 && req.prop_ids === undefined) return getStoryboardById(db, id);
@@ -204,6 +223,8 @@ function getStoryboardById(db, id) {
     segment_title: r.segment_title ?? null,
     creation_mode: r.creation_mode === 'universal' ? 'universal' : 'classic',
     universal_segment_text: r.universal_segment_text ?? null,
+    prompt_state: r.prompt_state || 'current',
+    polished_prompt_style_signature: r.polished_prompt_style_signature || null,
     layout_description: r.layout_description ?? null,
     first_frame_image_id: r.first_frame_image_id ?? null,
     last_frame_image_id: r.last_frame_image_id ?? null,

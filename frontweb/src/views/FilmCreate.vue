@@ -418,6 +418,13 @@
           <div class="visual-bible-strip__head">
             <span class="visual-bible-strip__title">统一视觉风格圣经</span>
             <span class="visual-bible-strip__version">v{{ projectStyleVersion }}</span>
+            <StyleStatusBadge
+              :state="visualStyleDraftDirty ? 'draft' : 'current'"
+              :version="visualStyleActive?.version || projectStyleVersion"
+            />
+            <span v-if="visualStyleActive?.signature" class="visual-bible-strip__signature" :title="visualStyleActive.signature">
+              #{{ visualStyleActive.signature.slice(0, 8) }}
+            </span>
           </div>
           <el-input
             v-model="visualBible"
@@ -425,10 +432,17 @@
             :rows="2"
             resize="vertical"
             placeholder="例如：冷青灰主色，边缘高光克制，潮湿空气感，皮肤保留真实纹理，金属磨损偏旧，禁止糖水滤镜和过饱和霓虹。"
-            @change="() => saveProjectSettings(true)"
+            @input="markVisualStyleDraftDirty"
           />
           <div class="visual-bible-strip__hint">
-            改这里会统一影响人物、道具、场景、分镜与 Codex 队列；保存后旧风格缓存会自动视为过期。
+            这是视觉风格草稿。保存草稿不会改变正在使用的风格；激活后才会让人物、道具、场景、分镜与 Codex 任务统一切换，并将旧缓存标记为过期。
+          </div>
+          <div class="visual-bible-strip__actions">
+            <el-button size="small" :loading="visualStyleSaving" @click="saveVisualStyleDraft">保存草稿</el-button>
+            <el-button size="small" type="primary" :loading="visualStyleActivating" :disabled="!visualStyleDraftId" @click="activateVisualStyle">激活并刷新上下文</el-button>
+            <span v-if="visualStyleImpact" class="visual-bible-strip__impact">
+              {{ visualStyleImpact.storyboards || 0 }} 个分镜 · {{ visualStyleImpact.scenes || 0 }} 个场景将受影响
+            </span>
           </div>
         </div>
         <div v-if="pipelineRunning || pipelineErrorLog.length > 0" class="pipeline-status">
@@ -1140,7 +1154,12 @@
           <div class="sb-ctrl-bar">
             <span class="sb-ctrl-num">{{ i + 1 }}</span>
             <span class="sb-ctrl-title">{{ sb.title || '未命名分镜' }}</span>
+            <StyleStatusBadge
+              :state="storyboardVisualState(sb)"
+              :version="visualStyleActive?.version || projectStyleVersion"
+            />
             <el-tag v-if="sb.movement" size="small" effect="plain" type="info" class="sb-movement-tag">{{ getMovementLabel(sb.movement) }}</el-tag>
+            <el-button size="small" text class="sb-ctrl-btn" @click="previewUnifiedStoryboardPrompt(sb)">统一提示词预览</el-button>
             <el-button size="small" plain class="sb-ctrl-btn sb-ctrl-config-btn" @click="onOpenVideoParamsDialog(sb)">⚙ 分镜配置</el-button>
             <el-button
               size="small"
@@ -2099,6 +2118,33 @@
         </div>
       </section>
     </main>
+
+    <el-dialog v-model="showUnifiedPromptPreview" title="统一视觉上下文 · 分镜提示词预览" width="820px">
+      <div v-if="unifiedPromptPreview" class="unified-prompt-preview">
+        <div class="unified-prompt-preview__meta">
+          <StyleStatusBadge state="current" :version="unifiedPromptPreview.style_version" />
+          <span>签名：{{ unifiedPromptPreview.style_signature || 'legacy' }}</span>
+          <span>来源：{{ unifiedPromptPreview.prompt_source }}</span>
+          <span>参考图：{{ unifiedPromptPreview.reference_pack?.references?.length || 0 }} 张</span>
+        </div>
+        <el-alert
+          v-for="(diagnostic, idx) in (unifiedPromptPreview.diagnostics || [])"
+          :key="idx"
+          :type="diagnostic.severity === 'warning' ? 'warning' : 'info'"
+          :title="diagnostic.message || diagnostic.code"
+          :closable="false"
+          show-icon
+          class="unified-prompt-preview__diagnostic"
+        />
+        <el-input v-model="unifiedPromptPreview.prompt" type="textarea" :rows="16" readonly />
+        <div v-if="unifiedPromptPreview.reference_pack?.references?.length" class="unified-prompt-preview__refs">
+          <span v-for="ref in unifiedPromptPreview.reference_pack.references" :key="ref.index || ref.value" class="unified-prompt-preview__ref">
+            {{ ref.index }}. {{ ref.label || ref.role }}
+          </span>
+        </div>
+      </div>
+      <el-empty v-else description="暂无预览" />
+    </el-dialog>
 
     <!-- 添加道具弹窗 -->
     <el-dialog v-model="showAddProp" title="添加道具" width="600px" @close="() => { addPropForm = { name: '', type: '', description: '', prompt: '' }; addPropAddRefImage = null }">
@@ -3214,6 +3260,7 @@ import { videosAPI } from '@/api/videos'
 import { storyboardsAPI } from '@/api/storyboards'
 import { uploadAPI } from '@/api/upload'
 import { codexImageJobAPI } from '@/api/codexImageJobs'
+import { visualStylesAPI } from '@/api/visualStyles'
 import { characterLibraryAPI } from '@/api/characterLibrary'
 import { sceneLibraryAPI } from '@/api/sceneLibrary'
 import { propLibraryAPI } from '@/api/propLibrary'
@@ -3227,6 +3274,7 @@ import GenerationStyleManagerDrawer from '@/components/GenerationStyleManagerDra
 import AIConfigContent from '@/components/AIConfigContent.vue'
 import UniversalSegmentOmniAtEditor from '@/components/UniversalSegmentOmniAtEditor.vue'
 import CodexImageJobButton from '@/components/CodexImageJobButton.vue'
+import StyleStatusBadge from '@/components/StyleStatusBadge.vue'
 import {
   getStylePromptEn,
   getStylePromptZh,
@@ -3431,7 +3479,8 @@ function onStoryboardPromptStyleChange() {
     if (sb?.id) nextUniversal[sb.id] = [...selected]
   }
   sbUniversalPromptStyleIds.value = nextUniversal
-  saveProjectSettings(false)
+  markVisualStyleDraftDirty()
+  ElMessage.info('提示词模块已加入视觉风格草稿，请保存并激活后用于新任务')
 }
 
 function getSelectedPromptStyleIdsForApi() {
@@ -3496,7 +3545,14 @@ const videoClipDuration = ref(5)
 const projectImageQuality = ref('standard')
 const visualBible = ref('')
 const lastAppliedStyleLibraryVisualBible = ref('')
-const projectStyleVersion = computed(() => Number(store.drama?.metadata?.style_version) || 1)
+const visualStyleActive = ref(null)
+const visualStyleDraft = ref(null)
+const visualStyleSaving = ref(false)
+const visualStyleActivating = ref(false)
+const visualStyleDraftDirty = ref(false)
+const visualStyleImpact = ref(null)
+const projectStyleVersion = computed(() => Number(visualStyleActive.value?.version || store.drama?.metadata?.style_version) || 1)
+const visualStyleDraftId = computed(() => visualStyleDraft.value?.id || null)
 
 /** 根据 value 查找样式选项对象 */
 function _findStyleOption(val) {
@@ -3528,6 +3584,93 @@ function projectGenerationStyleMetadata() {
   }
 }
 
+function visualStyleDraftPayload() {
+  const meta = projectGenerationStyleMetadata()
+  return {
+    name: meta.generation_style_name || getSelectedStylePromptZh() || generationStyle.value || '项目视觉方案',
+    style_prompt_zh: meta.style_prompt_zh || getSelectedStylePromptZh() || '',
+    style_prompt_en: meta.style_prompt_en || getSelectedStylePrompt() || '',
+    visual_bible: visualBible.value.trim(),
+    visual_bible_struct: meta.visual_bible_struct || undefined,
+    scope_overrides: {
+      character: { zh: meta.character_style_prompt_zh || '', en: meta.character_style_prompt_en || '' },
+      scene: { zh: meta.scene_style_prompt_zh || '', en: meta.scene_style_prompt_en || '' },
+      prop: { zh: meta.prop_style_prompt_zh || '', en: meta.prop_style_prompt_en || '' },
+      storyboard: { zh: meta.storyboard_style_prompt_zh || '', en: meta.storyboard_style_prompt_en || '' },
+      video: { zh: meta.video_style_prompt_zh || '', en: meta.video_style_prompt_en || '' },
+    },
+    prompt_style_ids: getSelectedPromptStyleIdsForApi(),
+    style_family: meta.style_family || meta.generation_style_name || generationStyle.value || '',
+    medium: meta.style_medium || '',
+    source: meta.generation_style_source || 'film_create',
+  }
+}
+
+function markVisualStyleDraftDirty() {
+  visualStyleDraftDirty.value = true
+}
+
+async function loadVisualStyleContext() {
+  if (!store.dramaId) return
+  try {
+    const res = await visualStylesAPI.get(store.dramaId)
+    visualStyleActive.value = res?.active || null
+    const drafts = (res?.versions || []).filter((item) => item?.status === 'draft')
+    visualStyleDraft.value = drafts[0] || null
+    visualStyleImpact.value = res?.impact || null
+    if (!visualStyleDraftDirty.value) {
+      visualBible.value = String(res?.active?.visual_bible || visualBible.value || '')
+    }
+  } catch (_) {
+    // 旧后端/新建项目尚未有版本表时继续使用 legacy metadata。
+  }
+}
+
+async function saveVisualStyleDraft() {
+  if (!store.dramaId) return
+  visualStyleSaving.value = true
+  try {
+    const body = visualStyleDraftPayload()
+    const res = visualStyleDraft.value?.id
+      ? await visualStylesAPI.updateDraft(store.dramaId, visualStyleDraft.value.id, body)
+      : await visualStylesAPI.createDraft(store.dramaId, body)
+    visualStyleDraft.value = res?.version || res || null
+    visualStyleDraftDirty.value = false
+    visualStyleImpact.value = res?.impact || visualStyleImpact.value
+    ElMessage.success('视觉风格草稿已保存；激活后才会用于新的生图任务')
+  } catch (e) {
+    ElMessage.error(e.message || '保存视觉风格草稿失败')
+  } finally {
+    visualStyleSaving.value = false
+  }
+}
+
+async function activateVisualStyle() {
+  if (!store.dramaId) return
+  if (visualStyleDraftDirty.value || !visualStyleDraft.value?.id) await saveVisualStyleDraft()
+  if (!visualStyleDraft.value?.id) return
+  try {
+    const impact = visualStyleImpact.value || {}
+    await ElMessageBox.confirm(
+      `激活后将把项目切换到 v${visualStyleDraft.value.version}，并标记 ${impact.storyboards || 0} 个分镜、${impact.scenes || 0} 个场景的旧提示词/队列为过期。是否继续？`,
+      '激活统一视觉上下文',
+      { confirmButtonText: '激活', cancelButtonText: '取消', type: 'warning' }
+    )
+    visualStyleActivating.value = true
+    const res = await visualStylesAPI.activate(store.dramaId, visualStyleDraft.value.id)
+    visualStyleActive.value = res?.active || visualStyleActive.value
+    visualStyleDraft.value = null
+    visualStyleDraftDirty.value = false
+    visualStyleImpact.value = res?.impact || visualStyleImpact.value
+    await loadDrama()
+    ElMessage.success('统一视觉上下文已激活，旧提示词已标记为过期')
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(e.message || '激活视觉风格失败')
+  } finally {
+    visualStyleActivating.value = false
+  }
+}
+
 async function onGenerationStylesChanged() {
   await loadGenerationStyles()
 }
@@ -3549,7 +3692,8 @@ function onGenerationStyleChange() {
     visualBible.value = ''
     lastAppliedStyleLibraryVisualBible.value = ''
   }
-  saveProjectSettings(true)
+  markVisualStyleDraftDirty()
+  ElMessage.info('风格已写入草稿，请点击“保存草稿”并在确认影响范围后激活')
 }
 
 function getSelectedImageQuality() {
@@ -4247,6 +4391,8 @@ const sbPromptPolishedText = ref('')    // AI 优化后 polished_prompt
 const sbPromptVideoText = ref('')       // video_prompt
 const sbPromptSaving = ref(false)
 const sbPromptPolishing = ref(false)
+const showUnifiedPromptPreview = ref(false)
+const unifiedPromptPreview = ref(null)
 /** 首尾帧提示词编辑器 */
 const showFramePromptEditor = ref(false)
 const editingFramePromptSb = ref(null)
@@ -4560,6 +4706,14 @@ function hasAssetImage(item) {
 }
 function getSelectedStyle() {
   return getSelectedStylePrompt()
+}
+function storyboardVisualState(sb) {
+  if (!sb) return 'current'
+  if (sb.prompt_state && sb.prompt_state !== 'current') return sb.prompt_state
+  const activeSig = String(visualStyleActive.value?.signature || '').trim()
+  const cachedSig = String(sb.polished_prompt_style_signature || '').trim()
+  if (activeSig && sb.polished_prompt && cachedSig !== activeSig) return 'stale_style'
+  return 'current'
 }
 function openImagePreview(url) {
   previewImageUrl.value = url
@@ -5822,6 +5976,7 @@ async function loadDrama() {
     let d = await dramaAPI.get(store.dramaId)
     d = await backfillDramaStylePromptMetadataIfNeeded(dramaAPI, store.dramaId, d, customGenerationStyles.value)
     store.setDrama(d)
+    await loadVisualStyleContext()
     // 恢复「故事生成」框的梗概（项目 description 存的是故事梗概）
     storyInput.value = (d.description || '').toString().trim()
     storyStyle.value = (d.metadata && d.metadata.story_style) ? d.metadata.story_style : ''
@@ -6246,7 +6401,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     aspect_ratio: projectAspectRatio.value || '16:9',
     video_clip_duration: videoClipDuration.value || 5,
     image_quality: getSelectedImageQuality(),
-    visual_bible: visualBible.value.trim() || undefined,
+    // 视觉圣经由版本化草稿/激活流程保存，普通设置自动保存不再覆盖活动版本。
     storyboard_include_narration: !!storyboardIncludeNarration.value,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
     storyboard_use_first_last_frame: !!storyboardUseFirstLastFrame.value,
@@ -7588,6 +7743,21 @@ async function onOpenSbPromptDialog(sb) {
       sbPromptVideoText.value = formatVideoPromptForEdit((fresh.video_prompt || '').toString())
     }
   } catch (_) {}
+}
+
+async function previewUnifiedStoryboardPrompt(sb) {
+  if (!sb?.id) return
+  try {
+    const result = await visualStylesAPI.storyboardPreview(sb.id, {
+      frame_type: storyboardUseFirstLastFrame.value ? 'first' : 'main',
+      quality: projectImageQuality.value,
+      aspect_ratio: projectAspectRatio.value,
+    })
+    unifiedPromptPreview.value = result || null
+    showUnifiedPromptPreview.value = true
+  } catch (e) {
+    ElMessage.error(e.message || '统一提示词预览失败')
+  }
 }
 
 function formatVideoPromptForEdit(text) {
@@ -12409,5 +12579,45 @@ html.light .frame-layout-anchor {
   font-size: 12px;
   line-height: 1.5;
   color: #475569;
+}
+
+.visual-bible-strip__signature {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  color: #64748b;
+}
+.visual-bible-strip__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.visual-bible-strip__impact {
+  font-size: 11px;
+  color: #64748b;
+}
+.unified-prompt-preview__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: #64748b;
+}
+.unified-prompt-preview__diagnostic { margin-bottom: 6px; }
+.unified-prompt-preview__refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.unified-prompt-preview__ref {
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: #eff6ff;
+  color: #1e40af;
+  font-size: 11px;
 }
 </style>

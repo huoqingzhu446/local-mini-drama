@@ -25,6 +25,11 @@
       >
         取消
       </el-button>
+      <StyleStatusBadge
+        v-if="job?.style_version_id || job?.stale_reason"
+        :state="job?.stale_reason ? 'stale_style' : 'current'"
+        :version="job?.style_version_id"
+      />
     </div>
 
     <CodexImageCandidatePicker
@@ -48,6 +53,7 @@ import { ElMessage } from 'element-plus'
 import { MagicStick } from '@element-plus/icons-vue'
 import { codexImageJobAPI } from '@/api/codexImageJobs'
 import CodexImageCandidatePicker from '@/components/CodexImageCandidatePicker.vue'
+import StyleStatusBadge from '@/components/StyleStatusBadge.vue'
 
 const props = defineProps({
   entityType: { type: String, required: true },
@@ -58,6 +64,7 @@ const props = defineProps({
   style: { type: String, default: '' },
   aspectRatio: { type: String, default: '' },
   quality: { type: String, default: 'standard' },
+  styleVersionId: { type: [String, Number], default: null },
   label: { type: String, default: '' },
   idleTooltip: { type: String, default: '' },
   disabled: { type: Boolean, default: false }
@@ -105,6 +112,7 @@ async function loadLatestJob() {
       entity_id: props.entityId,
       frame_type: props.frameType || 'main',
       quality: props.quality || 'standard',
+      style_version_id: props.styleVersionId || undefined,
       page: 1,
       page_size: 1
     })

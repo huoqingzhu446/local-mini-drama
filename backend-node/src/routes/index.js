@@ -24,6 +24,7 @@ const promptStylesRoutes = require('./promptStyles');
 const generationStylesRoutes = require('./generationStyles');
 const sceneModelMapRoutes = require('./sceneModelMap');
 const codexImageJobRoutes = require('./codexImageJobs');
+const visualStyleRoutes = require('./visualStyles');
 
 function setupRouter(cfg, db, log) {
   const r = express.Router();
@@ -53,6 +54,7 @@ function setupRouter(cfg, db, log) {
   const promptStyles = promptStylesRoutes.routes(db, log);
   const generationStyles = generationStylesRoutes.routes(db, log);
   const codexImageJobs = codexImageJobRoutes(db, cfg, log);
+  const visualStyles = visualStyleRoutes(db, cfg, log);
 
   // ---------- dramas ----------
   r.get('/dramas', drama.listDramas);
@@ -86,6 +88,11 @@ function setupRouter(cfg, db, log) {
   r.get('/dramas/examples', drama.listExamples);
   r.post('/dramas/import-example', drama.importExample);
   r.put('/dramas/:id/outline', drama.saveOutline);
+  r.get('/dramas/:id/visual-style', visualStyles.get);
+  r.put('/dramas/:id/visual-style/draft', visualStyles.draft);
+  r.put('/dramas/:id/visual-style/draft/:version_id', visualStyles.draftUpdate);
+  r.post('/dramas/:id/visual-style/activate', visualStyles.activate);
+  r.get('/dramas/:id/visual-style/impact', visualStyles.impact);
   r.get('/dramas/:id/characters', drama.getCharacters);
   r.put('/dramas/:id/characters', drama.saveCharacters);
   r.put('/dramas/:id/episodes', drama.saveEpisodes);
@@ -231,6 +238,7 @@ function setupRouter(cfg, db, log) {
   r.post('/episodes/:episode_id/props/extract', prop.extractProps);
   r.post('/episodes/:episode_id/characters/extract', stub.episodeCharactersExtract);
   r.get('/episodes/:episode_id/storyboards', storyboards.episodeStoryboardsGet);
+  r.post('/storyboards/:id/image-prompt-preview', visualStyles.storyboardPreview);
   r.post('/episodes/:episode_id/finalize', drama.finalizeEpisode);
   r.get('/episodes/:episode_id/download', drama.downloadEpisodeVideo);
 

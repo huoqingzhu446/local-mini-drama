@@ -15,6 +15,7 @@ const jimengMaterialHubService = require('./jimengMaterialHubService');
 const modelArkAssetConfigService = require('./modelArkAssetConfigService');
 const uploadService = require('./uploadService');
 const seedance2AssetGuards = require('../utils/seedance2AssetGuards');
+const visualStyleVersionService = require('./visualStyleVersionService');
 const {
   appendSourceIdFilters,
   findExistingLibraryItem,
@@ -47,6 +48,11 @@ function tableColumns(db, table) {
 
 function characterScopedStyle(styleObj) {
   return scopedStyleTextsFromStyleObject(styleObj || {}, 'character');
+}
+
+function activeCharacterStyleSignature(db, dramaId) {
+  try { return visualStyleVersionService.ensureActiveVersion(db, Number(dramaId))?.signature || ''; }
+  catch (_) { return ''; }
 }
 
 function columnOrNull(columns, name) {
@@ -184,7 +190,8 @@ function updateLibraryItem(db, log, id, req) {
   if (!row) return null;
   const updates = [];
   const params = [];
-  if (req.name != null) { updates.push('name = ?'); params.push(req.name); }
+  let contentChanged = false;
+  if (req.name != null) { updates.push('name = ?'); params.push(req.name); contentChanged = true; }
   if (req.category != null) { updates.push('category = ?'); params.push(req.category); }
   if (req.description != null) { updates.push('description = ?'); params.push(req.description); }
   if (req.tags != null) { updates.push('tags = ?'); params.push(req.tags); }
@@ -336,20 +343,23 @@ function updateCharacter(db, log, characterId, req) {
   const params = [];
   if (req.name != null) { updates.push('name = ?'); params.push(req.name); }
   if (req.role != null) { updates.push('role = ?'); params.push(req.role); }
-  if (req.appearance != null) { updates.push('appearance = ?'); params.push(req.appearance); }
+  if (req.appearance != null) { updates.push('appearance = ?'); params.push(req.appearance); contentChanged = true; }
   if (req.personality != null) { updates.push('personality = ?'); params.push(req.personality); }
-  if (req.description != null) { updates.push('description = ?'); params.push(req.description); }
+  if (req.description != null) { updates.push('description = ?'); params.push(req.description); contentChanged = true; }
   if (req.image_url != null) { updates.push('image_url = ?'); params.push(req.image_url); }
   if (req.local_path != null) { updates.push('local_path = ?'); params.push(req.local_path); }
   if (req.polished_prompt != null) {
     updates.push('polished_prompt = ?');
     params.push(req.polished_prompt);
     const dramaRow = db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(charRow.drama_id);
-    const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.character_style_signature || null;
+    const signature = activeCharacterStyleSignature(db, charRow.drama_id) || mergeCfgStyleWithDrama({}, dramaRow || {}).style?.character_style_signature || null;
     if (tableColumns(db, 'characters').has('polished_prompt_style_signature')) {
       updates.push('polished_prompt_style_signature = ?');
       params.push(signature);
     }
+  }
+  if (contentChanged && req.polished_prompt == null && tableColumns(db, 'characters').has('polished_prompt_style_signature')) {
+    updates.push('polished_prompt_style_signature = NULL');
   }
   if (req.stages != null) { updates.push('stages = ?'); params.push(typeof req.stages === 'string' ? req.stages : JSON.stringify(req.stages)); }
   if (req.negative_prompt !== undefined) { updates.push('negative_prompt = ?'); params.push(req.negative_prompt); }
@@ -556,7 +566,7 @@ async function generateCharacterPromptOnly(db, log, cfg, characterId, modelName,
     mergedCfg?.style?.visual_bible || ''
   );
   const charColumns = tableColumns(db, 'characters');
-  const styleSignature = (mergedCfg?.style?.character_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const styleSignature = activeCharacterStyleSignature(db, charRow.drama_id) || (mergedCfg?.style?.character_style_signature || mergedCfg?.style?.style_signature || '').trim();
 
   // 保存到 characters.polished_prompt
   if (charColumns.has('polished_prompt_style_signature')) {
@@ -588,7 +598,7 @@ async function generateCharacterFourViewImage(db, log, cfg, characterId, modelNa
   mergedCfg = applyStyleOverrideToCfg(mergedCfg, style);
   let imagePrompt;
 
-  const currentStyleSignature = (mergedCfg?.style?.character_style_signature || mergedCfg?.style?.style_signature || '').trim();
+  const currentStyleSignature = activeCharacterStyleSignature(db, charRow.drama_id) || (mergedCfg?.style?.character_style_signature || mergedCfg?.style?.style_signature || '').trim();
   if (
     charRow.polished_prompt &&
     String(charRow.polished_prompt).trim() &&
@@ -658,6 +668,7 @@ async function generateCharacterFourViewImage(db, log, cfg, characterId, modelNa
     size: '1792x1024',
     quality: quality || 'standard',
     provider: 'openai',
+    frame_type: 'character_four_view',
     user_negative_prompt: userNeg || undefined,
   });
 

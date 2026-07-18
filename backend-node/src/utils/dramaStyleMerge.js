@@ -202,6 +202,18 @@ function attachVisualStyleMetadata(styleObj, dramaRow) {
   o.scene_style_signature = computeScopedStyleSignatureFromStyleObject(o, 'scene');
   o.prop_style_signature = computeScopedStyleSignatureFromStyleObject(o, 'prop');
   o.video_style_signature = computeScopedStyleSignatureFromStyleObject(o, 'video');
+  // V2 的激活签名是所有资产缓存共用的 provenance key。旧版按字段
+  // 计算的 scoped signature 仍保留作兼容信息，但只要 drama 行明确有
+  // active_visual_style_signature，就以它作为当前签名，避免“数据库已
+  // 激活 v5、角色/场景却被判定为旧签名”的分裂状态。
+  const activeSignature = trimText(dramaRow?.active_visual_style_signature);
+  if (activeSignature) {
+    o.style_signature = activeSignature;
+    o.character_style_signature = activeSignature;
+    o.scene_style_signature = activeSignature;
+    o.prop_style_signature = activeSignature;
+    o.video_style_signature = activeSignature;
+  }
   return o;
 }
 
@@ -251,7 +263,7 @@ function visualStyleStateFromDramaRow(dramaRow) {
   }
   const visualBible = readVisualBibleFromDramaRow(dramaRow);
   const styleVersion = readStyleVersionFromDramaRow(dramaRow);
-  const styleSignature = computeVisualStyleSignatureFromSlots({
+  const styleSignature = trimText(dramaRow?.active_visual_style_signature) || computeVisualStyleSignatureFromSlots({
     default_style_zh: resolvedZh,
     default_style_en: resolvedEn || resolvedZh,
     default_style: resolvedEn || resolvedZh,

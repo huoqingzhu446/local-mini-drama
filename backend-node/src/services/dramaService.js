@@ -775,6 +775,8 @@ function rowToStoryboard(r) {
     atmosphere: r.atmosphere,
     image_prompt: r.image_prompt,
     polished_prompt: r.polished_prompt ?? null,
+    polished_prompt_style_signature: r.polished_prompt_style_signature ?? null,
+    prompt_state: r.prompt_state || 'current',
     continuity_snapshot: r.continuity_snapshot ?? null,
     video_prompt: r.video_prompt,
       shot_type: r.shot_type ?? null,
@@ -827,7 +829,13 @@ function rowToCharacter(r) {
     sort_order: r.sort_order ?? 0,
     error_msg: r.error_msg,
     polished_prompt: r.polished_prompt || null,
+    polished_prompt_style_signature: r.polished_prompt_style_signature || null,
+    prompt_state: r.prompt_state || 'current',
     negative_prompt: r.negative_prompt || null,
+    polished_prompt_style_signature: r.polished_prompt_style_signature || null,
+    polished_prompt_single_style_signature: r.polished_prompt_single_style_signature || null,
+    polished_prompt_nine_style_signature: r.polished_prompt_nine_style_signature || null,
+    prompt_state: r.prompt_state || 'current',
     four_view_image_url: r.four_view_image_url || null,
     seedance2_asset: parseJsonColumn(r.seedance2_asset),
     seedance2_voice_asset: parseJsonColumn(r.seedance2_voice_asset),
@@ -904,10 +912,18 @@ function saveOutline(db, log, dramaId, req) {
     }
   }
   const mergedMetadata = { ...existingMetadata, ...newMetadata };
-  const normalizedBible = normalizeVisualBible(mergedMetadata.visual_bible || mergedMetadata.visual_bible_text || '');
-  if (normalizedBible) mergedMetadata.visual_bible = normalizedBible;
-  else delete mergedMetadata.visual_bible;
-  delete mergedMetadata.visual_bible_text;
+  // 只有请求明确携带 visual_bible（或旧别名）时才执行清洗/清空。
+  // 前端只切换 style 时不能把已有视觉圣经误删；显式 null/空字符串仍表示用户要求清空。
+  const bibleWasExplicitlyTouched = Object.prototype.hasOwnProperty.call(newMetadata, 'visual_bible') ||
+    Object.prototype.hasOwnProperty.call(newMetadata, 'visual_bible_text');
+  if (bibleWasExplicitlyTouched) {
+    const normalizedBible = normalizeVisualBible(mergedMetadata.visual_bible || mergedMetadata.visual_bible_text || '');
+    if (normalizedBible) mergedMetadata.visual_bible = normalizedBible;
+    else delete mergedMetadata.visual_bible;
+    delete mergedMetadata.visual_bible_text;
+  } else if (existingMetadata.visual_bible) {
+    mergedMetadata.visual_bible = normalizeVisualBible(existingMetadata.visual_bible);
+  }
 
   // 与 mergeCfgStyleWithDrama 一致：提示词优先读 metadata.style_prompt_*。仅改 dramas.style 而不带画风长文案时，
   // 若仍保留旧的 metadata 画风，会出现「列表/首页 badge 已是新 style，角色提示词却仍用旧画风」。
@@ -951,14 +967,49 @@ function saveOutline(db, log, dramaId, req) {
     now, 
     dramaId
   );
+  let versionSynced = false;
   if (styleChanged) {
     try {
       const { loadConfig } = require('../config');
       const cfg = loadConfig();
-      const codexImageJobService = require('./codexImageJobService');
-      codexImageJobService.invalidateJobsForDrama(db, log, cfg, dramaId, '项目统一视觉风格已更新，请重新生成');
+      const visualStyleVersionService = require('./visualStyleVersionService');
+      const active = visualStyleVersionService.ensureActiveVersion(db, Number(dramaId));
+      const scopeOverrides = {};
+      for (const key of ['character', 'scene', 'prop', 'storyboard', 'video']) {
+        scopeOverrides[key] = {
+          zh: mergedMetadata[`${key}_style_prompt_zh`] || '',
+          en: mergedMetadata[`${key}_style_prompt_en`] || '',
+        };
+      }
+      const draft = visualStyleVersionService.createDraft(db, Number(dramaId), {
+        name: mergedMetadata.generation_style_name || nextStyleValue || active?.name || '项目视觉方案',
+        style_prompt_zh: mergedMetadata.style_prompt_zh || '',
+        style_prompt_en: mergedMetadata.style_prompt_en || '',
+        visual_bible: mergedMetadata.visual_bible || null,
+        visual_bible_struct: mergedMetadata.visual_bible_struct || null,
+        scope_overrides: scopeOverrides,
+        prompt_style_ids: mergedMetadata.storyboard_prompt_style_ids || [],
+        style_family: mergedMetadata.style_family || mergedMetadata.generation_style_name || nextStyleValue || '',
+        medium: mergedMetadata.style_medium || '',
+        source: 'legacy_save_outline',
+      });
+      if (draft) {
+        visualStyleVersionService.activateVersion(db, log, Number(dramaId), draft.id);
+        versionSynced = true;
+      }
+      void cfg;
     } catch (err) {
-      log.warn('Style change job invalidation skipped', { drama_id: dramaId, error: err.message });
+      log.warn('Visual style version sync skipped', { drama_id: dramaId, error: err.message });
+    }
+    if (!versionSynced) {
+      try {
+        const { loadConfig } = require('../config');
+        const cfg = loadConfig();
+        const codexImageJobService = require('./codexImageJobService');
+        codexImageJobService.invalidateJobsForDrama(db, log, cfg, dramaId, '项目统一视觉风格已更新，请重新生成');
+      } catch (err) {
+        log.warn('Style change job invalidation skipped', { drama_id: dramaId, error: err.message });
+      }
     }
   }
   log.info('Outline saved', { drama_id: dramaId, style: req.style, genre: req.genre, metadata: mergedMetadata });

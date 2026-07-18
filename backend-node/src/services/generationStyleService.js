@@ -11,6 +11,33 @@ function normalizeBool(value, fallback = true) {
   return fallback ? 1 : 0;
 }
 
+function parseJson(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+function normalizeCompatibilityTags(input) {
+  const parsed = Array.isArray(input)
+    ? input
+    : (typeof input === 'string' && input.trim().startsWith('[') ? parseJson(input, []) : String(input || '').split(/[,，、\n]/g));
+  const seen = new Set();
+  return (Array.isArray(parsed) ? parsed : []).map((item) => String(item || '').trim()).filter((item) => item && !seen.has(item) && (seen.add(item), true));
+}
+
+function tableColumns(db, table) {
+  try { return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name)); }
+  catch (_) { return new Set(); }
+}
+
+function ensureClassificationColumns(db) {
+  const cols = tableColumns(db, 'generation_styles');
+  for (const [name, type] of [['style_family', 'TEXT'], ['medium', 'TEXT'], ['compatibility_tags', 'TEXT']]) {
+    if (!cols.has(name)) { try { db.exec(`ALTER TABLE generation_styles ADD COLUMN ${name} ${type}`); } catch (_) {} }
+  }
+  return tableColumns(db, 'generation_styles');
+}
+
 function trimText(value, maxLen = 0) {
   const text = value != null ? String(value).trim() : '';
   if (!maxLen || text.length <= maxLen) return text;
@@ -64,6 +91,9 @@ function normalizeStylePayload(body = {}) {
     sort_order: body.sort_order !== undefined && body.sort_order !== null
       ? Number(body.sort_order) || 0
       : null,
+    style_family: trimText(body.style_family || body.styleFamily, 120) || null,
+    medium: trimText(body.medium, 120) || null,
+    compatibility_tags: normalizeCompatibilityTags(body.compatibility_tags || body.compatibilityTags),
   };
 }
 
@@ -97,6 +127,9 @@ function rowToStyle(row) {
     video_style_prompt_en: row.video_style_prompt_en || '',
     enabled: Number(row.enabled) !== 0,
     sort_order: Number(row.sort_order) || 0,
+    style_family: row.style_family || '',
+    medium: row.medium || '',
+    compatibility_tags: normalizeCompatibilityTags(row.compatibility_tags),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -110,6 +143,7 @@ function nextSortOrder(db) {
 }
 
 function listStyles(db, query = {}) {
+  ensureClassificationColumns(db);
   const keyword = trimText(query.keyword, 100);
   const enabled = query.enabled;
   const where = ['deleted_at IS NULL'];
@@ -138,6 +172,7 @@ function listStyles(db, query = {}) {
 }
 
 function getStyle(db, id) {
+  ensureClassificationColumns(db);
   const row = db.prepare('SELECT * FROM generation_styles WHERE id = ? AND deleted_at IS NULL').get(Number(id));
   return rowToStyle(row);
 }
@@ -156,20 +191,18 @@ function validateRequired(payload) {
 }
 
 function createStyle(db, body = {}) {
+  const columns = ensureClassificationColumns(db);
   const payload = normalizeStylePayload(body);
   validateRequired(payload);
   const now = new Date().toISOString();
   const sortOrder = payload.sort_order == null ? nextSortOrder(db) : payload.sort_order;
-  const info = db.prepare(
-    `INSERT INTO generation_styles (
-      name, description, style_prompt_zh, style_prompt_en, visual_bible, visual_bible_struct,
-      character_style_prompt_zh, character_style_prompt_en,
-      scene_style_prompt_zh, scene_style_prompt_en,
-      prop_style_prompt_zh, prop_style_prompt_en,
-      video_style_prompt_zh, video_style_prompt_en,
-      enabled, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
+  const fields = [
+    'name', 'description', 'style_prompt_zh', 'style_prompt_en', 'visual_bible', 'visual_bible_struct',
+    'character_style_prompt_zh', 'character_style_prompt_en', 'scene_style_prompt_zh', 'scene_style_prompt_en',
+    'prop_style_prompt_zh', 'prop_style_prompt_en', 'video_style_prompt_zh', 'video_style_prompt_en',
+    'enabled', 'sort_order', 'created_at', 'updated_at',
+  ];
+  const values = [
     payload.name,
     payload.description,
     payload.style_prompt_zh || null,
@@ -188,11 +221,16 @@ function createStyle(db, body = {}) {
     sortOrder,
     now,
     now
-  );
+  ];
+  for (const [field, value] of [['style_family', payload.style_family], ['medium', payload.medium], ['compatibility_tags', JSON.stringify(payload.compatibility_tags)]]) {
+    if (columns.has(field)) { fields.push(field); values.push(value); }
+  }
+  const info = db.prepare(`INSERT INTO generation_styles (${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`).run(...values);
   return getStyle(db, info.lastInsertRowid);
 }
 
 function updateStyle(db, id, body = {}) {
+  const columns = ensureClassificationColumns(db);
   const styleId = Number(id);
   const existing = getStyle(db, styleId);
   if (!existing) return null;
@@ -254,6 +292,9 @@ function updateStyle(db, id, body = {}) {
   });
   if (body.enabled !== undefined) add('enabled', payload.enabled);
   if (body.sort_order !== undefined) add('sort_order', payload.sort_order == null ? 0 : payload.sort_order);
+  if (columns.has('style_family') && (body.style_family !== undefined || body.styleFamily !== undefined)) add('style_family', payload.style_family);
+  if (columns.has('medium') && body.medium !== undefined) add('medium', payload.medium);
+  if (columns.has('compatibility_tags') && (body.compatibility_tags !== undefined || body.compatibilityTags !== undefined)) add('compatibility_tags', JSON.stringify(payload.compatibility_tags));
   if (updates.length > 0) {
     params.push(new Date().toISOString(), styleId);
     db.prepare(`UPDATE generation_styles SET ${updates.join(', ')}, updated_at = ? WHERE id = ?`).run(...params);

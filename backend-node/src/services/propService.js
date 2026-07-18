@@ -4,6 +4,7 @@ const {
   mergeCfgStyleWithDrama,
   refreshCfgVisualStyleMetadata,
 } = require('../utils/dramaStyleMerge');
+const visualStyleVersionService = require('./visualStyleVersionService');
 
 function tableColumns(db, table) {
   try {
@@ -11,6 +12,11 @@ function tableColumns(db, table) {
   } catch (_) {
     return new Set();
   }
+}
+
+function activePropStyleSignature(db, dramaId) {
+  try { return visualStyleVersionService.ensureActiveVersion(db, Number(dramaId))?.signature || ''; }
+  catch (_) { return ''; }
 }
 
 function listByDramaId(db, dramaId) {
@@ -85,9 +91,10 @@ function update(db, log, id, updates) {
   const propColumns = tableColumns(db, 'props');
   const set = [];
   const params = [];
-  if (updates.name != null) { set.push('name = ?'); params.push(updates.name); }
+  let contentChanged = false;
+  if (updates.name != null) { set.push('name = ?'); params.push(updates.name); contentChanged = true; }
   if (updates.type != null) { set.push('type = ?'); params.push(updates.type); }
-  if (updates.description != null) { set.push('description = ?'); params.push(updates.description); }
+  if (updates.description != null) { set.push('description = ?'); params.push(updates.description); contentChanged = true; }
   if (updates.prompt != null) {
     set.push('prompt = ?');
     params.push(updates.prompt);
@@ -95,10 +102,13 @@ function update(db, log, id, updates) {
       const dramaRow = existing.drama_id
         ? db.prepare('SELECT style, metadata FROM dramas WHERE id = ? AND deleted_at IS NULL').get(existing.drama_id)
         : null;
-      const signature = mergeCfgStyleWithDrama({}, dramaRow || {}).style?.prop_style_signature || null;
+      const signature = activePropStyleSignature(db, existing.drama_id) || mergeCfgStyleWithDrama({}, dramaRow || {}).style?.prop_style_signature || null;
       set.push('prompt_style_signature = ?');
       params.push(signature);
     }
+  }
+  if (contentChanged && updates.prompt == null && propColumns.has('prompt_style_signature')) {
+    set.push('prompt_style_signature = NULL');
   }
   if (updates.negative_prompt !== undefined) { set.push('negative_prompt = ?'); params.push(updates.negative_prompt); }
   if (updates.image_url != null) { set.push('image_url = ?'); params.push(updates.image_url); }
@@ -197,7 +207,7 @@ async function generatePropPromptOnly(db, log, cfg, propId, modelName, style) {
     if (propColumns.has('prompt_style_signature')) {
       db.prepare('UPDATE props SET prompt = ?, prompt_style_signature = ?, updated_at = ? WHERE id = ?').run(
         generatedPrompt.trim(),
-        (polishCfg?.style?.prop_style_signature || polishCfg?.style?.style_signature || '').trim() || null,
+        activePropStyleSignature(db, prop.drama_id) || (polishCfg?.style?.prop_style_signature || polishCfg?.style?.style_signature || '').trim() || null,
         new Date().toISOString(),
         Number(propId)
       );

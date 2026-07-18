@@ -37,6 +37,48 @@ function normalizeIds(ids) {
   return out;
 }
 
+function parseJson(value, fallback) {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+function normalizeCompatibilityTags(input) {
+  const raw = Array.isArray(input)
+    ? input
+    : (typeof input === 'string' && input.trim().startsWith('[')
+      ? parseJson(input, [])
+      : String(input || '').split(/[,，、\n]/g));
+  const seen = new Set();
+  return (Array.isArray(raw) ? raw : [])
+    .map((item) => String(item || '').trim().slice(0, 40))
+    .filter((item) => item && !seen.has(item) && (seen.add(item), true));
+}
+
+function tableColumns(db, table) {
+  try {
+    return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+/** 新字段由迁移负责，服务单独在旧/测试库中运行时也能平滑工作。 */
+function ensureClassificationColumns(db) {
+  const columns = tableColumns(db, 'prompt_styles');
+  const wanted = [
+    ['role', "TEXT DEFAULT 'constraint'"],
+    ['medium', 'TEXT'],
+    ['compatibility_tags', 'TEXT'],
+    ['priority', 'INTEGER DEFAULT 50'],
+  ];
+  for (const [name, type] of wanted) {
+    if (columns.has(name)) continue;
+    try { db.exec(`ALTER TABLE prompt_styles ADD COLUMN ${name} ${type}`); } catch (_) {}
+  }
+  return tableColumns(db, 'prompt_styles');
+}
+
 function tagsForStyleIds(db, styleIds) {
   if (!styleIds.length) return {};
   const placeholders = styleIds.map(() => '?').join(',');
@@ -63,6 +105,10 @@ function attachTags(db, rows) {
     description: r.description || '',
     enabled: Number(r.enabled) !== 0,
     sort_order: Number(r.sort_order) || 0,
+    role: r.role || 'constraint',
+    medium: r.medium || '',
+    compatibility_tags: normalizeCompatibilityTags(r.compatibility_tags),
+    priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : 50,
     tags: tagMap[r.id] || [],
     created_at: r.created_at,
     updated_at: r.updated_at,
@@ -70,6 +116,7 @@ function attachTags(db, rows) {
 }
 
 function listStyles(db, query = {}) {
+  ensureClassificationColumns(db);
   const keyword = String(query.keyword || '').trim();
   const tag = String(query.tag || '').trim();
   const enabled = query.enabled;
@@ -108,6 +155,7 @@ function listStyles(db, query = {}) {
 }
 
 function getStyle(db, id) {
+  ensureClassificationColumns(db);
   const row = db.prepare('SELECT * FROM prompt_styles WHERE id = ? AND deleted_at IS NULL').get(Number(id));
   if (!row) return null;
   return attachTags(db, [row])[0];
@@ -128,6 +176,7 @@ function nextSortOrder(db) {
 }
 
 function createStyle(db, body = {}) {
+  const columns = ensureClassificationColumns(db);
   const name = String(body.name || '').trim();
   const content = String(body.content || '').trim();
   if (!name) {
@@ -145,18 +194,23 @@ function createStyle(db, body = {}) {
     ? Number(body.sort_order) || 0
     : nextSortOrder(db);
   const tx = db.transaction(() => {
-    const info = db.prepare(
-      `INSERT INTO prompt_styles (name, content, description, enabled, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).run(
+    const fields = ['name', 'content', 'description', 'enabled', 'sort_order', 'created_at', 'updated_at'];
+    const values = [
       name,
       content,
       body.description != null ? String(body.description).trim() : null,
       normalizeBool(body.enabled, true),
       sortOrder,
       now,
-      now
-    );
+      now,
+    ];
+    if (columns.has('role')) { fields.push('role'); values.push(String(body.role || 'constraint').trim() || 'constraint'); }
+    if (columns.has('medium')) { fields.push('medium'); values.push(String(body.medium || '').trim() || null); }
+    if (columns.has('compatibility_tags')) { fields.push('compatibility_tags'); values.push(JSON.stringify(normalizeCompatibilityTags(body.compatibility_tags || body.compatibilityTags))); }
+    if (columns.has('priority')) { fields.push('priority'); values.push(Number.isFinite(Number(body.priority)) ? Number(body.priority) : 50); }
+    const info = db.prepare(
+      `INSERT INTO prompt_styles (${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`
+    ).run(...values);
     replaceTags(db, info.lastInsertRowid, body.tags);
     return info.lastInsertRowid;
   });
@@ -164,6 +218,7 @@ function createStyle(db, body = {}) {
 }
 
 function updateStyle(db, id, body = {}) {
+  const columns = ensureClassificationColumns(db);
   const styleId = Number(id);
   const existing = getStyle(db, styleId);
   if (!existing) return null;
@@ -194,6 +249,12 @@ function updateStyle(db, id, body = {}) {
   if (body.description !== undefined) add('description', String(body.description || '').trim() || null);
   if (body.enabled !== undefined) add('enabled', normalizeBool(body.enabled, true));
   if (body.sort_order !== undefined) add('sort_order', Number(body.sort_order) || 0);
+  if (columns.has('role') && body.role !== undefined) add('role', String(body.role || 'constraint').trim() || 'constraint');
+  if (columns.has('medium') && body.medium !== undefined) add('medium', String(body.medium || '').trim() || null);
+  if (columns.has('compatibility_tags') && (body.compatibility_tags !== undefined || body.compatibilityTags !== undefined)) {
+    add('compatibility_tags', JSON.stringify(normalizeCompatibilityTags(body.compatibility_tags || body.compatibilityTags)));
+  }
+  if (columns.has('priority') && body.priority !== undefined) add('priority', Number.isFinite(Number(body.priority)) ? Number(body.priority) : 50);
   const tx = db.transaction(() => {
     if (updates.length > 0) {
       params.push(new Date().toISOString(), styleId);
@@ -231,6 +292,7 @@ function listTags(db) {
 }
 
 function getEnabledStylesByIds(db, ids) {
+  ensureClassificationColumns(db);
   const normalized = normalizeIds(ids);
   if (!normalized.length) return [];
   const placeholders = normalized.map(() => '?').join(',');
@@ -266,4 +328,6 @@ module.exports = {
   listTags,
   getEnabledStylesByIds,
   buildPromptStyleConstraintBlock,
+  normalizeCompatibilityTags,
+  ensureClassificationColumns,
 };

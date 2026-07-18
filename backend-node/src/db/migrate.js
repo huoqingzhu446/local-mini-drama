@@ -109,6 +109,8 @@ function ensureAllColumns(database) {
     { name: 'total_duration', type: 'INTEGER DEFAULT 0' },
     { name: 'status',         type: 'TEXT DEFAULT \'draft\'' },
     { name: 'metadata',       type: 'TEXT' },
+    { name: 'active_visual_style_version_id', type: 'INTEGER' },
+    { name: 'active_visual_style_signature', type: 'TEXT' },
     { name: 'created_at',     type: 'TEXT' },
     { name: 'updated_at',     type: 'TEXT' },
     { name: 'deleted_at',     type: 'TEXT' },
@@ -169,6 +171,7 @@ function ensureAllColumns(database) {
     { name: 'depth_of_field',    type: 'TEXT' },               // 景深（shallow/medium/deep/extreme_shallow）
     { name: 'polished_prompt',        type: 'TEXT' },               // 文字AI润色后的图片生成提示词（可编辑，生图时优先使用）
     { name: 'polished_prompt_style_signature', type: 'TEXT' },      // polished_prompt 对应的统一视觉风格签名
+    { name: 'prompt_state',      type: 'TEXT DEFAULT \'current\'' }, // current | stale_style | stale_scene | stale_reference | manual_override
     { name: 'continuity_snapshot',   type: 'TEXT' },               // JSON: 连戏状态快照 {characters:{name:{position,clothing,expression,props}},lighting}
     { name: 'audio_local_path',      type: 'TEXT' },               // 对白 TTS 本地路径
     { name: 'narration_audio_local_path', type: 'TEXT' },         // 解说旁白 TTS 本地路径
@@ -204,6 +207,7 @@ function ensureAllColumns(database) {
     { name: 'four_view_image_url', type: 'TEXT' }, // 四视图参考图 URL
     { name: 'polished_prompt',   type: 'TEXT' },   // 文字AI润色后的完整图片生成提示词（可编辑，生图时直接使用）
     { name: 'polished_prompt_style_signature', type: 'TEXT' }, // polished_prompt 对应的统一视觉风格签名
+    { name: 'prompt_state',      type: 'TEXT DEFAULT \'current\'' },
     { name: 'ref_image',         type: 'TEXT' },   // 用户上传的参考图（本地相对路径或 URL），独立于 AI 生成的主图
     { name: 'stages',            type: 'TEXT' },   // JSON: 多阶段造型 [{episode_range:[1,3], appearance:"..."}]
     { name: 'seedance2_asset', type: 'TEXT' },   // JSON: 即梦/Seedance2 素材库认证 hub_asset_id / asset_url 等
@@ -227,6 +231,7 @@ function ensureAllColumns(database) {
     { name: 'polished_prompt_single_style_signature', type: 'TEXT' }, // polished_prompt_single 对应的统一视觉风格签名
     { name: 'polished_prompt_nine', type: 'TEXT' }, // 场景九宫格参考板完整图片提示词
     { name: 'polished_prompt_nine_style_signature', type: 'TEXT' }, // polished_prompt_nine 对应的统一视觉风格签名
+    { name: 'prompt_state',     type: 'TEXT DEFAULT \'current\'' },
     { name: 'image_url',        type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
     { name: 'reference_grid_image_url', type: 'TEXT' }, // 场景九宫格参考板 URL，不覆盖主图
@@ -251,6 +256,7 @@ function ensureAllColumns(database) {
     { name: 'description', type: 'TEXT' },
     { name: 'prompt',      type: 'TEXT' },
     { name: 'prompt_style_signature', type: 'TEXT' }, // prompt 对应的统一视觉风格签名
+    { name: 'prompt_state', type: 'TEXT DEFAULT \'current\'' },
     { name: 'image_url',    type: 'TEXT' },
     { name: 'local_path',   type: 'TEXT' },
     { name: 'extra_images', type: 'TEXT' },
@@ -325,6 +331,7 @@ function ensureAllColumns(database) {
     { name: 'episode_id',       type: 'INTEGER' },
     { name: 'scene_id',         type: 'INTEGER' },
     { name: 'character_id',     type: 'INTEGER' },
+    { name: 'prop_id',          type: 'INTEGER' },
     { name: 'provider',         type: 'TEXT' },
     { name: 'prompt',           type: 'TEXT' },
     { name: 'negative_prompt',  type: 'TEXT' },
@@ -334,6 +341,11 @@ function ensureAllColumns(database) {
     { name: 'use_first_frame_layout_lock', type: 'INTEGER' },
     { name: 'size',             type: 'TEXT' },
     { name: 'quality',          type: 'TEXT' },
+    { name: 'style_version_id', type: 'INTEGER' },
+    { name: 'context_snapshot_id', type: 'TEXT' },
+    { name: 'prompt_hash',      type: 'TEXT' },
+    { name: 'reference_pack',   type: 'TEXT' },
+    { name: 'compiler_version', type: 'TEXT' },
     { name: 'image_url',        type: 'TEXT' },
     { name: 'local_path',       type: 'TEXT' },
     { name: 'width',            type: 'INTEGER' },
@@ -530,6 +542,10 @@ function ensureAllColumns(database) {
     { name: 'description', type: 'TEXT' },
     { name: 'enabled',     type: 'INTEGER DEFAULT 1' },
     { name: 'sort_order',  type: 'INTEGER DEFAULT 0' },
+    { name: 'role',        type: 'TEXT DEFAULT \'constraint\'' },
+    { name: 'medium',      type: 'TEXT' },
+    { name: 'compatibility_tags', type: 'TEXT' },
+    { name: 'priority',    type: 'INTEGER DEFAULT 50' },
     { name: 'created_at',  type: 'TEXT' },
     { name: 'updated_at',  type: 'TEXT' },
     { name: 'deleted_at',  type: 'TEXT' },
@@ -593,6 +609,9 @@ function ensureAllColumns(database) {
     { name: 'prop_style_prompt_en', type: 'TEXT' },
     { name: 'video_style_prompt_zh', type: 'TEXT' },
     { name: 'video_style_prompt_en', type: 'TEXT' },
+    { name: 'style_family', type: 'TEXT' },
+    { name: 'medium', type: 'TEXT' },
+    { name: 'compatibility_tags', type: 'TEXT' },
     { name: 'enabled', type: 'INTEGER DEFAULT 1' },
     { name: 'sort_order', type: 'INTEGER DEFAULT 0' },
     { name: 'created_at', type: 'TEXT' },
@@ -664,6 +683,12 @@ function ensureAllColumns(database) {
     { name: 'aspect_ratio',          type: 'TEXT' },
     { name: 'quality',               type: 'TEXT DEFAULT \'standard\'' },
     { name: 'style',                 type: 'TEXT' },
+    { name: 'style_version_id',      type: 'INTEGER' },
+    { name: 'context_snapshot_id',   type: 'TEXT' },
+    { name: 'prompt_hash',           type: 'TEXT' },
+    { name: 'reference_pack',        type: 'TEXT' },
+    { name: 'compiler_version',      type: 'TEXT' },
+    { name: 'stale_reason',          type: 'TEXT' },
     { name: 'source_snapshot',       type: 'TEXT' },
     { name: 'candidates',            type: 'TEXT' },
     { name: 'selected_candidate_id', type: 'TEXT' },
@@ -677,6 +702,62 @@ function ensureAllColumns(database) {
     { name: 'used_at',               type: 'TEXT' },
     { name: 'deleted_at',            type: 'TEXT' },
   ]);
+
+  // --- 统一视觉风格版本与不可变生成上下文 ---
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS drama_visual_style_versions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      drama_id INTEGER NOT NULL,
+      version INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      name TEXT NOT NULL DEFAULT '',
+      style_prompt_zh TEXT,
+      style_prompt_en TEXT,
+      visual_bible TEXT,
+      visual_bible_struct TEXT,
+      scope_overrides TEXT,
+      prompt_style_ids TEXT,
+      style_family TEXT,
+      medium TEXT,
+      signature TEXT NOT NULL,
+      compiler_version TEXT NOT NULL DEFAULT 'v2',
+      source TEXT,
+      created_at TEXT NOT NULL,
+      activated_at TEXT,
+      superseded_at TEXT,
+      UNIQUE(drama_id, version)
+    )`);
+    database.exec('CREATE INDEX IF NOT EXISTS idx_visual_style_versions_drama ON drama_visual_style_versions(drama_id, version)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_visual_style_versions_status ON drama_visual_style_versions(drama_id, status)');
+  } catch (_) {}
+
+  try {
+    database.exec(`CREATE TABLE IF NOT EXISTS generation_context_snapshots (
+      id TEXT PRIMARY KEY,
+      drama_id INTEGER,
+      episode_id INTEGER,
+      scene_id INTEGER,
+      storyboard_id INTEGER,
+      entity_type TEXT NOT NULL,
+      entity_id INTEGER NOT NULL,
+      frame_type TEXT,
+      style_version_id INTEGER,
+      style_signature TEXT NOT NULL,
+      prompt_source TEXT,
+      source_prompt TEXT,
+      compiled_prompt TEXT NOT NULL,
+      compiled_negative_prompt TEXT,
+      reference_pack TEXT,
+      source_snapshot TEXT,
+      prompt_hash TEXT NOT NULL,
+      reference_hash TEXT,
+      compiler_version TEXT NOT NULL DEFAULT 'v2',
+      diagnostics TEXT,
+      created_at TEXT NOT NULL
+    )`);
+    database.exec('CREATE INDEX IF NOT EXISTS idx_generation_context_entity ON generation_context_snapshots(entity_type, entity_id, frame_type, created_at)');
+    database.exec('CREATE INDEX IF NOT EXISTS idx_generation_context_drama ON generation_context_snapshots(drama_id, style_version_id, created_at)');
+  } catch (_) {}
 }
 
 /** 对已打开的 database 执行迁移与兜底补列（供 app 启动时调用） */

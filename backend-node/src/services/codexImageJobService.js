@@ -11,6 +11,10 @@ const {
   scopedStyleTextsFromStyleObject,
 } = require('../utils/dramaStyleMerge');
 const { normalizeImageQuality, codexQualityInstruction } = require('../utils/imageQuality');
+const promptCompiler = require('./promptCompiler');
+const generationContextService = require('./generationContextService');
+const referencePackService = require('./referencePackService');
+const visualStyleVersionService = require('./visualStyleVersionService');
 
 const ENABLED_ENTITY_TYPES = new Set(['character', 'prop', 'scene', 'storyboard']);
 const ACTIVE_STATUSES = new Set(['pending', 'generating', 'completed']);
@@ -43,6 +47,12 @@ function ensureCodexImageJobsTable(db) {
     quality TEXT,
     style TEXT,
     style_signature TEXT,
+    style_version_id INTEGER,
+    context_snapshot_id TEXT,
+    prompt_hash TEXT,
+    reference_pack TEXT,
+    compiler_version TEXT,
+    stale_reason TEXT,
     source_snapshot TEXT,
     candidates TEXT,
     selected_candidate_id TEXT,
@@ -63,6 +73,19 @@ function ensureCodexImageJobsTable(db) {
     }
     if (!cols.has('quality')) {
       db.exec("ALTER TABLE codex_image_jobs ADD COLUMN quality TEXT DEFAULT 'standard'");
+    }
+    const optional = [
+      ['style_version_id', 'INTEGER'],
+      ['context_snapshot_id', 'TEXT'],
+      ['prompt_hash', 'TEXT'],
+      ['reference_pack', 'TEXT'],
+      ['compiler_version', 'TEXT'],
+      ['stale_reason', 'TEXT'],
+    ];
+    for (const [name, type] of optional) {
+      if (!cols.has(name)) {
+        try { db.exec(`ALTER TABLE codex_image_jobs ADD COLUMN ${name} ${type}`); } catch (_) {}
+      }
     }
   } catch (_) {}
   db.exec('CREATE INDEX IF NOT EXISTS idx_codex_image_jobs_entity ON codex_image_jobs(entity_type, entity_id, status)');
@@ -187,6 +210,12 @@ function rowToJob(row) {
     quality: normalizeImageQuality(row.quality),
     style: row.style || '',
     style_signature: row.style_signature || '',
+    style_version_id: row.style_version_id == null ? null : Number(row.style_version_id),
+    context_snapshot_id: row.context_snapshot_id || null,
+    prompt_hash: row.prompt_hash || '',
+    reference_pack: parseJson(row.reference_pack, null),
+    compiler_version: row.compiler_version || '',
+    stale_reason: row.stale_reason || null,
     source_snapshot: sourceSnapshot,
     candidates: candidateList,
     selected_candidate_id: row.selected_candidate_id || null,
@@ -456,7 +485,7 @@ function pickPromptSource(entityType, row, opts = {}) {
   return { key: 'unknown', text: '' };
 }
 
-function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
+function buildLegacyCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
   const source = pickPromptSource(entityType, row, opts);
   const scope = styleScopeForEntity(entityType);
   const style = styleFromDrama(cfg, dramaRow, opts.style, scope);
@@ -531,29 +560,76 @@ function buildCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
   };
 }
 
-function activeJobForEntity(db, entityType, entityId, frameType, styleSignature, quality) {
+/**
+ * Codex 与普通图生共用同一套视觉上下文编译器。
+ * 保留 legacy builder 作为极端旧库/降级路径，保证队列接口不会因单条脏数据整体失败。
+ */
+function buildCodexPrompt(db, entityType, row, dramaRow, cfg, opts = {}) {
+  try {
+    const compiled = promptCompiler.compile(db, cfg, {
+      ...opts,
+      entity_type: entityType,
+      entity_id: row.id,
+      drama_id: dramaRow?.id || row.drama_id || opts.drama_id,
+      entity: row,
+      drama: dramaRow,
+      frame_type: normalizeFrameType(opts.frame_type),
+    });
+    if (compiled?.ok) {
+      return {
+        ...compiled,
+        prompt: compiled.compiled_prompt,
+        negative_prompt: compiled.compiled_negative_prompt,
+        style: compiled.style,
+        style_signature: compiled.style_signature,
+        compiler: compiled,
+      };
+    }
+  } catch (_) {
+    // 下面的 legacy builder 负责兼容尚未完成迁移的数据库。
+  }
+  return buildLegacyCodexPrompt(entityType, row, dramaRow, cfg, opts);
+}
+
+function activeJobForEntity(db, entityType, entityId, frameType, styleSignature, quality, options = {}) {
   const styleSig = String(styleSignature || '').trim();
+  const promptHash = String(options.prompt_hash || '').trim();
+  const styleVersionId = Number(options.style_version_id) || null;
   const normalizedQuality = normalizeImageQuality(quality);
+  const columns = tableColumns(db, 'codex_image_jobs');
+  const extra = [];
+  const extraParams = [];
+  if (styleVersionId && columns.has('style_version_id')) {
+    extra.push('AND style_version_id = ?');
+    extraParams.push(styleVersionId);
+  }
+  if (promptHash && columns.has('prompt_hash')) {
+    extra.push('AND prompt_hash = ?');
+    extraParams.push(promptHash);
+  }
   const row = db.prepare(
     `SELECT * FROM codex_image_jobs
      WHERE entity_type = ? AND entity_id = ? AND frame_type = ? AND deleted_at IS NULL
        AND status IN ('pending', 'generating', 'completed')
        AND COALESCE(NULLIF(quality, ''), 'standard') = ?
        ${styleSig ? 'AND style_signature = ?' : ''}
+       ${extra.join('\n       ')}
      ORDER BY updated_at DESC, created_at DESC
      LIMIT 1`
-  ).get(...[entityType, Number(entityId), normalizeFrameType(frameType), normalizedQuality].concat(styleSig ? [styleSig] : []));
+  ).get(...[entityType, Number(entityId), normalizeFrameType(frameType), normalizedQuality].concat(styleSig ? [styleSig] : [], extraParams));
   return rowToJob(row);
 }
 
 function jobManifestItem(job) {
   const sourceSnapshot = job.source_snapshot || {};
   const entity = sourceSnapshot.entity || {};
-  const referenceImages = [];
-  if (job.entity_type === 'scene' && normalizeFrameType(job.frame_type) === 'reference_grid') {
-    const ref = entity.local_path || entity.image_url || '';
-    if (ref) referenceImages.push(ref);
-  }
+  const referencePack = job.reference_pack || sourceSnapshot.reference_pack || null;
+  const references = Array.isArray(referencePack?.references) ? referencePack.references : [];
+  const referenceImages = references.length
+    ? references.map((item) => item.value || item.path || item.url).filter(Boolean)
+    : (job.entity_type === 'scene' && normalizeFrameType(job.frame_type) === 'reference_grid'
+      ? [entity.local_path || entity.image_url || ''].filter(Boolean)
+      : []);
   return {
     id: job.id,
     entity_type: job.entity_type,
@@ -567,6 +643,11 @@ function jobManifestItem(job) {
     quality: job.quality || undefined,
     style: job.style || undefined,
     style_signature: job.style_signature || undefined,
+    style_version_id: job.style_version_id || undefined,
+    context_snapshot_id: job.context_snapshot_id || undefined,
+    prompt_hash: job.prompt_hash || undefined,
+    compiler_version: job.compiler_version || undefined,
+    references: references.length ? references : undefined,
     reference_images: referenceImages.length ? referenceImages : undefined,
     target_category: CATEGORY_BY_ENTITY[job.entity_type] || job.entity_type,
     status: job.status,
@@ -618,15 +699,24 @@ function createJob(db, log, cfg, req = {}) {
   const episodeId = req.episode_id != null ? Number(req.episode_id) || null : (row.episode_id != null ? Number(row.episode_id) : null);
   const dramaRow = getDramaRow(db, dramaId);
   const quality = normalizeImageQuality(req.quality);
-  const built = buildCodexPrompt(entityType, row, dramaRow, cfg, {
+  const built = buildCodexPrompt(db, entityType, row, dramaRow, cfg, {
     style: req.style,
     aspect_ratio: req.aspect_ratio,
     quality,
     frame_type: frameType,
+    reference_images: req.reference_images || req.referenceImages,
+    reference_limits: req.reference_limits || req.referenceLimits,
+    use_first_frame_layout_lock: req.use_first_frame_layout_lock,
+    allow_stale_references: req.allow_stale_references || req.allowStaleReferences,
   });
   const styleSignature = built.style_signature || '';
+  const styleVersionId = Number(built.style_version_id) || null;
+  const promptHash = String(built.prompt_hash || generationContextService.hashValue(built.prompt || '')).trim();
   if (!req.force) {
-    const existing = activeJobForEntity(db, entityType, entityId, frameType, styleSignature, quality);
+    const existing = activeJobForEntity(db, entityType, entityId, frameType, styleSignature, quality, {
+      style_version_id: styleVersionId,
+      prompt_hash: promptHash,
+    });
     if (existing) {
       const manifest = writeJobsManifest(db, cfg);
       return { ok: true, job: existing, reused: true, manifest };
@@ -635,34 +725,66 @@ function createJob(db, log, cfg, req = {}) {
   const now = new Date().toISOString();
   const id = `cij_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   const sourceSnapshot = {
+    ...(built.source_snapshot || {}),
     entity: row,
     drama: dramaRow ? { id: dramaRow.id, title: dramaRow.title, style: dramaRow.style, metadata: parseDramaMetadata(dramaRow) } : null,
     prompt_source: built.prompt_source,
     style_signature: styleSignature,
+    style_version_id: styleVersionId,
+    prompt_hash: promptHash,
+    reference_pack: built.reference_pack || null,
     quality,
   };
-  db.prepare(
-    `INSERT INTO codex_image_jobs
-     (id, entity_type, entity_id, drama_id, episode_id, frame_type, status, prompt, negative_prompt,
-      aspect_ratio, quality, style, style_signature, source_snapshot, candidates, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)`
-  ).run(
-    id,
-    entityType,
-    entityId,
-    dramaId,
-    episodeId,
-    frameType,
-    built.prompt,
-    row.negative_prompt || null,
-    built.aspect_ratio,
-    quality,
-    built.style || null,
-    styleSignature || null,
-    stringifyJson(sourceSnapshot),
-    now,
-    now
-  );
+  let contextSnapshot = null;
+  try {
+    contextSnapshot = generationContextService.createSnapshot(db, {
+      drama_id: dramaId,
+      episode_id: episodeId,
+      scene_id: built.scene_id,
+      storyboard_id: built.storyboard_id,
+      entity_type: entityType,
+      entity_id: entityId,
+      frame_type: frameType,
+      style_version_id: styleVersionId,
+      style_signature: styleSignature,
+      prompt_source: built.prompt_source,
+      source_prompt: built.source_prompt,
+      compiled_prompt: built.prompt,
+      compiled_negative_prompt: built.negative_prompt || '',
+      reference_pack: built.reference_pack || null,
+      source_snapshot: sourceSnapshot,
+      prompt_hash: promptHash,
+      reference_hash: built.reference_hash || built.reference_pack?.hash || '',
+      compiler_version: built.compiler_version || 'v2',
+      diagnostics: built.diagnostics || [],
+    });
+  } catch (err) {
+    log?.warn?.('[Codex生图] 生成上下文快照写入失败，继续创建旧兼容任务', { error: err.message });
+  }
+  if (contextSnapshot) {
+    try { generationContextService.markEntityCompiled(db, built); } catch (_) {}
+  }
+  const columns = tableColumns(db, 'codex_image_jobs');
+  const fields = [
+    'id', 'entity_type', 'entity_id', 'drama_id', 'episode_id', 'frame_type', 'status', 'prompt', 'negative_prompt',
+    'aspect_ratio', 'quality', 'style', 'style_signature', 'source_snapshot', 'candidates', 'created_at', 'updated_at',
+  ];
+  const values = [
+    id, entityType, entityId, dramaId, episodeId, frameType, 'pending', built.prompt,
+    built.negative_prompt || row.negative_prompt || null, built.aspect_ratio, quality, built.style || null,
+    styleSignature || null, stringifyJson(sourceSnapshot), '[]', now, now,
+  ];
+  const optional = [
+    ['style_version_id', styleVersionId],
+    ['context_snapshot_id', contextSnapshot?.id || null],
+    ['prompt_hash', promptHash],
+    ['reference_pack', built.reference_pack ? JSON.stringify(built.reference_pack) : null],
+    ['compiler_version', built.compiler_version || 'v2'],
+  ];
+  for (const [field, value] of optional) {
+    if (columns.has(field)) { fields.push(field); values.push(value); }
+  }
+  db.prepare(`INSERT INTO codex_image_jobs (${fields.join(', ')}) VALUES (${fields.map(() => '?').join(', ')})`).run(...values);
   const job = getJobById(db, id);
   const manifest = writeJobsManifest(db, cfg);
   log?.info?.('[Codex生图] 任务已加入队列', { id, entity_type: entityType, entity_id: entityId });
@@ -673,12 +795,15 @@ function invalidateJobsForDrama(db, log, cfg, dramaId, reason) {
   ensureCodexImageJobsTable(db);
   const why = String(reason || '项目视觉风格已变更，请重新生成').trim();
   const now = new Date().toISOString();
+  const columns = tableColumns(db, 'codex_image_jobs');
+  const staleClause = columns.has('stale_reason') ? ', stale_reason = ?' : '';
+  const params = columns.has('stale_reason') ? [why, now, why, Number(dramaId)] : [why, now, Number(dramaId)];
   const result = db.prepare(
     `UPDATE codex_image_jobs
-     SET status = 'cancelled', error_msg = ?, updated_at = ?
+     SET status = 'cancelled', error_msg = ?, updated_at = ?${staleClause}
      WHERE drama_id = ? AND deleted_at IS NULL
        AND status IN ('pending', 'generating', 'completed')`
-  ).run(why, now, Number(dramaId));
+  ).run(...params);
   if (result.changes > 0) {
     writeJobsManifest(db, cfg);
     log?.info?.('[Codex生图] 已失效旧风格任务', { drama_id: dramaId, count: result.changes });
@@ -885,6 +1010,11 @@ function applyToStoryboard(db, log, job, localPath, imageUrl) {
     local_path: localPath || null,
     frame_type: frameTypeForImageGeneration(job.frame_type),
     quality: job.quality || undefined,
+    style_version_id: job.style_version_id || undefined,
+    context_snapshot_id: job.context_snapshot_id || undefined,
+    prompt_hash: job.prompt_hash || undefined,
+    reference_pack: job.reference_pack || undefined,
+    compiler_version: job.compiler_version || undefined,
   });
   if (!uploaded?.id) return { ok: false, error: 'failed to bind storyboard image' };
   return { ok: true, image_generation_id: uploaded.id };
@@ -894,7 +1024,27 @@ function useCandidate(db, log, cfg, jobId, req = {}) {
   ensureCodexImageJobsTable(db);
   const job = getJobById(db, jobId);
   if (!job) return { ok: false, error: 'job not found' };
-  if (job.status !== 'completed') return { ok: false, error: 'job is not completed' };
+  const staleCancelledWithCandidates = job.status === 'cancelled' && req.allow_stale && Array.isArray(job.candidates) && job.candidates.length > 0;
+  if (job.status !== 'completed' && !staleCancelledWithCandidates) return { ok: false, error: 'job is not completed' };
+  if ((job.style_version_id || job.style_signature) && !req.allow_stale && !req.force) {
+    try {
+      const active = job.drama_id ? visualStyleVersionService.ensureActiveVersion(db, job.drama_id) : null;
+      const stale = active && (
+        (job.style_version_id && Number(job.style_version_id) !== Number(active.id)) ||
+        (job.style_signature && String(job.style_signature) !== String(active.signature))
+      );
+      if (stale) {
+        return {
+          ok: false,
+          error: 'candidate belongs to an old visual style version; recompile before applying',
+          code: 'STALE_STYLE_CANDIDATE',
+          job_style_version_id: job.style_version_id || null,
+          active_style_version_id: active.id,
+          active_style_signature: active.signature,
+        };
+      }
+    } catch (_) {}
+  }
   const candidates = Array.isArray(job.candidates) ? job.candidates : [];
   const candidateId = req.candidate_id || req.candidateId;
   const candidate = candidateId
