@@ -33,7 +33,7 @@
     </div>
 
     <CodexImageCandidatePicker
-      v-if="job?.status === 'completed'"
+      v-if="canShowCandidates"
       :job="job"
       :using-candidate-id="usingCandidateId"
       :disabled="loading"
@@ -49,7 +49,7 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { MagicStick } from '@element-plus/icons-vue'
 import { codexImageJobAPI } from '@/api/codexImageJobs'
 import CodexImageCandidatePicker from '@/components/CodexImageCandidatePicker.vue'
@@ -78,6 +78,11 @@ const usingCandidateId = ref('')
 let refreshTimer = null
 
 const canCancel = computed(() => ['pending', 'generating'].includes(job.value?.status))
+const canShowCandidates = computed(() => (
+  ['completed', 'cancelled'].includes(job.value?.status)
+  && Array.isArray(job.value?.candidates)
+  && job.value.candidates.length > 0
+))
 
 const buttonText = computed(() => {
   const status = job.value?.status
@@ -94,6 +99,7 @@ const tooltipText = computed(() => {
   if (status === 'pending') return '已加入 Codex 生图队列'
   if (status === 'generating') return 'Codex 正在处理该图片任务'
   if (status === 'completed') return '候选图已生成，请选择使用'
+  if (status === 'cancelled' && canShowCandidates.value) return '候选图属于旧视觉版本；可确认后继续使用，或点击“重试”生成当前风格'
   if (status === 'used') return '已使用候选图，可重新加入队列'
   if (status === 'failed') return job.value?.error_msg || '任务失败，可重试'
   return props.idleTooltip || '加入 Codex 生图队列'
@@ -184,19 +190,55 @@ async function cancelJob() {
   }
 }
 
+async function applyCandidate(candidate, allowStale = false) {
+  const payload = { candidate_id: candidate.id }
+  if (allowStale) payload.allow_stale = true
+  const res = await codexImageJobAPI.use(job.value.id, payload)
+  job.value = res?.job || null
+  emit('used', { job: job.value, candidate, image_url: res?.image_url, local_path: res?.local_path })
+  emit('changed', job.value)
+  syncRefreshTimer()
+  return res
+}
+
+async function confirmUseStaleCandidate() {
+  try {
+    await ElMessageBox.confirm(
+      '这张候选图属于旧的视觉风格版本。建议取消后点击“重试”重新生成当前风格；如果仍要保留这张图，确认后将按旧风格应用。',
+      '候选图风格已过期',
+      {
+        type: 'warning',
+        confirmButtonText: '继续使用旧图',
+        cancelButtonText: '取消',
+        distinguishCancelAndClose: true
+      }
+    )
+    return true
+  } catch (_) {
+    return false
+  }
+}
+
 async function useCandidate(candidate) {
   if (!job.value?.id || !candidate?.id) return
   usingCandidateId.value = candidate.id
   loading.value = true
   try {
-    const res = await codexImageJobAPI.use(job.value.id, { candidate_id: candidate.id })
-    job.value = res?.job || null
-    emit('used', { job: job.value, candidate, image_url: res?.image_url, local_path: res?.local_path })
-    emit('changed', job.value)
-    syncRefreshTimer()
+    await applyCandidate(candidate)
     ElMessage.success('已使用 Codex 候选图')
   } catch (e) {
-    ElMessage.error(e.message || '使用失败')
+    if (e.apiCode !== 'STALE_STYLE_CANDIDATE') {
+      ElMessage.error(e.message || '使用失败')
+      return
+    }
+    const confirmed = await confirmUseStaleCandidate()
+    if (!confirmed) return
+    try {
+      await applyCandidate(candidate, true)
+      ElMessage.warning('已使用旧视觉风格候选图，请留意画风一致性')
+    } catch (retryError) {
+      ElMessage.error(retryError.message || '使用失败')
+    }
   } finally {
     usingCandidateId.value = ''
     loading.value = false

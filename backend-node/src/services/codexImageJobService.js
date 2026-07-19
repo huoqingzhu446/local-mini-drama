@@ -1024,8 +1024,19 @@ function useCandidate(db, log, cfg, jobId, req = {}) {
   ensureCodexImageJobsTable(db);
   const job = getJobById(db, jobId);
   if (!job) return { ok: false, error: 'job not found' };
-  const staleCancelledWithCandidates = job.status === 'cancelled' && req.allow_stale && Array.isArray(job.candidates) && job.candidates.length > 0;
-  if (job.status !== 'completed' && !staleCancelledWithCandidates) return { ok: false, error: 'job is not completed' };
+  const hasCandidates = Array.isArray(job.candidates) && job.candidates.length > 0;
+  const cancelledWithCandidates = job.status === 'cancelled' && hasCandidates;
+  if (job.status !== 'completed' && !cancelledWithCandidates) return { ok: false, error: 'job is not completed' };
+  if (cancelledWithCandidates && !req.allow_stale && !req.force) {
+    return {
+      ok: false,
+      error: '候选图属于旧的视觉风格版本，请重新生成当前风格；如仍要使用，请先明确确认',
+      code: 'STALE_STYLE_CANDIDATE',
+      job_style_version_id: job.style_version_id || null,
+      active_style_version_id: null,
+      active_style_signature: null,
+    };
+  }
   if ((job.style_version_id || job.style_signature) && !req.allow_stale && !req.force) {
     try {
       const active = job.drama_id ? visualStyleVersionService.ensureActiveVersion(db, job.drama_id) : null;
@@ -1036,7 +1047,7 @@ function useCandidate(db, log, cfg, jobId, req = {}) {
       if (stale) {
         return {
           ok: false,
-          error: 'candidate belongs to an old visual style version; recompile before applying',
+          error: '候选图属于旧的视觉风格版本，请重新生成当前风格；如仍要使用，请先明确确认',
           code: 'STALE_STYLE_CANDIDATE',
           job_style_version_id: job.style_version_id || null,
           active_style_version_id: active.id,

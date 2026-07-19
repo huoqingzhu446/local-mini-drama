@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const codexImageJobService = require('../src/services/codexImageJobService');
+const visualStyleVersionService = require('../src/services/visualStyleVersionService');
 
 function makeDb(tmpDir) {
   const db = new Database(path.join(tmpDir, 'drama_generator.db'));
@@ -190,6 +191,56 @@ test('Codex scene job works with old scenes schema missing polished_prompt_singl
   assert.equal(created.job.entity_type, 'scene');
   assert.match(created.job.prompt, /太空/);
   assert.match(created.job.prompt, /无垠深空/);
+  db.close();
+});
+
+test('stale Codex candidate requires explicit allow_stale before applying', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-codex-stale-candidate-'));
+  const cfg = {
+    database: { path: path.join(tmpDir, 'drama_generator.db') },
+    storage: { local_path: path.join(tmpDir, 'storage'), base_url: 'http://localhost:5679/static' },
+  };
+  fs.mkdirSync(cfg.storage.local_path, { recursive: true });
+  const db = makeDb(tmpDir);
+  db.prepare(
+    `INSERT INTO dramas (id, title, style, metadata, created_at)
+     VALUES (1, 'Stale Style Drama', 'realistic', ?, '2026-07-06T00:00:00.000Z')`
+  ).run(JSON.stringify({ aspect_ratio: '16:9' }));
+  db.prepare(
+    `INSERT INTO characters (id, drama_id, name, appearance)
+     VALUES (7, 1, '旧候选角色', '旧视觉版本角色')`
+  ).run();
+  const active = visualStyleVersionService.ensureActiveVersion(db, 1);
+  codexImageJobService.ensureCodexImageJobsTable(db);
+  const candidateRelPath = 'projects/stale/codex-candidates/characters/old.png';
+  const candidatePath = path.join(cfg.storage.local_path, candidateRelPath);
+  fs.mkdirSync(path.dirname(candidatePath), { recursive: true });
+  fs.writeFileSync(candidatePath, Buffer.from('fake stale image bytes'));
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO codex_image_jobs
+      (id, entity_type, entity_id, drama_id, status, prompt, style_signature, style_version_id,
+       source_snapshot, candidates, created_at, updated_at)
+     VALUES (?, 'character', 7, 1, 'completed', ?, ?, ?, '{}', ?, ?, ?)`
+  ).run(
+    'stale-job', 'old prompt', 'old-signature', active.id,
+    JSON.stringify([{ id: 'candidate-1', local_path: candidateRelPath }]), now, now
+  );
+
+  const rejected = codexImageJobService.useCandidate(db, null, cfg, 'stale-job', { candidate_id: 'candidate-1' });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.code, 'STALE_STYLE_CANDIDATE');
+  db.prepare("UPDATE codex_image_jobs SET status = 'cancelled' WHERE id = 'stale-job'").run();
+  const cancelledRejected = codexImageJobService.useCandidate(db, null, cfg, 'stale-job', { candidate_id: 'candidate-1' });
+  assert.equal(cancelledRejected.ok, false);
+  assert.equal(cancelledRejected.code, 'STALE_STYLE_CANDIDATE');
+
+  const applied = codexImageJobService.useCandidate(db, null, cfg, 'stale-job', {
+    candidate_id: 'candidate-1',
+    allow_stale: true,
+  });
+  assert.equal(applied.ok, true);
+  assert.equal(db.prepare('SELECT image_url FROM characters WHERE id = 7').get().image_url, `/static/${applied.local_path}`);
   db.close();
 });
 
