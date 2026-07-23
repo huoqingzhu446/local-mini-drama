@@ -25,6 +25,11 @@ const generationStylesRoutes = require('./generationStyles');
 const sceneModelMapRoutes = require('./sceneModelMap');
 const codexImageJobRoutes = require('./codexImageJobs');
 const visualStyleRoutes = require('./visualStyles');
+const paperCompositionRoutes = require('./paperCompositions');
+const paperAssetRoutes = require('./paperAssets');
+const paperSequenceRoutes = require('./paperSequences');
+const paperRigRoutes = require('./paperRigs');
+const paperRenderRoutes = require('./paperRender');
 
 function setupRouter(cfg, db, log) {
   const r = express.Router();
@@ -55,6 +60,11 @@ function setupRouter(cfg, db, log) {
   const generationStyles = generationStylesRoutes.routes(db, log);
   const codexImageJobs = codexImageJobRoutes(db, cfg, log);
   const visualStyles = visualStyleRoutes(db, cfg, log);
+  const paperCompositions = paperCompositionRoutes(db, cfg, log);
+  const paperAssets = paperAssetRoutes(db, cfg, log, uploadModule.multerSingle);
+  const paperSequences = paperSequenceRoutes(db, cfg, log);
+  const paperRigs = paperRigRoutes(db, cfg, log);
+  const paperRender = paperRenderRoutes(db, cfg, log);
 
   // ---------- dramas ----------
   r.get('/dramas', drama.listDramas);
@@ -279,6 +289,41 @@ function setupRouter(cfg, db, log) {
   r.post('/videos/episode/:episode_id/batch', videos.episodeBatch);
   r.get('/videos/:id', videos.get);
   r.delete('/videos/:id', videos.delete);
+
+  // ---------- paper layered animation ----------
+  r.get('/paper-render/doctor', paperRender.doctor);
+  r.get('/paper-compositions', paperCompositions.list);
+  r.post('/storyboards/:id/paper-composition/plan', paperCompositions.plan);
+  r.get('/paper-compositions/:id', paperCompositions.get);
+  r.put('/paper-compositions/:id', paperCompositions.update);
+  r.get('/paper-compositions/:id/validation', paperCompositions.validation);
+  r.post('/paper-compositions/:id/lock-timing', paperCompositions.lockTiming);
+  r.post('/paper-compositions/:id/proof-frames', paperCompositions.proofFrames);
+  r.post('/paper-compositions/:id/render', paperCompositions.render);
+  r.post('/paper-compositions/:id/duplicate', paperCompositions.duplicate);
+  r.post('/paper-compositions/:id/layers', paperCompositions.addLayer);
+  r.put('/paper-layers/:id', paperCompositions.updateLayer);
+  r.delete('/paper-layers/:id', paperCompositions.deleteLayer);
+
+  r.get('/paper-assets', paperAssets.list);
+  r.post('/paper-assets', paperAssets.create);
+  r.get('/paper-assets/:id', paperAssets.get);
+  r.put('/paper-assets/:id', paperAssets.update);
+  r.delete('/paper-assets/:id', paperAssets.delete);
+  r.post('/paper-assets/:id/source', uploadModule.multerSingle, paperAssets.source);
+  r.post('/paper-assets/:id/matte', paperAssets.matte);
+
+  r.get('/paper-sequences', paperSequences.list);
+  r.post('/paper-sequences', paperSequences.create);
+  r.get('/paper-sequences/:id', paperSequences.get);
+  r.put('/paper-sequences/:id', paperSequences.update);
+  r.delete('/paper-sequences/:id', paperSequences.delete);
+
+  r.get('/paper-rigs', paperRigs.list);
+  r.post('/paper-rigs', paperRigs.create);
+  r.get('/paper-rigs/:id', paperRigs.get);
+  r.put('/paper-rigs/:id', paperRigs.update);
+  r.delete('/paper-rigs/:id', paperRigs.delete);
 
   // ---------- video-merges ----------
   r.get('/video-merges', videoMerges.list);

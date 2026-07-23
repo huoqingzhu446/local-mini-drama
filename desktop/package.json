@@ -10,15 +10,18 @@
     "start": "electron .",
     "build:front": "cd ../frontweb && npm run build",
     "copy-front": "node scripts/copy-front.js",
+    "prepare-remotion-runtime": "node scripts/prepare-remotion-runtime.js",
     "clean:unpacked": "node scripts/clean-win-unpacked.js",
-    "pack": "npm run prepare-backend && npm run build:front && npm run copy-front && npm run clean:unpacked && electron-builder --dir",
-    "dist": "npm run prepare-backend && npm run build:front && npm run copy-front && npm run clean:unpacked && electron-builder --win",
+    "pack": "npm run prepare-backend && npm run prepare-remotion-runtime && npm run build:front && npm run copy-front && npm run clean:unpacked && electron-builder --dir",
+    "dist": "npm run prepare-backend && npm run prepare-remotion-runtime && npm run build:front && npm run copy-front && npm run clean:unpacked && electron-builder --win",
     "dist:cn": "node scripts/dist-cn.js",
     "dist:mac": "bash dist-mac.sh",
     "postinstall": "node scripts/copy-backend.js && electron-builder install-app-deps",
     "prepare-backend": "node scripts/copy-backend.js"
   },
   "dependencies": {
+    "@remotion/bundler": "4.0.491",
+    "@remotion/renderer": "4.0.491",
     "@volcengine/openapi": "^1.36.1",
     "adm-zip": "^0.5.16",
     "better-sqlite3": "^11.6.0",
@@ -28,6 +31,9 @@
     "jsonrepair": "^3.13.3",
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "remotion": "4.0.491",
     "sharp": "^0.34.5",
     "uuid": "^10.0.0"
   },
@@ -46,31 +52,56 @@
       "main.js",
       "package.json",
       "backend-app/**/*",
-      "node_modules/**/*"
+      "node_modules/**/*",
+      "!node_modules/.remotion/**"
     ],
     "asarUnpack": [
       "node_modules/better-sqlite3/**",
-      "node_modules/sharp/**"
+      "node_modules/sharp/**",
+      "node_modules/@remotion/compositor-*/**",
+      "node_modules/@remotion/renderer/**",
+      "node_modules/@remotion/bundler/**",
+      "node_modules/esbuild/**",
+      "node_modules/@esbuild/**",
+      "node_modules/@rspack/binding/**",
+      "node_modules/@rspack/binding*/**",
+      "remotion-runtime/**"
     ],
     "extraResources": [
       {
         "from": "frontweb-dist",
         "to": "frontweb/dist",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../example_drama",
         "to": "example_drama",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../backend-node/tools/ffmpeg",
         "to": "ffmpeg",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "remotion-runtime",
+        "to": "remotion-runtime",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": null,
       "signAndEditExecutable": false
     },

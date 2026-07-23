@@ -88,6 +88,21 @@ function ensureColumns(database, table, columns) {
   }
 }
 
+// A few legacy desktop databases were created without running every SQL
+// migration (for example, when an update was interrupted).  Keep the paper
+// tables self-healing in the same way as the older business tables.  We only
+// replay CREATE statements here; ALTER statements are handled by the normal
+// migration runner/ensureColumns path and remain idempotent.
+function ensurePaperTables(database) {
+  const migrationPath = path.join(__dirname, '..', '..', 'migrations', '30_paper_layer_animation.sql');
+  if (!fs.existsSync(migrationPath)) return;
+  const sql = fs.readFileSync(migrationPath, 'utf8');
+  for (const statement of sql.split(';').map((item) => item.trim()).filter(Boolean)) {
+    if (!/^CREATE\s+(?:TABLE|INDEX)/i.test(statement)) continue;
+    try { database.exec(`${statement};`); } catch (_) {}
+  }
+}
+
 /**
  * 全量兜底补列：覆盖所有表的所有业务列。
  * 对于旧数据库（用更早版本的 init 脚本创建、缺少部分列），
@@ -97,6 +112,7 @@ function ensureColumns(database, table, columns) {
  * 所以原 schema 中 NOT NULL 的列在这里用 DEFAULT 兜底。
  */
 function ensureAllColumns(database) {
+  ensurePaperTables(database);
   // --- dramas ---
   ensureColumns(database, 'dramas', [
     { name: 'title',          type: 'TEXT NOT NULL DEFAULT \'\'' },
@@ -181,6 +197,7 @@ function ensureAllColumns(database) {
     { name: 'last_frame_image_id',  type: 'INTEGER' },
     { name: 'last_frame_image_url', type: 'TEXT' },
     { name: 'last_frame_local_path', type: 'TEXT' },
+    { name: 'video_render_mode', type: "TEXT DEFAULT 'ai_video'" },
     { name: 'status',            type: 'TEXT DEFAULT \'draft\'' },
     { name: 'created_at',        type: 'TEXT' },
     { name: 'updated_at',        type: 'TEXT' },
@@ -384,6 +401,11 @@ function ensureAllColumns(database) {
     { name: 'scene_id',             type: 'INTEGER' },
     { name: 'completed_at',         type: 'TEXT' },
     { name: 'error_msg',            type: 'TEXT' },
+    { name: 'generation_kind',      type: "TEXT DEFAULT 'ai'" },
+    { name: 'paper_composition_id', type: 'INTEGER' },
+    { name: 'render_snapshot',      type: 'TEXT' },
+    { name: 'render_hash',          type: 'TEXT' },
+    { name: 'renderer_version',     type: 'TEXT' },
     { name: 'created_at',           type: 'TEXT' },
     { name: 'updated_at',           type: 'TEXT' },
     { name: 'deleted_at',           type: 'TEXT' },

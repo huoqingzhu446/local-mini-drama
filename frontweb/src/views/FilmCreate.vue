@@ -1665,6 +1665,8 @@
                       :style="getSelectedStyle()"
                       :aspect-ratio="projectAspectRatio"
                       :quality="projectImageQuality"
+                      multiple
+                      :max-count="storyboardCodexGenerateMaxCount(sb)"
                       :disabled="storyboardMainRefLimitReached(sb)"
                       @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                       @preview="openImagePreview"
@@ -1711,6 +1713,8 @@
                       :style="getSelectedStyle()"
                       :aspect-ratio="projectAspectRatio"
                       :quality="projectImageQuality"
+                      multiple
+                      :max-count="storyboardCodexGenerateMaxCount(sb)"
                       :disabled="storyboardMainRefLimitReached(sb)"
                       @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                       @preview="openImagePreview"
@@ -1783,6 +1787,8 @@
                   :style="getSelectedStyle()"
                   :aspect-ratio="projectAspectRatio"
                   :quality="projectImageQuality"
+                  multiple
+                  :max-count="storyboardCodexGenerateMaxCount(sb)"
                   :disabled="storyboardMainRefLimitReached(sb)"
                   @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                   @preview="openImagePreview"
@@ -1823,6 +1829,16 @@
                 >
                   {{ getSbVideoError(sb.id) || '视频地址无效，请重新生成' }}
                 </div>
+                <button
+                  v-if="getSbVideo(sb.id)"
+                  type="button"
+                  class="sb-video-delete-btn"
+                  title="删除当前视频"
+                  aria-label="删除当前视频"
+                  @click="onRemoveSbVideo(sb)"
+                >
+                  <el-icon><Delete /></el-icon>
+                </button>
                 <span v-if="isSbVideoGenerating(sb.id)" class="sb-video-regenerating-overlay">
                   <el-icon class="is-loading"><Loading /></el-icon>
                   正在重新生成...
@@ -1847,6 +1863,15 @@
                       @click="onGenerateSbVideo(sb)"
                     >
                       生成分镜视频
+                    </el-button>
+                    <el-button
+                      type="warning"
+                      plain
+                      size="small"
+                      class="sb-paper-editor-btn"
+                      @click="openPaperLayerEditor(sb)"
+                    >
+                      纸片分层
                     </el-button>
                     <template v-if="shouldShowSbVideoImageActions(sb)">
                       <template v-if="shouldUseSbFirstLastQuickImage(sb)">
@@ -1910,6 +1935,8 @@
                         :style="getSelectedStyle()"
                         :aspect-ratio="projectAspectRatio"
                         :quality="projectImageQuality"
+                        multiple
+                        :max-count="storyboardCodexGenerateMaxCount(sb)"
                         :disabled="storyboardMainRefLimitReached(sb)"
                         @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                         @preview="openImagePreview"
@@ -1948,7 +1975,7 @@
               </div>
               <!-- 视频历史条：有多条历史时显示，点击可切换 -->
               <div v-if="getVideoStripItems(sb.id).length" class="sb-videos-strip">
-                <el-tooltip content="历史视频：点击可切换为当前视频" placement="top" :show-arrow="false">
+                <el-tooltip content="历史视频：点击可切换为当前视频，悬停缩略图右上角 × 可删除" placement="top" :show-arrow="false">
                   <el-icon class="sb-strip-hint-icon"><InfoFilled /></el-icon>
                 </el-tooltip>
                 <div
@@ -1960,6 +1987,13 @@
                 >
                   <video :src="item.src" preload="metadata" class="sb-video-thumb-player" />
                   <span class="sb-video-thumb-label">{{ item.label }}</span>
+                  <button
+                    type="button"
+                    class="extra-thumb-remove sb-video-thumb-remove"
+                    title="删除历史视频"
+                    aria-label="删除历史视频"
+                    @click.stop="onRemoveSbVideo(sb, item.video)"
+                  >×</button>
                 </div>
               </div>
               <div v-if="getSbVideo(sb.id)" class="sb-video-actions">
@@ -1983,11 +2017,18 @@
                     :style="getSelectedStyle()"
                     :aspect-ratio="projectAspectRatio"
                     :quality="projectImageQuality"
+                    multiple
+                    :max-count="storyboardCodexGenerateMaxCount(sb)"
+                    :disabled="storyboardMainRefLimitReached(sb)"
                     @used="onCodexStoryboardImageUsed($event, sb, 'main')"
                     @preview="openImagePreview"
                   />
                 </template>
                 <el-button size="small" :loading="isSbVideoGenerating(sb.id)" :disabled="!sbCanSubmitVideo(sb) || isSbVideoGenerating(sb.id)" @click="onGenerateSbVideo(sb)">重新生成</el-button>
+                <el-button size="small" type="danger" plain @click="onRemoveSbVideo(sb)">
+                  <el-icon><Delete /></el-icon>
+                  删除视频
+                </el-button>
                 <el-tooltip v-if="getNextStoryboard(sb.id)" content="提取本视频尾帧，设为下一个分镜的首帧" placement="top">
                   <el-button size="small" :loading="linkingTailFrameIds.has(sb.id)" @click="onLinkTailFrameToNext(sb)">尾帧衔接</el-button>
                 </el-tooltip>
@@ -4969,6 +5010,11 @@ function storyboardMainRefLimitReached(sb) {
   return storyboardMainRefSlotsRemaining(sb) <= 0
 }
 
+function storyboardCodexGenerateMaxCount(sb) {
+  if (gridMode.value !== 'single') return 1
+  return storyboardMainRefSlotsRemaining(sb)
+}
+
 function storyboardGenerateCountOptions(sb) {
   const remaining = storyboardMainRefSlotsRemaining(sb)
   if (gridMode.value !== 'single' || remaining <= 1) return []
@@ -5059,6 +5105,53 @@ function onSelectSbMainVideo(sb, video) {
     local_path: video.local_path || undefined,
   }).catch(e => console.warn('[主视频] 保存后端失败', e))
 }
+
+/** 删除当前或历史分镜视频；删除当前视频后自动回退到剩余历史视频。 */
+async function onRemoveSbVideo(sb, video = null) {
+  if (!sb?.id) return
+  const target = video || getSbVideo(sb.id)
+  if (!target?.id) return
+  const isCurrent = getSbVideo(sb.id)?.id === target.id
+  const label = isCurrent ? '当前视频' : '历史视频'
+  try {
+    await ElMessageBox.confirm(`确定删除这条${label}吗？此操作不可恢复。`, `删除${label}`, {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+      distinguishCancelAndClose: true,
+    })
+    await videosAPI.delete(target.id)
+
+    const current = Array.isArray(sbVideos.value[sb.id]) ? sbVideos.value[sb.id] : []
+    const remaining = current.filter((item) => Number(item.id) !== Number(target.id))
+    sbVideos.value = { ...sbVideos.value, [sb.id]: remaining }
+
+    if (isCurrent) {
+      const nextSelected = { ...sbSelectedVideoId.value }
+      delete nextSelected[sb.id]
+      sbSelectedVideoId.value = nextSelected
+      const nextVideo = getSbAllVideos(sb.id)[0] || null
+      if (nextVideo) {
+        onSelectSbMainVideo(sb, nextVideo)
+      } else {
+        // 后端会同步清理绑定；这里同步更新本地分镜，避免合成流程继续读取旧地址。
+        const patch = { video_url: null, local_path: null }
+        const updated = await storyboardsAPI.update(sb.id, patch)
+        const list = store.currentEpisode?.storyboards
+        const row = Array.isArray(list) ? list.find((item) => Number(item.id) === Number(sb.id)) : null
+        if (row) Object.assign(row, updated || patch)
+      }
+    }
+
+    await loadSingleStoryboardMedia(sb.id)
+    ElMessage.success(`${label}已删除`)
+  } catch (err) {
+    if (err !== 'cancel' && err !== 'close') {
+      ElMessage.error(err?.message || '删除失败')
+    }
+  }
+}
+
 /** 取该分镜最近一次视频生成的错误信息（从 API 返回的记录或本地即时错误） */
 function getSbVideoError(storyboardId) {
   if (sbVideoErrors.value[storyboardId]) return sbVideoErrors.value[storyboardId]
@@ -8001,6 +8094,13 @@ async function onRegenerateLayoutDescription(sb) {
   } finally {
     regeneratingLayoutSbIds.delete(sb.id)
   }
+}
+
+function openPaperLayerEditor(sb) {
+  if (!sb?.id || !dramaId.value) return
+  const query = { storyboard_id: String(sb.id) }
+  if (currentEpisodeId.value) query.episode = String(currentEpisodeId.value)
+  router.push({ path: `/film/${dramaId.value}/paper`, query })
 }
 
 async function onGenerateSbVideo(sb) {
@@ -11846,6 +11946,7 @@ html.light .sb-ctrl-mode-btn.el-button:hover {
   padding-top: 6px;
 }
 .sb-video-area {
+  position: relative;
   flex: 1;
   min-height: 200px;
   background: linear-gradient(145deg, #1a1b24 0%, #1e1f28 60%, #1c1d26 100%);
@@ -11895,6 +11996,28 @@ html.light .sb-video-placeholder {
   width: 100%;
   max-height: 240px;
   border-radius: 8px;
+}
+.sb-video-delete-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 7px;
+  color: #fff;
+  background: rgba(24, 24, 27, 0.72);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+}
+.sb-video-delete-btn:hover {
+  border-color: rgba(248, 113, 113, 0.85);
+  background: rgba(185, 28, 28, 0.88);
 }
 .sb-video-actions {
   display: flex;
@@ -11977,6 +12100,20 @@ html.light .sb-video-placeholder {
   text-align: center;
   padding: 1px 0;
   pointer-events: none;
+}
+.sb-video-thumb-remove {
+  z-index: 2;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  padding: 0;
+  border: 0;
+  font-size: 12px;
+}
+.sb-video-thumb:hover .sb-video-thumb-remove {
+  opacity: 1;
 }
 .sb-video-prompt-label {
   display: flex;

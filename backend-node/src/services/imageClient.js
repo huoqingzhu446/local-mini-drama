@@ -233,6 +233,56 @@ function fixAgnesImageSize(size) {
   return best;
 }
 
+const GPT_IMAGE_SUPPORTED_SIZES = new Set([
+  '1024x1024',
+  '1024x1536',
+  '1536x1024',
+  'auto',
+]);
+
+function isGptImageModel(model) {
+  return /^gpt-image(?:-|$)/i.test(String(model || '').trim());
+}
+
+/**
+ * GPT Image 不接受 DALL·E 的 1792x1024 / 1024x1792 等尺寸。
+ * 项目仍使用统一的业务尺寸，因此在供应商边界按横、竖、方三类映射到官方枚举。
+ */
+function normalizeGptImageSize(size) {
+  const raw = String(size || '').trim().toLowerCase().replace(/\*/g, 'x');
+  if (!raw) return '';
+  if (GPT_IMAGE_SUPPORTED_SIZES.has(raw)) return raw;
+
+  const pixelMatch = raw.match(/^(\d+)\s*x\s*(\d+)$/);
+  const ratioMatch = raw.match(/^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)$/);
+  const width = pixelMatch ? Number(pixelMatch[1]) : (ratioMatch ? Number(ratioMatch[1]) : 0);
+  const height = pixelMatch ? Number(pixelMatch[2]) : (ratioMatch ? Number(ratioMatch[2]) : 0);
+  if (!width || !height) return 'auto';
+
+  const ratio = width / height;
+  if (ratio > 1.05) return '1536x1024';
+  if (ratio < 0.95) return '1024x1536';
+  return '1024x1024';
+}
+
+/** 将项目的 DALL·E 画质值转换为 GPT Image 支持的枚举。 */
+function normalizeGptImageQuality(quality) {
+  const raw = String(quality || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (raw === 'hd' || raw === 'high_quality') return 'high';
+  if (raw === 'standard' || raw === 'default') return 'medium';
+  if (['low', 'medium', 'high', 'auto'].includes(raw)) return raw;
+  return '';
+}
+
+/** GPT Image 没有独立 negative_prompt 字段，将约束合并进正向提示词。 */
+function mergeGptImageNegativePrompt(prompt, negativePrompt) {
+  const positive = String(prompt || '').trimEnd();
+  const negative = String(negativePrompt || '').trim();
+  if (!negative) return positive;
+  return `${positive}\n\nAvoid the following: ${negative}`;
+}
+
 function dashScopeSize(size) {
   if (!size || typeof size !== 'string') return '1280*1280';
   const s = String(size).trim().toLowerCase().replace(/x/g, '*');
@@ -1507,6 +1557,7 @@ async function callImageApi(db, log, opts) {
   const url = buildImageUrl(config);
   const isVolc = protocol === 'volcengine';
   const isAgnes = isAgnesImageConfig(config, model);
+  const isGptImage = isGptImageModel(model);
   // doubao-seedream 系列模型（含通过自定义代理使用的场景）：使用 volcengine 图片 API 规范
   const isSeedream = isVolc || /seedream|doubao/i.test(model);
   // 解析参考图：本地路径/localhost URL → base64，公网 URL → 直接传
@@ -1522,21 +1573,28 @@ async function callImageApi(db, log, opts) {
 
   // doubao-seedream-4-5+ 要求最低 3686400 像素，不足时等比放大；Agnes 需映射到官方支持尺寸
   let effectiveSize = size;
-  if (isSeedream && size) effectiveSize = fixSeedreamSize(size);
+  if (isGptImage && size) effectiveSize = normalizeGptImageSize(size);
+  else if (isSeedream && size) effectiveSize = fixSeedreamSize(size);
   else if (isAgnes && size) effectiveSize = fixAgnesImageSize(size);
+  const effectiveQuality = isGptImage ? normalizeGptImageQuality(rawQuality) : quality;
+  const requestPrompt = isGptImage
+    ? mergeGptImageNegativePrompt(effectivePrompt, mergedNegativePrompt)
+    : effectivePrompt;
 
   const body = {
     model,
-    prompt: effectivePrompt,
+    prompt: requestPrompt,
     // doubao-seedream API 不使用 n，其他 OpenAI 兼容接口保留
     ...(!isSeedream ? { n: 1 } : {}),
     ...(effectiveSize ? { size: effectiveSize } : {}),
-    ...(quality ? { quality } : {}),
+    ...(effectiveQuality ? { quality: effectiveQuality } : {}),
+    // Cockpit Codex API 已验证可稳定返回 b64_json，避免第三方 URL 生命周期差异。
+    ...(isGptImage ? { response_format: 'b64_json' } : {}),
     // volcengine 原生或 doubao-seedream 模型均需关闭水印（默认为 true）
     ...((isVolc || isSeedream) ? { watermark: false } : {}),
     // 多张参考图时加 negative_prompt，防止模型把参考图拼成左右分割的合图
     // Doubao/Seedream 原生支持；通用 OpenAI-compat 接口大多也会接受该字段（不支持的会忽略）
-    ...(mergedNegativePrompt ? { negative_prompt: mergedNegativePrompt } : {}),
+    ...(!isGptImage && mergedNegativePrompt ? { negative_prompt: mergedNegativePrompt } : {}),
     // 参考图字段：volcengine doubao-seedream API 规范使用 image（数组），见官方文档
     ...(resolvedRefs.length > 0 && !isAgnes ? { image: resolvedRefs } : {}),
     // Agnes Image 2.x：参考图放在 extra_body.image
@@ -1549,7 +1607,9 @@ async function callImageApi(db, log, opts) {
     has_ref_images: resolvedRefs.length > 0,
     size: effectiveSize,
     original_size: size !== effectiveSize ? size : undefined,
+    quality: effectiveQuality || undefined,
     is_agnes: isAgnes,
+    is_gpt_image: isGptImage,
   });
   const openaiCompatHeaders = {
     'Content-Type': 'application/json',
@@ -2038,6 +2098,10 @@ module.exports = {
   refListHasCanonical,
   fixAgnesImageSize,
   isAgnesImageConfig,
+  isGptImageModel,
+  normalizeGptImageSize,
+  normalizeGptImageQuality,
+  mergeGptImageNegativePrompt,
   /** 图床 URL 缓存（image_proxy_cache），供 SD2 认证等复用 */
   getProxyCache,
   getProxyCacheValidated,

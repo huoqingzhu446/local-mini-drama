@@ -23,6 +23,28 @@ for (const dir of dirsToCopy) {
   }
 }
 
+// Fail early when a packaging copy accidentally omits the Remotion entrypoint
+// or its public media. These files are loaded from backend-app at runtime and
+// must be present even though the npm modules themselves live in desktop/
+// node_modules.
+const requiredRemotionFiles = [
+  path.join(dest, 'scripts', 'render-paper-storyboard.mjs'),
+  path.join(dest, 'src', 'paper-renderer', 'entry.jsx'),
+  path.join(dest, 'src', 'paper-renderer', 'public'),
+];
+const missingRemotionFiles = requiredRemotionFiles.filter((file) => !fs.existsSync(file));
+if (missingRemotionFiles.length) {
+  console.error('Remotion renderer files missing after backend copy:', missingRemotionFiles);
+  process.exit(1);
+}
+fs.writeFileSync(path.join(dest, 'remotion-runtime.json'), `${JSON.stringify({
+  renderer: 'remotion',
+  renderer_version: '4.0.491',
+  entrypoint: 'scripts/render-paper-storyboard.mjs',
+  public_dir: 'src/paper-renderer/public',
+  generated_at: new Date().toISOString(),
+}, null, 2)}\n`);
+
 // 合并 desktop 自带的初始迁移（保证 01_init、02_add_default_model 等存在）
 const migrationsDest = path.join(dest, 'migrations');
 const initialMigrations = path.join(__dirname, 'initial-migrations');

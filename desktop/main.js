@@ -146,6 +146,82 @@ function ensureFfmpeg(backendCwd) {
   }
 }
 
+function remotionCompositorPackageName() {
+  if (process.platform === 'darwin') return `@remotion/compositor-darwin-${process.arch}`;
+  if (process.platform === 'win32') return `@remotion/compositor-win32-${process.arch}-msvc`;
+  return `@remotion/compositor-linux-${process.arch}-gnu`;
+}
+
+function esbuildPackageName() {
+  const platform = process.platform === 'win32' ? 'win32' : process.platform;
+  return `@esbuild/${platform}-${process.arch}`;
+}
+
+function findBundledExecutable(root, names, depth = 0) {
+  if (!root || depth > 6 || !fs.existsSync(root)) return null;
+  let stat;
+  try { stat = fs.statSync(root); } catch (_) { return null; }
+  if (stat.isFile() && names.includes(path.basename(root))) return root;
+  if (!stat.isDirectory()) return null;
+  for (const name of names) {
+    const direct = path.join(root, name);
+    if (fs.existsSync(direct)) return direct;
+  }
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch (_) { return null; }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === 'node_modules') continue;
+    const found = findBundledExecutable(path.join(root, entry.name), names, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Point Remotion at files that electron-builder puts outside app.asar.
+ * JS modules can be loaded from the asar, but Chromium/compositor/esbuild
+ * binaries must be real filesystem paths. The render worker also starts via
+ * process.execPath, so Electron (development or packaged) needs
+ * ELECTRON_RUN_AS_NODE for that child only (inherited through its environment).
+ */
+function configureRemotionRuntime() {
+  const packageName = remotionCompositorPackageName();
+  const packagePathCandidates = [
+    process.env.REMOTION_BINARIES_DIRECTORY,
+    app.isPackaged ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', packageName) : null,
+    app.isPackaged ? null : path.join(__dirname, 'node_modules', packageName),
+  ].filter(Boolean);
+  const compositorDir = packagePathCandidates.find((candidate) => fs.existsSync(path.join(candidate, process.platform === 'win32' ? 'remotion.exe' : 'remotion')));
+  if (compositorDir && !process.env.REMOTION_BINARIES_DIRECTORY) process.env.REMOTION_BINARIES_DIRECTORY = compositorDir;
+
+  // @remotion/bundler delegates JSX transforms to esbuild. Its default
+  // require.resolve() path can still point into app.asar, so prefer the
+  // unpacked platform binary explicitly when electron-builder provided it.
+  if (!process.env.ESBUILD_BINARY_PATH) {
+    const esbuildBinaryName = process.platform === 'win32' ? 'esbuild.exe' : 'bin/esbuild';
+    const esbuildCandidates = [
+      app.isPackaged ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', esbuildPackageName(), esbuildBinaryName) : null,
+      app.isPackaged ? null : path.join(__dirname, 'node_modules', esbuildPackageName(), esbuildBinaryName),
+    ].filter(Boolean);
+    const esbuildBinary = esbuildCandidates.find((candidate) => fs.existsSync(candidate));
+    if (esbuildBinary) process.env.ESBUILD_BINARY_PATH = esbuildBinary;
+  }
+
+  const runtimeRoot = app.isPackaged
+    ? path.join(process.resourcesPath, 'remotion-runtime')
+    : path.join(__dirname, 'remotion-runtime');
+  process.env.REMOTION_RUNTIME_ROOT = runtimeRoot;
+  if (!process.env.REMOTION_BROWSER_EXECUTABLE) {
+    const browserRoot = path.join(runtimeRoot, 'browser', `${process.platform}-${process.arch}`);
+    const browserNames = process.platform === 'win32'
+      ? ['chrome-headless-shell.exe', 'headless_shell.exe', 'chrome.exe']
+      : ['chrome-headless-shell', 'headless_shell', 'chrome', 'Google Chrome for Testing'];
+    const bundledBrowser = findBundledExecutable(browserRoot, browserNames);
+    if (bundledBrowser) process.env.REMOTION_BROWSER_EXECUTABLE = bundledBrowser;
+  }
+  writeMainLog(`remotion runtime compositor=${process.env.REMOTION_BINARIES_DIRECTORY || 'auto'} browser=${process.env.REMOTION_BROWSER_EXECUTABLE || 'system/cache'} worker_electron_run_as_node=${process.versions.electron ? '1' : '0'}`);
+}
+
 function getWebDistPath() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, 'frontweb', 'dist');
@@ -210,6 +286,7 @@ async function startBackend() {
   const backendCwd = getBackendCwd();
   ensureBackendCwd(backendCwd);
   ensureFfmpeg(backendCwd);
+  configureRemotionRuntime();
   process.env.WEB_DIST_PATH = getWebDistPath();
   if (app.isPackaged) {
     process.env.LOG_FILE = path.join(backendCwd, 'logs', 'app.log');

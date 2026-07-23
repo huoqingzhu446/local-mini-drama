@@ -28,6 +28,12 @@ const router = createRouter({
       meta: { title: '画布模式' }
     },
     {
+      path: '/film/:id/paper',
+      name: 'paper-layer-animation',
+      component: () => import('@/views/PaperLayerAnimation.vue'),
+      meta: { title: '纸片分层动画' }
+    },
+    {
       path: '/ai-config',
       name: 'ai-config',
       component: () => import('@/views/AiConfig.vue'),

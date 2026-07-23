@@ -64,6 +64,10 @@ function rowToItem(r) {
     local_path: r.local_path,
     status: r.status,
     task_id: r.task_id,
+    generation_kind: r.generation_kind || 'ai',
+    paper_composition_id: r.paper_composition_id,
+    render_hash: r.render_hash,
+    renderer_version: r.renderer_version,
     error_msg: r.error_msg,
     created_at: r.created_at,
     updated_at: r.updated_at,
@@ -497,9 +501,149 @@ async function processVideoGeneration(db, log, videoGenId) {
 }
 
 function deleteById(db, log, id) {
+  const videoId = Number(id);
   const now = new Date().toISOString();
-  const result = db.prepare('UPDATE video_generations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now, Number(id));
+  // 删除当前分镜视频时同步解除 storyboards 绑定，避免合成流程继续引用已删除地址。
+  // 仅在分镜仍指向这条视频时清理，防止误清理后来生成并绑定的新视频。
+  try {
+    const row = db.prepare(
+      'SELECT storyboard_id, video_url, local_path FROM video_generations WHERE id = ? AND deleted_at IS NULL'
+    ).get(videoId);
+    if (row?.storyboard_id != null) {
+      const matchClauses = [];
+      const matchParams = [];
+      if (row.video_url) {
+        matchClauses.push('video_url = ?');
+        matchParams.push(row.video_url);
+      }
+      if (row.local_path) {
+        matchClauses.push('local_path = ?');
+        matchParams.push(row.local_path);
+      }
+      if (matchClauses.length > 0) {
+        db.prepare(
+          `UPDATE storyboards
+           SET video_url = NULL, local_path = NULL, updated_at = ?
+           WHERE id = ? AND (${matchClauses.join(' OR ')})`
+        ).run(now, row.storyboard_id, ...matchParams);
+      }
+    }
+  } catch (e) {
+    try { log?.warn?.('[video delete] 清除分镜绑定失败', { id: videoId, err: e.message }); } catch (_) {}
+  }
+  const result = db.prepare('UPDATE video_generations SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL').run(now, videoId);
   return result.changes > 0;
+}
+
+/**
+ * Finalize a video that was rendered locally. This path intentionally never
+ * calls videoClient and keeps the video row, storyboard pointer, paper
+ * composition and async task in one SQLite transaction.
+ */
+function finalizeLocalVideoGeneration(db, log, input = {}) {
+  const videoGenerationId = Number(input.video_generation_id);
+  const compositionId = Number(input.paper_composition_id);
+  const fail = (code, message, details) => {
+    const error = new Error(message);
+    error.code = code;
+    error.details = details;
+    return error;
+  };
+  if (!Number.isInteger(videoGenerationId) || videoGenerationId <= 0 || !Number.isInteger(compositionId) || compositionId <= 0) {
+    throw fail('LOCAL_VIDEO_INVALID_ARGUMENT', '本地视频回写缺少有效记录 ID');
+  }
+  if (!String(input.video_url || '').trim() || !String(input.local_path || '').trim() || !String(input.render_hash || '').trim()) {
+    throw fail('LOCAL_VIDEO_INVALID_ARGUMENT', '本地视频回写缺少 video_url、local_path 或 render_hash');
+  }
+  const row = db.prepare('SELECT * FROM video_generations WHERE id = ? AND deleted_at IS NULL').get(videoGenerationId);
+  if (!row) throw fail('LOCAL_VIDEO_NOT_FOUND', 'Local video generation record not found');
+  if ((row.generation_kind || 'ai') !== 'paper_layered') throw fail('LOCAL_VIDEO_KIND_INVALID', 'Local finalizer only accepts paper_layered records');
+  if (Number(row.paper_composition_id) !== compositionId) {
+    throw fail('LOCAL_VIDEO_OWNERSHIP_MISMATCH', '视频记录与纸片合成不匹配', { video_generation_id: videoGenerationId, paper_composition_id: compositionId });
+  }
+  const composition = db.prepare('SELECT * FROM paper_compositions WHERE id = ? AND deleted_at IS NULL').get(compositionId);
+  if (!composition || Number(composition.storyboard_id) !== Number(row.storyboard_id)) throw fail('LOCAL_VIDEO_OWNERSHIP_MISMATCH', 'Paper composition/video ownership mismatch');
+  if (row.render_hash && row.render_hash !== input.render_hash) {
+    throw fail('LOCAL_VIDEO_RENDER_HASH_CONFLICT', '视频记录已有不同的 render hash', { expected: row.render_hash, actual: input.render_hash });
+  }
+
+  const serializedSnapshot = typeof input.render_snapshot === 'string'
+    ? input.render_snapshot
+    : JSON.stringify(input.render_snapshot || {});
+  const taskResult = {
+    ...(input.task_result && typeof input.task_result === 'object' ? input.task_result : {}),
+    video_generation_id: videoGenerationId,
+    composition_id: compositionId,
+    video_url: input.video_url,
+    local_path: input.local_path,
+    render_hash: input.render_hash,
+    status: 'completed',
+  };
+  let idempotent = false;
+  const tx = db.transaction(() => {
+    // Re-read inside the transaction so two retrying workers converge on the
+    // same completed row instead of overwriting each other's artifact.
+    const currentComposition = db.prepare('SELECT * FROM paper_compositions WHERE id = ? AND deleted_at IS NULL').get(compositionId);
+    if (!currentComposition) throw fail('LOCAL_VIDEO_OWNERSHIP_MISMATCH', '纸片合成已被删除或不存在', { paper_composition_id: compositionId });
+    const current = db.prepare('SELECT * FROM video_generations WHERE id = ? AND deleted_at IS NULL').get(videoGenerationId);
+    if (!current) throw fail('LOCAL_VIDEO_NOT_FOUND', 'Local video generation record not found');
+    if ((current.generation_kind || 'ai') !== 'paper_layered'
+      || Number(current.paper_composition_id) !== compositionId
+      || Number(current.storyboard_id) !== Number(currentComposition.storyboard_id)) {
+      throw fail('LOCAL_VIDEO_OWNERSHIP_MISMATCH', '视频记录与纸片合成不匹配', { video_generation_id: videoGenerationId, paper_composition_id: compositionId });
+    }
+    if (current.render_hash && current.render_hash !== input.render_hash) {
+      throw fail('LOCAL_VIDEO_RENDER_HASH_CONFLICT', '视频记录已有不同的 render hash', { expected: current.render_hash, actual: input.render_hash });
+    }
+    if (current.status === 'completed') {
+      const sameArtifact = current.render_hash === input.render_hash
+        && current.video_url === input.video_url
+        && current.local_path === input.local_path;
+      if (!sameArtifact) throw fail('LOCAL_VIDEO_FINALIZE_CONFLICT', '本地视频记录已完成且 artifact 不一致', { video_generation_id: videoGenerationId });
+      idempotent = true;
+      // A crash could theoretically commit the video row before the task
+      // update. Repair only that missing task state; never rewrite completed
+      // video/storyboard timestamps on an idempotent retry.
+      if (current.task_id) {
+        const task = db.prepare('SELECT status FROM async_tasks WHERE id = ? AND deleted_at IS NULL').get(current.task_id);
+        if (task && task.status !== 'completed') taskService.updateTaskResult(db, current.task_id, taskResult);
+      }
+      return;
+    }
+    const now = new Date().toISOString();
+    const update = db.prepare(
+      `UPDATE video_generations SET status = 'completed', video_url = ?, local_path = ?, completed_at = ?, updated_at = ?,
+       render_snapshot = ?, render_hash = ?, renderer_version = ? WHERE id = ? AND status <> 'completed'`
+    ).run(input.video_url, input.local_path, now, now, serializedSnapshot, input.render_hash, input.renderer_version, videoGenerationId);
+    if (!update.changes) throw fail('LOCAL_VIDEO_FINALIZE_CONFLICT', '本地视频记录已被其他任务完成', { video_generation_id: videoGenerationId });
+    const storyboardUpdate = db.prepare('UPDATE storyboards SET video_url = ?, local_path = ?, updated_at = ? WHERE id = ?')
+      .run(input.video_url, input.local_path, now, current.storyboard_id);
+    if (!storyboardUpdate.changes) throw fail('LOCAL_VIDEO_OWNERSHIP_MISMATCH', '关联分镜不存在，无法完成本地视频回写', { storyboard_id: current.storyboard_id });
+    const compositionUpdate = db.prepare("UPDATE paper_compositions SET status = 'rendered', last_proof_hash = ?, renderer_version = ?, updated_at = ? WHERE id = ?")
+      .run(input.last_proof_hash || null, input.renderer_version || null, now, compositionId);
+    if (!compositionUpdate.changes) throw fail('LOCAL_VIDEO_OWNERSHIP_MISMATCH', '纸片合成已被删除，无法完成本地视频回写', { paper_composition_id: compositionId });
+    if (current.task_id) {
+      const task = db.prepare('SELECT id FROM async_tasks WHERE id = ? AND deleted_at IS NULL').get(current.task_id);
+      if (!task) throw fail('LOCAL_VIDEO_TASK_MISSING', '本地视频异步任务不存在', { task_id: current.task_id });
+      taskService.updateTaskResult(db, current.task_id, taskResult);
+    }
+  });
+  try {
+    tx();
+  } catch (error) {
+    // The success updates remain all-or-nothing. On the error path, persist a
+    // terminal task state outside the rolled-back transaction so callers do
+    // not leave an orphaned processing task after a partial DB failure.
+    try {
+      if (row.task_id) {
+        const task = db.prepare('SELECT status FROM async_tasks WHERE id = ? AND deleted_at IS NULL').get(row.task_id);
+        if (task && task.status !== 'completed') taskService.updateTaskError(db, row.task_id, error.message || '本地视频回写失败');
+      }
+    } catch (_) {}
+    throw error;
+  }
+  if (log) log.info('Local paper video generation completed', { video_generation_id: videoGenerationId, composition_id: compositionId, render_hash: input.render_hash, idempotent });
+  return getById(db, videoGenerationId);
 }
 
 module.exports = {
@@ -508,4 +652,5 @@ module.exports = {
   deleteById,
   processVideoGeneration,
   resumeProcessingVideoGenerations,
+  finalizeLocalVideoGeneration,
 };

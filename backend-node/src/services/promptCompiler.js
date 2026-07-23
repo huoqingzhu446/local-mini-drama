@@ -242,6 +242,14 @@ function rawSource(entityType, row, frameType) {
       cached: !!row.prompt,
     };
   }
+  if (entityType === 'paper_asset') {
+    return {
+      key: row.prompt ? 'paper_asset_prompt' : 'paper_asset_key',
+      text: String(row.prompt || `${row.asset_type || 'paper asset'} ${row.asset_key || row.id || ''}`).trim(),
+      state: 'current',
+      cached: false,
+    };
+  }
   if (entityType === 'scene') {
     if (frameType === 'reference_grid' && row.polished_prompt_nine) return { key: 'polished_prompt_nine', text: String(row.polished_prompt_nine).trim(), signature: row.polished_prompt_nine_style_signature, state: row.prompt_state || 'current', cached: true };
     if (row.polished_prompt_single) return { key: 'polished_prompt_single', text: String(row.polished_prompt_single).trim(), signature: row.polished_prompt_single_style_signature, state: row.prompt_state || 'current', cached: true };
@@ -370,6 +378,10 @@ function contentBlock(entityType, row, source, frameType) {
   const lines = [`CONTENT / ACTION (use as factual story content; do not replace the art direction):`, source.text || ''];
   if (entityType === 'character' && row.name) lines.push(`Subject name: ${String(row.name).trim()}`);
   if (entityType === 'prop' && row.name) lines.push(`Object name: ${String(row.name).trim()}`);
+  if (entityType === 'paper_asset') {
+    if (row.asset_type) lines.push(`Paper asset type: ${String(row.asset_type).trim()}`);
+    if (row.asset_key) lines.push(`Paper asset key: ${String(row.asset_key).trim()}`);
+  }
   if (entityType === 'scene' && row.location) lines.push(`Scene location: ${String(row.location).trim()}`);
   if (entityType === 'storyboard') {
     const fields = [

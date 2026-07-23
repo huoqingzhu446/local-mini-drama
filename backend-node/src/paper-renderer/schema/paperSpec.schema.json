@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://localminidrama.invalid/paper/paperSpec.schema.json",
+  "title": "LocalMiniDrama paper layered render snapshot",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "composition", "timing", "layers", "rigs"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 2 },
+    "composition": { "$ref": "#/$defs/composition" },
+    "timing": { "$ref": "#/$defs/timing" },
+    "proof_frames": { "$ref": "#/$defs/proofFrames" },
+    "camera": { "type": "object", "additionalProperties": true },
+    "layers": { "type": "array", "maxItems": 40, "items": { "$ref": "#/$defs/layer" } },
+    "rigs": { "type": "array", "items": { "$ref": "#/$defs/rig" } },
+    "audio": { "type": "object", "additionalProperties": true },
+    "provenance": { "type": "object", "additionalProperties": true },
+    "limits": { "type": "object", "additionalProperties": true }
+  },
+  "$defs": {
+    "positiveInteger": { "type": "integer", "minimum": 1 },
+    "composition": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["width", "height", "fps", "duration_frames"],
+      "properties": {
+        "id": { "type": ["integer", "string"] },
+        "storyboard_id": { "type": ["integer", "string", "null"] },
+        "width": { "$ref": "#/$defs/positiveInteger" },
+        "height": { "$ref": "#/$defs/positiveInteger" },
+        "fps": { "$ref": "#/$defs/positiveInteger" },
+        "duration_frames": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["phases"],
+      "properties": {
+        "status": { "type": "string" },
+        "timing_hash": { "type": ["string", "null"] },
+        "phases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "start_frame", "end_frame"],
+            "properties": {
+              "name": { "type": "string" },
+              "start_frame": { "type": "integer", "minimum": 0 },
+              "end_frame": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "proofFrames": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "first": { "type": "integer", "minimum": 0 },
+        "anticipation": { "type": "integer", "minimum": 0 },
+        "peak": { "type": "integer", "minimum": 0 },
+        "settle": { "type": "integer", "minimum": 0 },
+        "final_minus_hold": { "type": "integer", "minimum": 0 },
+        "exact_final": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "transform": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "anchor_x": { "type": "number" },
+        "anchor_y": { "type": "number" },
+        "scale": { "type": "number", "exclusiveMinimum": 0 },
+        "rotation": { "type": "number" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "occlusion": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "group": { "type": ["string", "null"] },
+        "occluder_layer_key": { "type": ["string", "null"] },
+        "mask_asset_id": { "type": ["integer", "string", "null"] },
+        "mask_src": { "type": ["string", "null"] },
+        "affected_part_keys": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "clip_path": { "type": ["string", "array", "null"] },
+        "feather_px": { "type": "number", "minimum": 0 },
+        "invert": { "type": "boolean" }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["key", "type", "z_index", "transform"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "type": { "type": "string" },
+        "role": { "type": ["string", "null"] },
+        "src": { "type": ["string", "null"] },
+        "z_index": { "type": "integer" },
+        "depth": { "type": "number" },
+        "transform": { "$ref": "#/$defs/transform" },
+        "animation": { "type": "object", "additionalProperties": true },
+        "occlusion": { "$ref": "#/$defs/occlusion" },
+        "rig_id": { "type": ["integer", "string", "null"] }
+      }
+    },
+    "part": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["key"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "parent": { "type": ["string", "null"] },
+        "src": { "type": ["string", "null"] },
+        "pivot": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "offset": { "type": "array", "minItems": 2, "maxItems": 2, "items": { "type": "number" } },
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "aspect_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "initial_rotation": { "type": "number" },
+        "z_index": { "type": "integer" }
+      }
+    },
+    "rig": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "root", "parts", "tracks"],
+      "properties": {
+        "id": { "type": ["integer", "string"] },
+        "root": { "type": "string" },
+        "parts": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/part" } },
+        "tracks": { "type": "array", "items": { "$ref": "animation.schema.json#/$defs/track" } }
+      }
+    }
+  }
+}

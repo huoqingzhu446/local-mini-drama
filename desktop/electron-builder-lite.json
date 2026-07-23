@@ -8,12 +8,21 @@
     "main.js",
     "package.json",
     "backend-app/**/*",
-    "node_modules/**/*"
+    "node_modules/**/*",
+    "!node_modules/.remotion/**"
   ],
   "asarUnpack": [
     "node_modules/better-sqlite3/**",
     "node_modules/sharp/**",
-    "backend-app/tools/**"
+    "backend-app/tools/**",
+    "node_modules/@remotion/compositor-*/**",
+    "node_modules/@remotion/renderer/**",
+    "node_modules/@remotion/bundler/**",
+    "node_modules/esbuild/**",
+    "node_modules/@esbuild/**",
+    "node_modules/@rspack/binding/**",
+    "node_modules/@rspack/binding*/**",
+    "remotion-runtime/**"
   ],
   "extraResources": [
     {
@@ -24,6 +33,11 @@
     {
       "from": "../backend-node/tools/ffmpeg",
       "to": "ffmpeg",
+      "filter": ["**/*"]
+    },
+    {
+      "from": "remotion-runtime",
+      "to": "remotion-runtime",
       "filter": ["**/*"]
     }
   ],

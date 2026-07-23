@@ -72,6 +72,7 @@ function makeDb(tmpDir) {
       polished_prompt TEXT,
       video_prompt TEXT,
       layout_description TEXT,
+      composed_image TEXT,
       image_url TEXT,
       local_path TEXT,
       first_frame_image_id INTEGER,
@@ -365,5 +366,82 @@ test('Codex storyboard last-frame candidate creates image_generation and binds t
   assert.equal(sbRow.last_frame_image_id, used.image_generation_id);
   assert.equal(sbRow.last_frame_local_path, used.local_path);
   assert.equal(sbRow.last_frame_image_url, `/static/${used.local_path}`);
+  db.close();
+});
+
+test('Codex storyboard batch keeps independent jobs and applies every main-image candidate', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-codex-storyboard-batch-'));
+  const cfg = {
+    database: { path: path.join(tmpDir, 'drama_generator.db') },
+    storage: { local_path: path.join(tmpDir, 'storage'), base_url: 'http://localhost:5679/static' },
+    style: { default_image_ratio: '16:9', default_style: 'photorealistic short drama still' },
+  };
+  fs.mkdirSync(cfg.storage.local_path, { recursive: true });
+  const db = makeDb(tmpDir);
+  db.prepare(
+    `INSERT INTO dramas (id, title, style, metadata, created_at)
+     VALUES (1, 'Batch Drama', 'realistic', ?, '2026-07-21T00:00:00.000Z')`
+  ).run(JSON.stringify({ aspect_ratio: '16:9' }));
+  db.prepare('INSERT INTO episodes (id, drama_id, title) VALUES (2, 1, ?)').run('第一集');
+  db.prepare(
+    `INSERT INTO storyboards (id, episode_id, storyboard_number, title, action, image_prompt)
+     VALUES (9, 2, 1, '酒池暴君', '暴君举杯狂笑', '酒池宫殿中的电影静帧')`
+  ).run();
+
+  const batchId = 'cijb_test_three';
+  const createdJobs = [];
+  for (let index = 1; index <= 3; index++) {
+    const created = codexImageJobService.createJob(db, null, cfg, {
+      entity_type: 'storyboard',
+      entity_id: 9,
+      frame_type: 'main',
+      force_generate: true,
+      batch_id: batchId,
+      batch_index: index,
+      batch_size: 3,
+    });
+    assert.equal(created.ok, true);
+    createdJobs.push(created.job);
+  }
+
+  assert.equal(new Set(createdJobs.map((job) => job.id)).size, 3);
+  assert.deepEqual(createdJobs.map((job) => job.batch_index), [1, 2, 3]);
+  assert.ok(createdJobs.every((job) => job.batch_id === batchId));
+  assert.ok(createdJobs.every((job) => job.batch_size === 3));
+  assert.ok(createdJobs.every((job) => job.force_generate === true));
+
+  const manifest = codexImageJobService.exportPending(db, cfg);
+  assert.equal(manifest.jobs.length, 3);
+  assert.deepEqual(manifest.jobs.map((job) => job.batch_index), [1, 2, 3]);
+  assert.ok(manifest.jobs.every((job) => job.batch_id === batchId && job.force_generate === true));
+  const listed = codexImageJobService.listJobs(db, {
+    entity_type: 'storyboard',
+    entity_id: 9,
+    frame_type: 'main',
+    page_size: 50,
+  });
+  assert.equal(listed.items.length, 3);
+  assert.ok(listed.items.every((job) => job.batch_id === batchId && job.batch_size === 3));
+
+  for (const [offset, job] of createdJobs.entries()) {
+    const candidateSource = path.join(tmpDir, `storyboard-main-${offset + 1}.png`);
+    fs.writeFileSync(candidateSource, Buffer.from(`fake storyboard image ${offset + 1}`));
+    const imported = codexImageJobService.importResults(db, null, cfg, {
+      results: [{ job_id: job.id, candidates: [{ path: candidateSource }] }],
+    });
+    assert.equal(imported.errors.length, 0);
+    const used = codexImageJobService.useCandidate(db, null, cfg, job.id, {
+      candidate_id: imported.imported[0].candidates[0].id,
+    });
+    assert.equal(used.ok, true);
+  }
+
+  const imageRows = db.prepare(
+    `SELECT id, frame_type, status FROM image_generations
+     WHERE storyboard_id = 9 AND deleted_at IS NULL ORDER BY id`
+  ).all();
+  assert.equal(imageRows.length, 3);
+  assert.ok(imageRows.every((row) => row.frame_type === 'main' && row.status === 'completed'));
+  assert.equal(db.prepare('SELECT first_frame_image_id FROM storyboards WHERE id = 9').get().first_frame_image_id, imageRows[2].id);
   db.close();
 });

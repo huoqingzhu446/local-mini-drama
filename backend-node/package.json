@@ -9,12 +9,16 @@
     "migrate": "node src/db/migrate.js",
     "migrate:07": "node scripts/run-migration-07.js",
     "codex:export-image-jobs": "node scripts/codex-export-image-jobs.js",
-    "codex:import-image-results": "node scripts/codex-import-image-results.js"
+    "codex:import-image-results": "node scripts/codex-import-image-results.js",
+    "paper:render:slice0": "node scripts/render-paper-storyboard.mjs --snapshot src/paper-renderer/fixtures/slice0-snapshot.json --output data/paper-slice0",
+    "paper:verify:slice0": "node scripts/verify-paper-render.js --manifest data/paper-slice0/manifest.json"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
+    "@remotion/bundler": "4.0.491",
+    "@remotion/renderer": "4.0.491",
     "@volcengine/openapi": "^1.36.1",
     "adm-zip": "^0.5.16",
     "better-sqlite3": "^11.6.0",
@@ -24,6 +28,9 @@
     "jsonrepair": "^3.13.3",
     "jsonwebtoken": "^9.0.3",
     "multer": "^1.4.5-lts.1",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "remotion": "4.0.491",
     "sharp": "^0.34.5",
     "uuid": "^10.0.0"
   }

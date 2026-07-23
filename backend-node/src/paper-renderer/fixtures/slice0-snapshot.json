@@ -1,0 +1,148 @@
+{
+  "schema_version": 2,
+  "composition": {
+    "id": "slice0",
+    "storyboard_id": 165,
+    "template": "paper_history_v1",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "duration_frames": 150,
+    "aspect_ratio": "16:9"
+  },
+  "timing": {
+    "status": "locked",
+    "source": "manual",
+    "phases": [
+      { "name": "anticipation", "start_frame": 0, "end_frame": 12 },
+      { "name": "entry", "start_frame": 12, "end_frame": 32 },
+      { "name": "action", "start_frame": 32, "end_frame": 82 },
+      { "name": "peak", "start_frame": 82, "end_frame": 98 },
+      { "name": "settle", "start_frame": 98, "end_frame": 118 },
+      { "name": "hold", "start_frame": 118, "end_frame": 150 }
+    ],
+    "cues": [
+      { "id": "goblet-peak", "frame": 90, "kind": "manual_peak" }
+    ],
+    "timing_hash": "slice0-manual-timing-v1"
+  },
+  "proof_frames": {
+    "first": 0,
+    "anticipation": 11,
+    "peak": 90,
+    "settle": 117,
+    "final_minus_hold": 141,
+    "exact_final": 149
+  },
+  "camera": {
+    "start": { "x": 0.5, "y": 0.5, "scale": 1, "rotation": 0 },
+    "end": { "x": 0.505, "y": 0.495, "scale": 1.025, "rotation": 0 },
+    "ease": "sine.inOut"
+  },
+  "layers": [
+    {
+      "key": "background",
+      "type": "background",
+      "role": "atmosphere",
+      "src": "slice0/background.svg",
+      "z_index": 0,
+      "depth": 0.05,
+      "transform": { "x": 0.5, "y": 0.5, "width": 1.08, "anchor_x": 0.5, "anchor_y": 0.5, "scale": 1, "rotation": 0, "opacity": 1 },
+      "motion": {}
+    },
+    {
+      "key": "palace_midground",
+      "type": "midground",
+      "role": "secondary",
+      "src": "slice0/midground.svg",
+      "z_index": 20,
+      "depth": 0.42,
+      "transform": { "x": 0.5, "y": 0.72, "width": 1.04, "anchor_x": 0.5, "anchor_y": 0.72, "scale": 1, "rotation": 0, "opacity": 1 },
+      "motion": {
+        "entry": { "start_frame": 4, "end_frame": 30, "from_y": 0.025, "from_scale": 0.985, "from_opacity": 0.25, "ease": "power3.out" }
+      }
+    },
+    {
+      "key": "emperor_rig",
+      "type": "character",
+      "role": "primary",
+      "rig_id": "emperor-slice0-v1",
+      "z_index": 40,
+      "depth": 0.72,
+      "transform": { "x": 0.53, "y": 0.9, "width": 0.22, "anchor_x": 0.5, "anchor_y": 1, "scale": 1, "rotation": 0, "opacity": 1 },
+      "motion": {
+        "entry": { "start_frame": 12, "end_frame": 34, "from_x": -0.065, "from_y": 0.04, "from_scale": 0.88, "from_opacity": 0, "ease": "power3.out" },
+        "ambient": { "start_frame": 118, "end_frame": 149, "period_frames": 100, "y": 0.0014, "rotation": 0.18, "phase": 0.4 }
+      }
+    },
+    {
+      "key": "foreground_table",
+      "type": "foreground",
+      "role": "foreground",
+      "src": "slice0/foreground.svg",
+      "z_index": 60,
+      "depth": 0.96,
+      "transform": { "x": 0.5, "y": 1, "width": 1.08, "anchor_x": 0.5, "anchor_y": 1, "scale": 1, "rotation": 0, "opacity": 1 },
+      "motion": {
+        "entry": { "start_frame": 44, "end_frame": 70, "from_x": 0.08, "from_y": 0.035, "from_opacity": 0, "ease": "power3.out" }
+      }
+    }
+  ],
+  "rigs": [
+    {
+      "id": "emperor-slice0-v1",
+      "root": "torso",
+      "parts": [
+        { "key": "torso", "parent": null, "src": "slice0/torso.svg", "offset": [0, 0], "width": 1, "aspect_ratio": 0.62, "pivot": [0.5, 1], "initial_rotation": 0, "z_index": 2 },
+        { "key": "head", "parent": "torso", "src": "slice0/head.svg", "offset": [0, -1.2], "width": 0.62, "aspect_ratio": 0.9, "pivot": [0.5, 0.6], "initial_rotation": -3, "z_index": 4 },
+        { "key": "arm_front", "parent": "torso", "src": "slice0/arm.svg", "offset": [0.28, -0.78], "width": 0.78, "aspect_ratio": 2.5, "pivot": [0.12, 0.5], "initial_rotation": -28, "z_index": 6 },
+        { "key": "goblet", "parent": "arm_front", "src": "slice0/goblet.svg", "offset": [0.62, -0.06], "width": 0.2, "aspect_ratio": 0.68, "pivot": [0.5, 0.8], "initial_rotation": -8, "z_index": 8 }
+      ],
+      "tracks": [
+        {
+          "target": "head",
+          "property": "rotation",
+          "ease": "power2.inOut",
+          "keyframes": [
+            { "frame": 0, "value": 0 },
+            { "frame": 32, "value": 3 },
+            { "frame": 90, "value": 8, "ease": "power2.inOut" },
+            { "frame": 118, "value": 5, "ease": "sine.out" },
+            { "frame": 149, "value": 5 }
+          ]
+        },
+        {
+          "target": "arm_front",
+          "property": "rotation",
+          "ease": "power2.inOut",
+          "keyframes": [
+            { "frame": 0, "value": 0 },
+            { "frame": 32, "value": 0 },
+            { "frame": 82, "value": 60, "ease": "power2.inOut" },
+            { "frame": 90, "value": 65, "ease": "back.out" },
+            { "frame": 118, "value": 52, "ease": "sine.out" },
+            { "frame": 149, "value": 52 }
+          ]
+        },
+        {
+          "target": "goblet",
+          "property": "rotation",
+          "ease": "power2.inOut",
+          "keyframes": [
+            { "frame": 0, "value": 0 },
+            { "frame": 32, "value": 0 },
+            { "frame": 90, "value": 14 },
+            { "frame": 118, "value": 9 },
+            { "frame": 149, "value": 9 }
+          ]
+        }
+      ]
+    }
+  ],
+  "provenance": {
+    "renderer_version": "paper-slice0-remotion-4.0.491",
+    "fixture": true,
+    "debug_overlay": true,
+    "description": "Deterministic four-layer paper animation toolchain fixture"
+  }
+}

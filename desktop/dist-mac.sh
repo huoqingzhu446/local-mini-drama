@@ -22,6 +22,7 @@ echo ""
 
 # 准备后端 + 编译前端 + 复制前端产物 + electron-builder 打包
 npm run prepare-backend
+npm run prepare-remotion-runtime
 npm run build:front
 npm run copy-front
 npx electron-builder --mac --config electron-builder-mac.json

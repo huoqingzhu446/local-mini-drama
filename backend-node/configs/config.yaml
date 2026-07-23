@@ -23,6 +23,27 @@ storage:
 # 异步视频任务轮询总超时（分钟）；省略或 ≤0 时默认 30
 video:
   generation_timeout_minutes: 30
+paper_render:
+  enabled: true
+  renderer_version: paper-layer-v1
+  schema_version: 2
+  fps: 30
+  default_width: 1920
+  default_height: 1080
+  max_concurrency: 1
+  max_layers: 40
+  max_rig_parts: 12
+  max_asset_pixels: 25000000
+  max_memory_mb: 4096
+  preview_scale: 0.5
+  temp_subdir: paper/tmp
+  proof_kinds:
+    - first
+    - anticipation
+    - peak
+    - settle
+    - final_minus_hold
+    - exact_final
 ai:
   default_text_provider: openai
   default_image_provider: openai

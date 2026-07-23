@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://localminidrama.invalid/paper/animation.schema.json",
+  "title": "LocalMiniDrama paper animation",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "intentional_hold": { "type": "boolean" },
+    "action_verb": { "type": "string" },
+    "motion_coverage": { "$ref": "#/$defs/motionCoverage" },
+    "tracks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/track" }
+    },
+    "ambient": { "$ref": "#/$defs/ambient" }
+  },
+  "$defs": {
+    "keyframe": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["value"],
+      "anyOf": [
+        { "required": ["frame"] },
+        { "required": ["offset"] }
+      ],
+      "properties": {
+        "frame": { "type": "integer", "minimum": 0 },
+        "offset": { "type": "number", "minimum": 0, "maximum": 1 },
+        "value": { "type": "number" },
+        "ease": { "type": "string" }
+      }
+    },
+    "track": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["property"],
+      "properties": {
+        "target": { "type": "string" },
+        "property": { "type": "string", "enum": ["x", "y", "rotation", "scale", "opacity", "entry"] },
+        "phase": { "type": "string" },
+        "start_frame": { "type": "integer", "minimum": 0 },
+        "end_frame": { "type": "integer", "minimum": 0 },
+        "from": { "type": "number" },
+        "to": { "type": "number" },
+        "from_x": { "type": "number" },
+        "to_x": { "type": "number" },
+        "from_y": { "type": "number" },
+        "to_y": { "type": "number" },
+        "keyframes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/keyframe" }
+        },
+        "ease": { "type": "string" }
+      }
+    },
+    "motionCoverage": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "load_bearing_track": { "type": "string" },
+        "peak_frame": { "type": "integer", "minimum": 0 },
+        "reaction_tracks": {
+          "type": "array",
+          "maxItems": 2,
+          "items": { "type": ["string", "object"] }
+        }
+      }
+    },
+    "ambient": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "preset": { "type": "string" },
+        "phase": { "type": "string" },
+        "amplitude": { "type": "number" },
+        "period_frames": { "type": "integer", "minimum": 1 },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "rotation": { "type": "number" },
+        "scale": { "type": "number" }
+      }
+    }
+  }
+}

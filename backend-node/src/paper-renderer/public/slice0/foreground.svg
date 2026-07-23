@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 520">
+  <defs>
+    <linearGradient id="table" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#873126"/>
+      <stop offset="1" stop-color="#3d1715"/>
+    </linearGradient>
+  </defs>
+  <g stroke="#f4e1b6" stroke-width="12" paint-order="stroke" stroke-linejoin="round">
+    <path d="M-50 245C260 198 420 210 705 238c355 35 586-18 820-27 172-6 310 10 445 38v285H-50z" fill="url(#table)"/>
+  </g>
+  <path d="M0 320c290-45 530 20 760 0s470-44 720 4 330 15 440-5v201H0z" fill="#2b1110" opacity=".74"/>
+  <g transform="translate(260 85)">
+    <ellipse cx="0" cy="154" rx="98" ry="24" fill="#21100d" opacity=".6"/>
+    <path d="M-54 52h108l-18 105h-72z" fill="#9b552d" stroke="#f0d69e" stroke-width="8"/>
+    <path d="M-28 48C-70-35 4-62 0-115c54 61-12 93 30 144 26 34 8 74-30 80-43-7-57-37-28-61z" fill="#e09a48" opacity=".85"/>
+  </g>
+  <g transform="translate(1640 110)">
+    <path d="M0 0c40 82 54 154 28 231" fill="none" stroke="#b88549" stroke-width="18"/>
+    <path d="M8 26c-58 8-87 43-101 92 64-7 94-39 101-92zm22 69c55 15 79 53 84 103-60-15-84-50-84-103z" fill="#6e3e25" stroke="#e8d2a0" stroke-width="7"/>
+  </g>
+</svg>

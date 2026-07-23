@@ -16,19 +16,21 @@ const generationContextService = require('./generationContextService');
 const referencePackService = require('./referencePackService');
 const visualStyleVersionService = require('./visualStyleVersionService');
 
-const ENABLED_ENTITY_TYPES = new Set(['character', 'prop', 'scene', 'storyboard']);
+const ENABLED_ENTITY_TYPES = new Set(['character', 'prop', 'scene', 'storyboard', 'paper_asset']);
 const ACTIVE_STATUSES = new Set(['pending', 'generating', 'completed']);
 const CATEGORY_BY_ENTITY = {
   character: 'characters',
   prop: 'props',
   scene: 'scenes',
   storyboard: 'storyboards',
+  paper_asset: 'paper-assets',
 };
 
 function styleScopeForEntity(entityType) {
   if (entityType === 'character') return 'character';
   if (entityType === 'scene') return 'scene';
   if (entityType === 'prop') return 'prop';
+  if (entityType === 'paper_asset') return 'global';
   return 'global';
 }
 
@@ -141,6 +143,20 @@ function normalizeFrameType(frameType) {
   return ft || 'main';
 }
 
+function normalizeGenerationBatch(req = {}) {
+  const batchId = String(req.batch_id || req.batchId || '').trim();
+  const batchSize = Math.min(6, Math.max(1, Math.floor(Number(req.batch_size || req.batchSize) || 1)));
+  const batchIndex = Math.min(batchSize, Math.max(1, Math.floor(Number(req.batch_index || req.batchIndex) || 1)));
+  const forceGenerate = Boolean(req.force_generate || req.forceGenerate || req.force);
+  if (!batchId && batchSize === 1 && !forceGenerate) return null;
+  return {
+    id: batchId || null,
+    index: batchIndex,
+    size: batchSize,
+    force_generate: forceGenerate,
+  };
+}
+
 function frameTypeForImageGeneration(frameType) {
   const ft = normalizeFrameType(frameType);
   if (ft === 'first') return 'storyboard_first';
@@ -192,6 +208,7 @@ function candidateUrl(candidate) {
 function rowToJob(row) {
   if (!row) return null;
   const sourceSnapshot = parseJson(row.source_snapshot, null);
+  const generationBatch = sourceSnapshot?.generation_batch || null;
   const candidates = parseJson(row.candidates, []);
   const candidateList = Array.isArray(candidates)
     ? candidates.map((c) => ({ ...c, url: candidateUrl(c) }))
@@ -217,6 +234,10 @@ function rowToJob(row) {
     compiler_version: row.compiler_version || '',
     stale_reason: row.stale_reason || null,
     source_snapshot: sourceSnapshot,
+    batch_id: generationBatch?.id || null,
+    batch_index: Number(generationBatch?.index) || 1,
+    batch_size: Number(generationBatch?.size) || 1,
+    force_generate: Boolean(generationBatch?.force_generate),
     candidates: candidateList,
     selected_candidate_id: row.selected_candidate_id || null,
     applied_image_url: row.applied_image_url || null,
@@ -387,6 +408,14 @@ function loadEntity(db, entityType, entityId) {
        WHERE sb.id = ? AND sb.deleted_at IS NULL`
     ).get(id) || null;
   }
+  if (entityType === 'paper_asset') {
+    return db.prepare(
+      `SELECT id, drama_id, episode_id, scene_id, storyboard_id, asset_key, asset_type,
+              prompt, negative_prompt, image_url, local_path, cutout_local_path,
+              style_signature, status
+       FROM paper_assets WHERE id = ? AND deleted_at IS NULL`
+    ).get(id) || null;
+  }
   return null;
 }
 
@@ -482,6 +511,11 @@ function pickPromptSource(entityType, row, opts = {}) {
     const text = compactStoryboardText(row, ft);
     return { key: `${ft}_storyboard_fields`, text: text || row.title || '' };
   }
+  if (entityType === 'paper_asset') {
+    return row.prompt && String(row.prompt).trim()
+      ? { key: 'paper_asset_prompt', text: String(row.prompt).trim() }
+      : { key: 'paper_asset_key', text: `${row.asset_type || 'paper asset'} ${row.asset_key || row.id}` };
+  }
   return { key: 'unknown', text: '' };
 }
 
@@ -500,6 +534,7 @@ function buildLegacyCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
   const assetKind = entityType === 'character' ? 'short drama character concept asset'
     : entityType === 'prop' ? 'short drama prop asset'
       : entityType === 'scene' ? (isSceneReferenceGrid ? 'short drama scene 9-grid reference board' : 'short drama scene/background asset')
+        : entityType === 'paper_asset' ? `short drama paper-layer asset (${row.asset_type || 'cutout'})`
         : `short drama storyboard ${frameType} frame asset`;
   const lines = [
     `Use case: illustration-story`,
@@ -547,6 +582,7 @@ function buildLegacyCodexPrompt(entityType, row, dramaRow, cfg, opts = {}) {
       ? 'No random redesign between panels; only camera angle, focal length, and viewed area may change. No borders, no divider lines, no frames, no gaps.'
       : '',
     entityType === 'storyboard' ? 'Render one cinematic frame only; no collage, no split screen, no storyboard grid, no multiple panels.' : '',
+    entityType === 'paper_asset' ? 'For a paper-layer cutout/rig part, place exactly one isolated subject on a clean solid background or transparent-looking matte plate; do not create a storyboard, collage, contact sheet, or multiple views.' : '',
     'No visible subtitles, labels, watermarks, UI, logos, signature, or random text.',
     'Avoid extra unrelated characters or objects unless explicitly required by the description.',
   ].filter((line) => line !== null && line !== undefined);
@@ -647,6 +683,10 @@ function jobManifestItem(job) {
     context_snapshot_id: job.context_snapshot_id || undefined,
     prompt_hash: job.prompt_hash || undefined,
     compiler_version: job.compiler_version || undefined,
+    batch_id: job.batch_id || undefined,
+    batch_index: job.batch_id ? job.batch_index : undefined,
+    batch_size: job.batch_id ? job.batch_size : undefined,
+    force_generate: job.force_generate || undefined,
     references: references.length ? references : undefined,
     reference_images: referenceImages.length ? referenceImages : undefined,
     target_category: CATEGORY_BY_ENTITY[job.entity_type] || job.entity_type,
@@ -688,7 +728,7 @@ function createJob(db, log, cfg, req = {}) {
   ensureCodexImageJobsTable(db);
   const entityType = String(req.entity_type || '').trim();
   if (!ENABLED_ENTITY_TYPES.has(entityType)) {
-    return { ok: false, error: 'entity_type must be character, prop, scene, or storyboard' };
+    return { ok: false, error: 'entity_type must be character, prop, scene, storyboard, or paper_asset' };
   }
   const entityId = Number(req.entity_id);
   if (!entityId) return { ok: false, error: 'entity_id is required' };
@@ -712,7 +752,8 @@ function createJob(db, log, cfg, req = {}) {
   const styleSignature = built.style_signature || '';
   const styleVersionId = Number(built.style_version_id) || null;
   const promptHash = String(built.prompt_hash || generationContextService.hashValue(built.prompt || '')).trim();
-  if (!req.force) {
+  const generationBatch = normalizeGenerationBatch(req);
+  if (!req.force && !generationBatch?.force_generate) {
     const existing = activeJobForEntity(db, entityType, entityId, frameType, styleSignature, quality, {
       style_version_id: styleVersionId,
       prompt_hash: promptHash,
@@ -726,6 +767,7 @@ function createJob(db, log, cfg, req = {}) {
   const id = `cij_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
   const sourceSnapshot = {
     ...(built.source_snapshot || {}),
+    ...(generationBatch ? { generation_batch: generationBatch } : {}),
     entity: row,
     drama: dramaRow ? { id: dramaRow.id, title: dramaRow.title, style: dramaRow.style, metadata: parseDramaMetadata(dramaRow) } : null,
     prompt_source: built.prompt_source,
@@ -1020,6 +1062,19 @@ function applyToStoryboard(db, log, job, localPath, imageUrl) {
   return { ok: true, image_generation_id: uploaded.id };
 }
 
+function applyToPaperAsset(db, job, localPath, imageUrl) {
+  const row = db.prepare('SELECT id, asset_type, local_path, status FROM paper_assets WHERE id = ? AND deleted_at IS NULL').get(Number(job.entity_id));
+  if (!row) return { ok: false, error: 'paper asset not found' };
+  db.prepare(
+    `UPDATE paper_assets SET image_url = ?, local_path = ?, status = 'needs_review', matte_quality = 'unknown',
+       cutout_local_path = NULL, asset_hash = NULL, version = version + 1, updated_at = ? WHERE id = ?`
+  ).run(imageUrl || (localPath ? `/static/${localPath}` : null), localPath || null, new Date().toISOString(), Number(job.entity_id));
+  try {
+    require('./paperAssetService').markReferencingCompositionsStale(db, Number(job.entity_id), 'Codex paper asset candidate applied');
+  } catch (_) {}
+  return { ok: true };
+}
+
 function useCandidate(db, log, cfg, jobId, req = {}) {
   ensureCodexImageJobsTable(db);
   const job = getJobById(db, jobId);
@@ -1070,6 +1125,7 @@ function useCandidate(db, log, cfg, jobId, req = {}) {
   else if (job.entity_type === 'prop') applied = applyToProp(db, job, localPath, imageUrl);
   else if (job.entity_type === 'scene') applied = applyToScene(db, job, localPath, imageUrl);
   else if (job.entity_type === 'storyboard') applied = applyToStoryboard(db, log, job, localPath, imageUrl);
+  else if (job.entity_type === 'paper_asset') applied = applyToPaperAsset(db, job, localPath, imageUrl);
   else applied = { ok: false, error: 'unsupported entity_type' };
   if (!applied.ok) return applied;
 

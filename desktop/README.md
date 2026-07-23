@@ -82,6 +82,7 @@ npm run dist:cn
 | `npm run dist` | 构建前端 + 复制 + 打出 Windows 安装包与便携 exe |
 | `npm run dist:cn` | 同上，使用国内镜像（Electron、electron-builder 二进制） |
 | `npm run prepare-backend` | 将 backend-node 复制到 backend-app（打包前置步骤） |
+| `npm run prepare-remotion-runtime` | 预置当前平台 Chrome Headless Shell，供纸片分层正式渲染离线运行 |
 | `bash dist-mac.sh` | macOS 一键打包（完整版 + 纯净版 DMG，含国内镜像加速） |
 
 ---
@@ -124,6 +125,15 @@ $env:LOCALMINIDRAMA_DEVTOOLS=1
 ```
 
 AI 相关配置需在软件「AI 配置」弹窗中填写并保存（会写入上述 yaml 文件）；本机网络需能访问对应 API（如 dashscope、volcengine 等）。
+
+### 5. 纸片分层渲染运行时
+
+纸片分层正式渲染使用 Remotion 的 compositor、ffmpeg/ffprobe 和 Chrome Headless Shell。
+electron-builder 会将 compositor/esbuild 原生模块解包，并把 `remotion-runtime/` 放到
+安装包的 resources 目录。构建机若尚未缓存浏览器，可设置
+`REMOTION_DOWNLOAD_BROWSER=1` 执行 `npm run prepare-remotion-runtime`；也可通过
+`REMOTION_BROWSER_SOURCE` 指向已下载的浏览器目录。应用内 `/paper-render/doctor` 的
+`offline_ready` 字段会明确报告是否满足完全离线渲染条件。
 
 ---
 

@@ -115,9 +115,10 @@ backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboard
 
    分镜区域也可以入队：
 
-   - 单主图模式：分镜参考图位置的 `Codex` 使用 `entity_type=storyboard`、`frame_type=main`。
-   - 全能模式：右侧视频栏的单条 `Codex` 使用 `entity_type=storyboard`、`frame_type=main`；候选图使用后会进入左侧“分镜图”参考位，并追加到全能视频参考图列表末尾。
-   - 首尾帧模式：首帧按钮使用 `frame_type=first`，尾帧按钮使用 `frame_type=last`。
+  - 单主图模式：分镜参考图位置的 `Codex` 使用 `entity_type=storyboard`、`frame_type=main`。
+  - 全能模式：右侧视频栏的单条 `Codex` 使用 `entity_type=storyboard`、`frame_type=main`；候选图使用后会进入左侧“分镜图”参考位，并追加到全能视频参考图列表末尾。
+  - 分镜主图的 `Codex` 按钮支持选择生成数量，范围为 2 到当前剩余参考图槽位（单镜最多 6 张）。选择多张时，每张图会建立独立任务并带有相同的 `batch_id`，候选图可分别“使用”；首帧和尾帧仍保持单任务生成。
+  - 首尾帧模式：首帧按钮使用 `frame_type=first`，尾帧按钮使用 `frame_type=last`。
    - 分镜批量：点击“Codex 批量分镜图”，普通模式只入队缺主图分镜；首尾帧模式会分别入队缺首帧、缺尾帧的分镜。
 
    后端创建 `codex_image_jobs` 记录，并刷新 `jobs.json`。
@@ -130,7 +131,8 @@ backend-node/data/storage/projects/<project>/<characters|props|scenes|storyboard
 
    - 读取 `jobs.json`。
    - 对照 `results.json` 和 `codex_image_jobs`，跳过已生成、已完成、已使用的任务。
-   - 如果同一个业务实体和同一个 `frame_type` 已经有正式 `local_path/image_url`，不要重复生成，除非用户明确要求重做。
+   - 如果同一个业务实体和同一个 `frame_type` 已经有正式 `local_path/image_url`，不要重复生成，除非任务带有 `force_generate=true`。页面“再生成”和分镜多图数量选择创建的任务会显式带上该标记。
+   - `batch_id`、`batch_index`、`batch_size` 表示同一次多图请求；批处理时必须逐个处理同批任务，不得按 `entity_type + entity_id + frame_type` 去重。
    - 对剩余任务逐条调用内置 `image_gen`。
 
 3. 写入并导入结果

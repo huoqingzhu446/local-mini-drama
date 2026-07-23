@@ -100,7 +100,7 @@ function updateStoryboard(db, log, id, req) {
       return [];
     }
   })());
-  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path', 'prompt_state'];
+  const allowed = ['title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action', 'result', 'atmosphere', 'image_prompt', 'polished_prompt', 'video_prompt', 'scene_id', 'characters', 'composed_image', 'image_url', 'local_path', 'main_panel_idx', 'video_url', 'audio_local_path', 'narration_audio_local_path', 'status', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'segment_index', 'segment_title', 'creation_mode', 'universal_segment_text', 'layout_description', 'first_frame_image_id', 'last_frame_image_id', 'last_frame_image_url', 'last_frame_local_path', 'prompt_state', 'video_render_mode'];
   const updates = [];
   const params = [];
   let contentChanged = false;
@@ -121,6 +121,9 @@ function updateStoryboard(db, log, id, req) {
       params.push(val);
       if (['image_prompt', 'description', 'action', 'dialogue', 'narration', 'result', 'atmosphere', 'location', 'time', 'shot_type', 'angle', 'angle_h', 'angle_v', 'angle_s', 'movement', 'layout_description'].includes(key)) {
         contentChanged = true;
+      }
+      if (key === 'video_render_mode' && !['ai_video', 'paper_layered'].includes(String(val))) {
+        throw new Error('video_render_mode 只能是 ai_video 或 paper_layered');
       }
       if (key === 'polished_prompt' && storyboardCols.has('polished_prompt_style_signature')) {
         const dramaRow = sbRow?.drama_id
@@ -152,6 +155,17 @@ function updateStoryboard(db, log, id, req) {
   if (updates.length > 0) {
     params.push(new Date().toISOString(), id);
     db.prepare('UPDATE storyboards SET ' + updates.join(', ') + ', updated_at = ? WHERE id = ?').run(...params);
+    if (storyboardCols.has('video_render_mode') && (contentChanged || req.audio_local_path !== undefined || req.narration_audio_local_path !== undefined || req.duration !== undefined || req.characters !== undefined || req.props !== undefined || req.prop_ids !== undefined)) {
+      try {
+        const compositionRows = db.prepare('SELECT id FROM paper_compositions WHERE storyboard_id = ? AND deleted_at IS NULL').all(Number(id));
+        db.prepare(`UPDATE paper_compositions SET status = CASE WHEN status = 'rendering' THEN 'rendering' ELSE 'stale' END,
+          audio_timing_status = CASE WHEN audio_timing_status = 'locked' THEN 'stale' ELSE audio_timing_status END,
+          audio_timing_hash = NULL, last_validation_json = '{}', last_proof_hash = NULL, updated_at = ?
+          WHERE storyboard_id = ? AND deleted_at IS NULL`).run(new Date().toISOString(), Number(id));
+        const removeProofs = db.prepare('DELETE FROM paper_render_proofs WHERE composition_id = ?');
+        for (const composition of compositionRows) removeProofs.run(composition.id);
+      } catch (_) {}
+    }
   }
   // 角色勾选变更：只同步 storyboard_characters，不删除 frame_prompts。
   // 用户手动保存的首/尾帧提示词应保留；图生时 framePromptSanitize 会按当前勾选剔除未出场角色名。
@@ -230,6 +244,7 @@ function getStoryboardById(db, id) {
     last_frame_image_id: r.last_frame_image_id ?? null,
     last_frame_image_url: r.last_frame_image_url ?? null,
     last_frame_local_path: r.last_frame_local_path ?? null,
+    video_render_mode: r.video_render_mode === 'paper_layered' ? 'paper_layered' : 'ai_video',
     characters,
     prop_ids: propIds,
     composed_image: r.composed_image,
