@@ -65,6 +65,21 @@ function runFfmpeg(args, log, tag) {
   return true;
 }
 
+const ffmpegFilterSupport = new Map();
+function ffmpegSupportsFilter(filterName) {
+  const name = String(filterName || '').trim();
+  if (!name) return false;
+  if (ffmpegFilterSupport.has(name)) return ffmpegFilterSupport.get(name);
+  const r = spawnSync(getFfmpegPath(), ['-hide_banner', '-filters'], {
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const text = `${r.stdout || ''}\n${r.stderr || ''}`;
+  const supported = r.status === 0 && new RegExp(`\\s${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s`).test(text);
+  ffmpegFilterSupport.set(name, supported);
+  return supported;
+}
+
 function writeSilenceMp3(slotSec, outPath, log) {
   return runFfmpeg(
     ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono', '-t', String(slotSec), '-c:a', 'libmp3lame', '-q:a', '6', outPath],
@@ -275,20 +290,33 @@ async function runMergedEpisodePostProcess(db, log, opts) {
             }
           } else {
             const segRaw = path.join(tempRoot, `narr_raw_${i}.mp3`);
-            let synth;
-            try {
-              synth = await ttsService.synthesize(db, log, {
-                text: narrText,
-                storyboard_id: null,
-                storage_base: storageRoot,
+            const savedNarrRel = row?.narration_audio_local_path
+              && String(row.narration_audio_local_path).trim();
+            let narrAbs = savedNarrRel
+              ? path.join(storageRoot, savedNarrRel.replace(/\//g, path.sep))
+              : null;
+            if (!narrAbs || !fs.existsSync(narrAbs)) {
+              let synth;
+              try {
+                synth = await ttsService.synthesize(db, log, {
+                  text: narrText,
+                  storyboard_id: null,
+                  storage_base: storageRoot,
+                });
+              } catch (e) {
+                log.warn('merged post: narration TTS failed', { segment: i, error: e.message });
+                return { ok: false, error: `解说旁白 TTS 失败：${e.message}` };
+              }
+              narrAbs = path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
+              if (!fs.existsSync(narrAbs)) {
+                return { ok: false, error: '旁白 TTS 文件不存在' };
+              }
+            } else {
+              log.info('merged post: reusing storyboard narration audio', {
+                segment: i,
+                storyboard_id: sbId,
+                local_path: savedNarrRel,
               });
-            } catch (e) {
-              log.warn('merged post: narration TTS failed', { segment: i, error: e.message });
-              return { ok: false, error: `解说旁白 TTS 失败：${e.message}` };
-            }
-            const narrAbs = path.join(storageRoot, synth.local_path.replace(/\//g, path.sep));
-            if (!fs.existsSync(narrAbs)) {
-              return { ok: false, error: `旁白 TTS 文件不存在` };
             }
             try {
               fs.copyFileSync(narrAbs, segRaw);
@@ -347,17 +375,27 @@ async function runMergedEpisodePostProcess(db, log, opts) {
 
     const vfParts = [];
     if (hasSubs) {
-      const subEsc = escapeFfmpegPath(srtPath);
-      vfParts.push(`subtitles='${subEsc}':charenc=UTF-8`);
+      if (ffmpegSupportsFilter('subtitles')) {
+        const subEsc = escapeFfmpegPath(srtPath);
+        vfParts.push(`subtitles=filename='${subEsc}':charenc=UTF-8`);
+      } else {
+        log.warn('merged post: subtitles filter unavailable; keeping narration audio and external SRT', {
+          srt: srtPath,
+        });
+      }
     }
     if (hasWm) {
-      const wmFile = path.join(tempRoot, 'watermark.txt');
-      fs.writeFileSync(wmFile, watermarkText, 'utf8');
-      const wmEsc = escapeFfmpegPath(wmFile);
-      const fontOpt = getDrawtextFontOption();
-      vfParts.push(
-        `drawtext=textfile='${wmEsc}':reload=1${fontOpt}:x=w-tw-16:y=h-th-16:fontsize=22:fontcolor=white@0.82:borderw=2:bordercolor=black@0.55`
-      );
+      if (ffmpegSupportsFilter('drawtext')) {
+        const wmFile = path.join(tempRoot, 'watermark.txt');
+        fs.writeFileSync(wmFile, watermarkText, 'utf8');
+        const wmEsc = escapeFfmpegPath(wmFile);
+        const fontOpt = getDrawtextFontOption();
+        vfParts.push(
+          `drawtext=textfile='${wmEsc}':reload=1${fontOpt}:x=w-tw-16:y=h-th-16:fontsize=22:fontcolor=white@0.82:borderw=2:bordercolor=black@0.55`
+        );
+      } else {
+        log.warn('merged post: drawtext filter unavailable; watermark skipped');
+      }
     }
     let filterComplex = '';
     if (vfParts.length === 1) {
@@ -373,11 +411,12 @@ async function runMergedEpisodePostProcess(db, log, opts) {
       const args = ['-y', '-i', mergedAbsPath, '-i', alignedAudioPath];
       if (filterComplex) {
         args.push('-filter_complex', filterComplex, '-map', '[vout]', '-map', '1:a');
+        args.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '23');
       } else {
         args.push('-map', '0:v', '-map', '1:a');
+        args.push('-c:v', 'copy');
       }
       args.push(
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
         '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-shortest', outAbs
       );
       if (!runFfmpeg(args, log, 'mux_av')) {

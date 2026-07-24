@@ -239,8 +239,9 @@ async function finalizeSuccessfulVideo(db, log, videoGenId, row, rowForAspect, v
   }
   if (row.storyboard_id) {
     try {
-      db.prepare('UPDATE storyboards SET video_url = ?, local_path = ?, updated_at = ? WHERE id = ?').run(
-        videoUrl, localPath, now, row.storyboard_id
+      // local_path 属于分镜主图/首帧；视频本地路径保存在 video_generations.local_path。
+      db.prepare('UPDATE storyboards SET video_url = ?, updated_at = ? WHERE id = ?').run(
+        videoUrl, now, row.storyboard_id
       );
       log.info('Updated storyboard video' + (logLabel ? ` (${logLabel})` : ''), {
         storyboard_id: row.storyboard_id,
@@ -510,22 +511,12 @@ function deleteById(db, log, id) {
       'SELECT storyboard_id, video_url, local_path FROM video_generations WHERE id = ? AND deleted_at IS NULL'
     ).get(videoId);
     if (row?.storyboard_id != null) {
-      const matchClauses = [];
-      const matchParams = [];
       if (row.video_url) {
-        matchClauses.push('video_url = ?');
-        matchParams.push(row.video_url);
-      }
-      if (row.local_path) {
-        matchClauses.push('local_path = ?');
-        matchParams.push(row.local_path);
-      }
-      if (matchClauses.length > 0) {
         db.prepare(
           `UPDATE storyboards
-           SET video_url = NULL, local_path = NULL, updated_at = ?
-           WHERE id = ? AND (${matchClauses.join(' OR ')})`
-        ).run(now, row.storyboard_id, ...matchParams);
+           SET video_url = NULL, updated_at = ?
+           WHERE id = ? AND video_url = ?`
+        ).run(now, row.storyboard_id, row.video_url);
       }
     }
   } catch (e) {
@@ -616,8 +607,8 @@ function finalizeLocalVideoGeneration(db, log, input = {}) {
        render_snapshot = ?, render_hash = ?, renderer_version = ? WHERE id = ? AND status <> 'completed'`
     ).run(input.video_url, input.local_path, now, now, serializedSnapshot, input.render_hash, input.renderer_version, videoGenerationId);
     if (!update.changes) throw fail('LOCAL_VIDEO_FINALIZE_CONFLICT', '本地视频记录已被其他任务完成', { video_generation_id: videoGenerationId });
-    const storyboardUpdate = db.prepare('UPDATE storyboards SET video_url = ?, local_path = ?, updated_at = ? WHERE id = ?')
-      .run(input.video_url, input.local_path, now, current.storyboard_id);
+    const storyboardUpdate = db.prepare('UPDATE storyboards SET video_url = ?, updated_at = ? WHERE id = ?')
+      .run(input.video_url, now, current.storyboard_id);
     if (!storyboardUpdate.changes) throw fail('LOCAL_VIDEO_OWNERSHIP_MISMATCH', '关联分镜不存在，无法完成本地视频回写', { storyboard_id: current.storyboard_id });
     const compositionUpdate = db.prepare("UPDATE paper_compositions SET status = 'rendered', last_proof_hash = ?, renderer_version = ?, updated_at = ? WHERE id = ?")
       .run(input.last_proof_hash || null, input.renderer_version || null, now, compositionId);

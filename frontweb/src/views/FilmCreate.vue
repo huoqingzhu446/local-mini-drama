@@ -2096,7 +2096,7 @@
             </el-select>
           </el-form-item>
           -->
-          <el-form-item label="字幕">
+          <el-form-item label="旁白/字幕">
             <div class="video-option-row">
               <el-switch v-model="videoSubtitle" />
               <span v-if="videoSubtitle" class="video-option-hint">开启后，合成整集时会检测解说旁白：若有文案则自动生成 SRT、按分镜时长合成旁白语音（过长加速 / 过短补静音）、与成片对齐后烧录字幕并混音。</span>
@@ -3750,7 +3750,7 @@ const videoResolution = storeVideoResolution
 const videoMusic = ref('')
 const videoSfx = ref('')
 const videoQuality = ref('high')
-const videoSubtitle = ref(false)
+const videoSubtitle = ref(true)
 /** 合成整集时把各镜对白 TTS（audio_local_path）按分镜时长对齐并混入成片 */
 const videoBurnDialogue = ref(false)
 const videoWatermark = ref(false)
@@ -5102,7 +5102,6 @@ function onSelectSbMainVideo(sb, video) {
   sbSelectedVideoId.value = { ...sbSelectedVideoId.value, [sb.id]: video.id }
   storyboardsAPI.update(sb.id, {
     video_url: video.video_url || null,
-    local_path: video.local_path || undefined,
   }).catch(e => console.warn('[主视频] 保存后端失败', e))
 }
 
@@ -5135,7 +5134,7 @@ async function onRemoveSbVideo(sb, video = null) {
         onSelectSbMainVideo(sb, nextVideo)
       } else {
         // 后端会同步清理绑定；这里同步更新本地分镜，避免合成流程继续读取旧地址。
-        const patch = { video_url: null, local_path: null }
+        const patch = { video_url: null }
         const updated = await storyboardsAPI.update(sb.id, patch)
         const list = store.currentEpisode?.storyboards
         const row = Array.isArray(list) ? list.find((item) => Number(item.id) === Number(sb.id)) : null

@@ -49,7 +49,7 @@ function makeDb() {
   `);
   db.prepare('INSERT INTO dramas (id, title, created_at, metadata) VALUES (1, ?, ?, ?)')
     .run('Render Test', '2026-07-21T00:00:00.000Z', '{}');
-  db.prepare('INSERT INTO storyboards (id) VALUES (10)').run();
+  db.prepare('INSERT INTO storyboards (id, local_path) VALUES (10, ?)').run('media/images/storyboard-10.png');
   db.prepare('INSERT INTO paper_compositions (id, drama_id, storyboard_id, status) VALUES (1, 1, 10, ?)').run('rendering');
   return db;
 }
@@ -144,7 +144,8 @@ test('formal local video finalization is atomic and idempotent', async () => {
   assert.equal(rowAfterFirst.render_hash, renderHash);
   assert.equal(compAfterFirst.status, 'rendered');
   assert.equal(compAfterFirst.last_proof_hash, proof.proof_hash);
-  assert.equal(storyboardAfterFirst.local_path, first.video_rel);
+  assert.equal(storyboardAfterFirst.video_url, `/static/${first.video_rel}`);
+  assert.equal(storyboardAfterFirst.local_path, 'media/images/storyboard-10.png');
   assert.equal(taskAfterFirst.status, 'completed');
   assert.equal(JSON.parse(taskAfterFirst.result).proof_hash, proof.proof_hash);
 

@@ -1235,50 +1235,53 @@ function saveCanvasLayout(db, log, dramaId, req) {
 }
 
 /**
- * 取某分镜的视频地址：优先使用用户手动选定的 storyboard.video_url，否则取最新完成的 video_generations 记录
+ * 取某分镜的视频地址。
+ * storyboards.local_path 是首帧/主图路径，不能再当作视频路径使用；视频本地文件只从
+ * video_generations.local_path 读取。storyboard.video_url 仅作为“当前选中视频”的身份指针。
  */
 function getVideoUrlForStoryboard(db, storyboardId, baseUrl) {
-  // 1. 获取 storyboard 表中的视频信息（代表用户选定或上次同步的结果）
-  const sb = db.prepare('SELECT video_url, local_path, updated_at FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(storyboardId);
-  
-  // 2. 获取 video_generations 表中最新完成的记录
-  const vg = db.prepare(
-    "SELECT video_url, local_path, completed_at, updated_at, created_at FROM video_generations WHERE storyboard_id = ? AND status = 'completed' AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1"
-  ).get(storyboardId);
+  const sb = db.prepare('SELECT video_url FROM storyboards WHERE id = ? AND deleted_at IS NULL').get(storyboardId);
+  const selectedUrl = String(sb?.video_url || '').trim();
 
-  // 辅助函数：构造完整 URL，优先使用本地路径（避免远程URL过期导致无法合并）
-  const buildUrl = (videoUrl, localPath) => {
+  // 优先寻找与 storyboard.video_url 对应的历史记录；没有显式选中时回退到最新完成记录。
+  const vg = db.prepare(
+    `SELECT video_url, local_path, completed_at, updated_at, created_at
+     FROM video_generations
+     WHERE storyboard_id = ? AND status = 'completed' AND deleted_at IS NULL
+     ORDER BY
+       CASE
+         WHEN ? <> '' AND video_url = ? THEN 0
+         WHEN ? <> '' AND local_path IS NOT NULL AND instr(?, local_path) > 0 THEN 1
+         ELSE 2
+       END,
+       created_at DESC
+     LIMIT 1`
+  ).get(storyboardId, selectedUrl, selectedUrl, selectedUrl, selectedUrl);
+
+  const buildGenerationUrl = (row) => {
+    if (!row) return null;
+    const localPath = String(row.local_path || '').trim();
     if (localPath && String(localPath).trim() && baseUrl) {
       const base = (baseUrl || '').replace(/\/$/, '');
       const p = String(localPath).replace(/^\//, '');
       return p ? base + '/' + p : null;
     }
-    if (videoUrl && String(videoUrl).trim()) return videoUrl;
+    if (localPath) return localPath;
+    if (row.video_url && String(row.video_url).trim()) return String(row.video_url).trim();
     return null;
   };
 
-  const sbUrl = sb ? buildUrl(sb.video_url, sb.local_path) : null;
-  const vgUrl = vg ? buildUrl(vg.video_url, vg.local_path) : null;
-
-  // 策略：比较时间，取最新的
-  // 如果只有其中一个有 URL，直接用那个
-  if (sbUrl && !vgUrl) return sbUrl;
-  if (!sbUrl && vgUrl) return vgUrl;
-  if (!sbUrl && !vgUrl) return null;
-
-  // 都有 URL，比较时间
-  // sb 使用 updated_at
-  // vg 使用 completed_at > updated_at > created_at
-  const sbTime = sb.updated_at || '1970-01-01';
-  const vgTime = vg.completed_at || vg.updated_at || vg.created_at || '1970-01-01';
-
-  // 如果生成记录的时间比分镜更新时间还晚（说明是重新生成的，且可能没回写），则优先用生成记录
-  if (vgTime > sbTime) {
-    return vgUrl;
+  if (vg) {
+    const generationUrl = String(vg.video_url || '').trim();
+    const generationPath = String(vg.local_path || '').trim();
+    const matchesSelection = !selectedUrl
+      || selectedUrl === generationUrl
+      || (generationPath && selectedUrl.includes(generationPath));
+    if (matchesSelection) return buildGenerationUrl(vg);
   }
-  
-  // 否则依然以 storyboard 为准（可能是用户手动修改过，或者已经回写过）
-  return sbUrl;
+
+  // 允许没有生成记录的外部视频 URL，但绝不回退到 storyboard.local_path（它属于图片）。
+  return selectedUrl || null;
 }
 
 function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
@@ -1327,7 +1330,17 @@ function finalizeEpisode(db, log, episodeId, baseUrl, body = {}) {
   const mergeId = created.merge_id || created.id;
   db.prepare('UPDATE episodes SET status = ? WHERE id = ?').run('processing', episodeId);
   setImmediate(() => {
-    videoMergeService.processVideoMerge(db, log, mergeId, baseUrl);
+    Promise.resolve(videoMergeService.processVideoMerge(db, log, mergeId, baseUrl)).catch((error) => {
+      const now = new Date().toISOString();
+      const message = String(error?.message || '视频合并异常').slice(0, 1000);
+      log.error('Video merge unhandled error', { merge_id: mergeId, episode_id: episodeId, error: message });
+      db.prepare('UPDATE video_merges SET status = ?, error_msg = ?, completed_at = ? WHERE id = ?')
+        .run('failed', message, now, mergeId);
+      db.prepare('UPDATE episodes SET status = ?, updated_at = ? WHERE id = ?').run('failed', now, episodeId);
+      if (created.task_id) {
+        require('./taskService').updateTaskError(db, created.task_id, message);
+      }
+    });
   });
   return {
     message: '视频合成任务已创建，正在后台处理',
@@ -1359,6 +1372,7 @@ module.exports = {
   saveEpisodes,
   saveProgress,
   saveCanvasLayout,
+  getVideoUrlForStoryboard,
   finalizeEpisode,
   downloadEpisodeVideo,
   generateStoryboard,

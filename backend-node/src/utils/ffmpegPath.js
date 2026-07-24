@@ -79,9 +79,25 @@ function hasLocalFfmpeg() {
   return false;
 }
 
+/** ffprobe 与 ffmpeg 分开发行；合并前的媒体流和真实时长校验需要两者同时可用。 */
+function hasLocalFfprobe() {
+  const fromEnv = process.env.FFPROBE_PATH;
+  if (fromEnv && fs.existsSync(fromEnv)) return true;
+  if (getCandidatePaths(ffprobeName).some((p) => fs.existsSync(p))) return true;
+
+  try {
+    const { spawnSync } = require('child_process');
+    const res = spawnSync(ffprobeName, ['-version']);
+    if (res.status === 0) return true;
+  } catch (_) {}
+
+  return false;
+}
+
 module.exports = {
   getFfmpegPath,
   getFfprobePath,
   hasLocalFfmpeg,
+  hasLocalFfprobe,
   toolsFfmpegDir,
 };
