@@ -1,0 +1,3 @@
+const CURRENT_PLANNER_VERSION = 5;
+
+module.exports = { CURRENT_PLANNER_VERSION };

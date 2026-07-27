@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
 
-const EXPORT_VERSION = '1.4';  // 1.4: 完整导出分镜图片历史（含首尾帧 first/last 绑定）、frame_prompts、layout_description 等，支持导入后恢复首尾帧模式数据
+const EXPORT_VERSION = '1.5';  // 1.5: 增加独立纸片动画工作室 manifest 与正式产物
 
 function getStoragePath(cfg) {
   const raw = cfg?.storage?.local_path || './data/storage';
@@ -77,7 +77,7 @@ function parseSbChars(raw) {
  * 导出一个剧集为 ZIP Buffer
  * @returns {Buffer}
  */
-function exportDrama(db, cfg, log, dramaId) {
+function exportDrama(db, cfg, log, dramaId, options = {}) {
   const storagePath = getStoragePath(cfg);
 
   // ---- 1. 读取 drama 基本信息 ----
@@ -215,6 +215,7 @@ function exportDrama(db, cfg, log, dramaId) {
     episodes: episodes.map(ep => {
       const sbs = storyboardsByEp[ep.id] || [];
       return {
+        original_id: ep.id,
         episode_number: ep.episode_number,
         title: ep.title,
         description: ep.description,
@@ -250,6 +251,7 @@ function exportDrama(db, cfg, log, dramaId) {
             .filter(idx => idx !== undefined);
 
           return {
+            original_id: sb.id,
             storyboard_number: sb.storyboard_number,
             title: sb.title,
             description: sb.description,
@@ -441,6 +443,12 @@ function exportDrama(db, cfg, log, dramaId) {
     const abs = localPathToAbs(storagePath, localRelPath);
     const buf = safeReadFile(abs);
     if (buf) zip.addFile(zipPath, buf);
+  }
+
+  if (options.include_paper_studio !== false) {
+    require('./paper-studio/paperStudioArchiveService').exportToZip(db, cfg, log, dramaId, zip, {
+      include_diagnostics: Boolean(options.include_diagnostics),
+    });
   }
 
   log.info('Drama exported', { drama_id: dramaId, title: drama.title });

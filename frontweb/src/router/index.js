@@ -34,6 +34,12 @@ const router = createRouter({
       meta: { title: '纸片分层动画' }
     },
     {
+      path: '/film/:id/paper-studio',
+      name: 'paper-studio',
+      component: () => import('@/views/PaperStudio.vue'),
+      meta: { title: '纸片动画工作室' }
+    },
+    {
       path: '/ai-config',
       name: 'ai-config',
       component: () => import('@/views/AiConfig.vue'),

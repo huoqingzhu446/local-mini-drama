@@ -1,0 +1,37 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/api-paper-storyboards-apply-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "mode", "shots"],
+  "properties": {
+    "request_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "mode": { "enum": ["append", "replace"] },
+    "shots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 48,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "description": { "type": "string", "maxLength": 8000 },
+          "action": { "type": "string", "maxLength": 8000 },
+          "dialogue": { "type": "string", "maxLength": 8000 },
+          "narration": { "type": "string", "maxLength": 8000 },
+          "duration": { "type": "number", "minimum": 1, "maximum": 120 },
+          "shot_type": { "type": ["string", "null"], "maxLength": 120 },
+          "camera_motion": { "type": ["string", "null"], "maxLength": 120 },
+          "environment_only": { "type": "boolean" },
+          "scene_entity_id": { "type": ["integer", "null"], "minimum": 1 },
+          "scene_entity_name": { "type": ["string", "null"], "maxLength": 160 },
+          "character_entity_ids": { "type": "array", "maxItems": 12, "items": { "type": "integer", "minimum": 1 } },
+          "character_entity_names": { "type": "array", "maxItems": 12, "items": { "type": "string" } },
+          "prop_entity_ids": { "type": "array", "maxItems": 12, "items": { "type": "integer", "minimum": 1 } },
+          "prop_entity_names": { "type": "array", "maxItems": 12, "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

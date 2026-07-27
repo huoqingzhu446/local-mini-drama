@@ -59,12 +59,17 @@
             <div class="paper-asset-inspector__label">纸片资产 #{{ selectedLayer.paper_asset_id }} · {{ paperAssetStatusLabel(selectedPaperAsset?.status || selectedLayer.status) }}</div>
             <img
               v-if="selectedPaperAsset?.image_url || selectedPaperAsset?.cutout_url"
-              :src="selectedPaperAsset.cutout_url || selectedPaperAsset.image_url"
+              :src="paperAssetImageSrc(selectedPaperAsset)"
               class="paper-asset-inspector__thumb"
               alt=""
-              @click="previewPaperAsset(selectedPaperAsset.cutout_url || selectedPaperAsset.image_url)"
+              @click="previewPaperAsset(paperAssetImageSrc(selectedPaperAsset))"
             />
             <div class="paper-asset-inspector__note">请使用左侧对应图层的「Codex 素材」按钮生成候选；候选图仅写入 paper_assets，完整分镜图和主图不会被替换。</div>
+            <PaperAssetReviewPanel
+              v-if="selectedPaperAsset && paperAssetNeedsAlpha(selectedPaperAsset)"
+              :asset="selectedPaperAsset"
+              @changed="onPaperAssetReviewChanged"
+            />
           </div>
           <div v-if="selectedRigParts.length" class="paper-rig-assets">
             <div class="paper-rig-assets__title">Rig 独立部件</div>
@@ -85,6 +90,12 @@
                 idle-tooltip="为该 rig 部件生成独立候选图"
                 @used="onPaperAssetCandidateUsed($event, { paper_asset_id: part.asset_id })"
                 @preview="previewPaperAsset"
+              />
+              <PaperAssetReviewPanel
+                v-if="part.asset && paperAssetNeedsAlpha(part.asset)"
+                :asset="part.asset"
+                compact
+                @changed="onPaperAssetReviewChanged"
               />
             </div>
             <div class="paper-asset-inspector__note">每个部件独立入队并只回写对应 paper_assets；候选仍需抠图/审核后才能成为正式 rig 素材。</div>
@@ -156,7 +167,9 @@ import { paperCompositionsAPI } from '@/api/paperCompositions'
 import { paperAssetsAPI } from '@/api/paperAssets'
 import { taskAPI } from '@/api/task'
 import CodexImageJobButton from '@/components/CodexImageJobButton.vue'
+import PaperAssetReviewPanel from '@/components/paper/PaperAssetReviewPanel.vue'
 import { PAPER_PROOF_KINDS, paperStatusLabel, proofLabel, parsePaperJson } from '@/utils/paperComposition'
+import { paperAssetNeedsAlpha } from '@/utils/paperAssetReview'
 
 const props = defineProps({
   storyboardId: { type: [Number, String], required: true },
@@ -285,6 +298,14 @@ async function onPaperAssetCandidateUsed(_payload, layer) {
   }
 }
 
+async function onPaperAssetReviewChanged() {
+  try {
+    await refreshCompositionOnly()
+  } catch (e) {
+    error.value = e.message || '纸片审核状态刷新失败'
+  }
+}
+
 function previewPaperAsset(url) {
   if (!url) return
   const value = String(url)
@@ -292,6 +313,13 @@ function previewPaperAsset(url) {
   // PaperLayerEditor 没有依赖 FilmCreate 的预览弹窗；在新标签页打开候选，
   // 不触碰 storyboard 主图字段。
   window.open(value, '_blank', 'noopener,noreferrer')
+}
+
+function paperAssetImageSrc(asset) {
+  const source = String(asset?.cutout_url || asset?.image_url || '')
+  if (!source || /^(?:data:image\/|blob:)/i.test(source)) return source
+  const separator = source.includes('?') ? '&' : '?'
+  return `${source}${separator}v=${encodeURIComponent(asset?.version || asset?.updated_at || '')}`
 }
 
 async function validate() {
@@ -388,6 +416,7 @@ onMounted(load)
 .paper-asset-inspector__label,.paper-asset-inspector__note { grid-column:1 / -1; color:#7c5a36; font-size:11px; }
 .paper-asset-inspector__thumb { width:58px; height:58px; object-fit:cover; border-radius:6px; border:1px solid #ead8c3; cursor:zoom-in; }
 .paper-asset-inspector .codex-image-job { min-width:0; }
+.paper-asset-inspector :deep(.paper-review) { grid-column:1 / -1; width:100%; box-sizing:border-box; }
 .paper-asset-inspector__note { color:#9a7650; line-height:1.45; }
 .paper-rig-assets { display:grid; gap:7px; margin:10px 0 12px; padding:10px; border:1px solid #e8dccf; border-radius:8px; background:#fcfaf7; }
 .paper-rig-assets__title { color:#6b4f34; font-size:12px; font-weight:700; }

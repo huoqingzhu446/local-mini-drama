@@ -1590,6 +1590,7 @@ async function callImageApi(db, log, opts) {
     ...(effectiveQuality ? { quality: effectiveQuality } : {}),
     // Cockpit Codex API 已验证可稳定返回 b64_json，避免第三方 URL 生命周期差异。
     ...(isGptImage ? { response_format: 'b64_json' } : {}),
+    ...(isGptImage && opts.background ? { background: opts.background, output_format: 'png' } : {}),
     // volcengine 原生或 doubao-seedream 模型均需关闭水印（默认为 true）
     ...((isVolc || isSeedream) ? { watermark: false } : {}),
     // 多张参考图时加 negative_prompt，防止模型把参考图拼成左右分割的合图

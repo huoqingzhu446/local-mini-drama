@@ -20,6 +20,8 @@ function createApp() {
 
   const taskService = require('./services/taskService');
   taskService.failOrphanedAsyncTasksOnStartup(db, log);
+  const paperStudioRecoveryService = require('./services/paper-studio/paperStudioRecoveryService');
+  paperStudioRecoveryService.recoverOnStartup(db, log);
 
   const { resumeProcessingVideoGenerations } = require('./services/videoService');
   resumeProcessingVideoGenerations(db, log);

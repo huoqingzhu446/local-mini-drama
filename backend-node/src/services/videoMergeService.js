@@ -11,6 +11,10 @@ function list(db, query) {
     sql += ' AND episode_id = ?';
     params.push(query.episode_id);
   }
+  if (query.paper_episode_id) {
+    sql += ' AND paper_episode_id = ?';
+    params.push(query.paper_episode_id);
+  }
   if (query.drama_id) {
     sql += ' AND drama_id = ?';
     params.push(query.drama_id);
@@ -20,9 +24,12 @@ function list(db, query) {
 }
 
 function rowToItem(r) {
+  let sourceManifest = {};
+  try { sourceManifest = JSON.parse(r.source_manifest_json || '{}'); } catch (_) {}
   return {
     id: r.id,
     episode_id: r.episode_id,
+    paper_episode_id: r.paper_episode_id == null ? null : Number(r.paper_episode_id),
     drama_id: r.drama_id,
     title: r.title,
     provider: r.provider,
@@ -31,6 +38,10 @@ function rowToItem(r) {
     duration: r.duration ?? undefined,
     task_id: r.task_id,
     error_msg: r.error_msg ?? undefined,
+    subtitle_local_path: r.subtitle_local_path || null,
+    subtitle_url: r.subtitle_local_path ? `/static/${String(r.subtitle_local_path).replace(/^\/+/, '')}` : null,
+    delivery_hash: r.delivery_hash || null,
+    source_manifest_json: sourceManifest,
     created_at: r.created_at,
     completed_at: r.completed_at,
   };
@@ -65,6 +76,34 @@ function create(db, log, req) {
     now
   );
   return { merge_id: info.lastInsertRowid, task_id: task.id, ...getById(db, info.lastInsertRowid) };
+}
+
+function createPaper(db, log, req) {
+  const now = new Date().toISOString();
+  const taskService = require('./taskService');
+  const paperEpisodeId = Number(req.paper_episode_id);
+  const task = taskService.createTask(db, log, 'paper_video_merge', String(paperEpisodeId));
+  const mergeOptionsJson = req.merge_options && typeof req.merge_options === 'object'
+    ? JSON.stringify(req.merge_options)
+    : '{}';
+  const info = db.prepare(
+    `INSERT INTO video_merges
+      (episode_id, paper_episode_id, drama_id, title, provider, model, status, scenes,
+       merge_options, task_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+  ).run(
+    -Math.abs(paperEpisodeId),
+    paperEpisodeId,
+    Number(req.drama_id) || 0,
+    req.title ?? null,
+    req.provider || 'ffmpeg',
+    req.model ?? null,
+    req.scenes ? JSON.stringify(req.scenes) : '[]',
+    mergeOptionsJson,
+    task.id,
+    now,
+  );
+  return { merge_id: Number(info.lastInsertRowid), task_id: task.id, ...getById(db, info.lastInsertRowid) };
 }
 
 function deleteById(db, log, id) {
@@ -343,13 +382,20 @@ function cleanupFiles(paths) {
   }
 }
 
-function failVideoMerge(db, taskService, mergeId, taskId, episodeId, message) {
+function failVideoMerge(db, taskService, mergeId, taskId, episodeId, message, paperEpisodeId = null) {
   const now = new Date().toISOString();
   const error = String(message || '视频合并失败').slice(0, 1000);
-  db.prepare('UPDATE video_merges SET status = ?, error_msg = ?, completed_at = ? WHERE id = ?')
+  const updated = db.prepare("UPDATE video_merges SET status = ?, error_msg = ?, completed_at = ? WHERE id = ? AND status != 'stale'")
     .run('failed', error, now, mergeId);
-  db.prepare('UPDATE episodes SET status = ?, updated_at = ? WHERE id = ?').run('failed', now, episodeId);
+  if (!updated.changes) return false;
+  if (paperEpisodeId != null) {
+    db.prepare('UPDATE paper_studio_episodes SET status = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL')
+      .run('merge_failed', now, Number(paperEpisodeId));
+  } else {
+    db.prepare('UPDATE episodes SET status = ?, updated_at = ? WHERE id = ?').run('failed', now, episodeId);
+  }
   if (taskId) taskService.updateTaskError(db, taskId, error);
+  return true;
 }
 
 /**
@@ -360,16 +406,18 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
   if (!r) return;
   const taskId = r.task_id;
   const episodeId = r.episode_id;
+  const paperEpisodeId = r.paper_episode_id == null ? null : Number(r.paper_episode_id);
   let scenes = [];
   try {
     scenes = JSON.parse(r.scenes || '[]');
   } catch (_) {
     log.warn('video merge parse scenes failed', { merge_id: mergeId });
   }
-  db.prepare('UPDATE video_merges SET status = ? WHERE id = ?').run('processing', mergeId);
+  const claimed = db.prepare("UPDATE video_merges SET status = 'processing' WHERE id = ? AND status = 'pending'").run(mergeId);
+  if (!claimed.changes) return;
   const taskService = require('./taskService');
   if (scenes.length === 0) {
-    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '无有效视频片段');
+    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '无有效视频片段', paperEpisodeId);
     return;
   }
   const storageRoot = getStorageRoot();
@@ -404,12 +452,12 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
 
   if (!ffmpegAvailable) {
     cleanupFiles(toCleanup);
-    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '服务器未安装 FFmpeg，无法合成视频');
+    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '服务器未安装 FFmpeg，无法合成视频', paperEpisodeId);
     return;
   }
   if (!hasLocalFfprobe()) {
     cleanupFiles(toCleanup);
-    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '服务器未安装 FFprobe，无法校验视频片段和合成时长');
+    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '服务器未安装 FFprobe，无法校验视频片段和合成时长', paperEpisodeId);
     return;
   }
   if (localPaths.length !== scenes.length) {
@@ -420,7 +468,8 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
       mergeId,
       taskId,
       episodeId,
-      `有 ${scenes.length - localPaths.length} 个视频片段无法读取，已停止合成`
+      `有 ${scenes.length - localPaths.length} 个视频片段无法读取，已停止合成`,
+      paperEpisodeId,
     );
     return;
   }
@@ -454,14 +503,14 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
       });
     } else {
       cleanupFiles([...toCleanup, outputPath]);
-      failVideoMerge(db, taskService, mergeId, taskId, episodeId, result.error || '视频合并失败');
+      failVideoMerge(db, taskService, mergeId, taskId, episodeId, result.error || '视频合并失败', paperEpisodeId);
       return;
     }
   }
 
   if (!mergedRelativePath) {
     cleanupFiles(toCleanup);
-    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '没有生成有效的合成视频');
+    failVideoMerge(db, taskService, mergeId, taskId, episodeId, '没有生成有效的合成视频', paperEpisodeId);
     return;
   }
 
@@ -499,26 +548,39 @@ async function processVideoMerge(db, log, mergeId, baseUrl) {
   const finalVerified = verifyMergedOutput(finalAbsPath, expectedDuration, log);
   cleanupFiles(toCleanup);
   if (!finalVerified.ok) {
-    failVideoMerge(db, taskService, mergeId, taskId, episodeId, finalVerified.error || '合成视频校验失败');
+    failVideoMerge(db, taskService, mergeId, taskId, episodeId, finalVerified.error || '合成视频校验失败', paperEpisodeId);
     return;
   }
   mergedDuration = finalVerified.duration;
 
   const finalMergedUrl = mergedRelativePath;
   const completedAt = new Date().toISOString();
-  db.prepare(
-    'UPDATE video_merges SET status = ?, merged_url = ?, duration = ?, completed_at = ?, error_msg = ? WHERE id = ?'
-  ).run('completed', finalMergedUrl, Math.round(mergedDuration) || null, completedAt, null, mergeId);
-  db.prepare('UPDATE episodes SET video_url = ?, status = ?, updated_at = ? WHERE id = ?').run(finalMergedUrl, 'completed', completedAt, episodeId);
-  if (taskId) {
-    taskService.updateTaskResult(db, taskId, { merge_id: mergeId, video_url: finalMergedUrl, duration: Math.round(mergedDuration) });
-  }
+  let committed = false;
+  const finish = db.transaction(() => {
+    const updated = db.prepare(
+      "UPDATE video_merges SET status = ?, merged_url = ?, duration = ?, completed_at = ?, error_msg = ? WHERE id = ? AND status = 'processing'"
+    ).run('completed', finalMergedUrl, Math.round(mergedDuration) || null, completedAt, null, mergeId);
+    if (!updated.changes) return;
+    if (paperEpisodeId != null) {
+      db.prepare('UPDATE paper_studio_episodes SET status = ?, updated_at = ?, version = version + 1 WHERE id = ? AND deleted_at IS NULL')
+        .run('published', completedAt, paperEpisodeId);
+    } else {
+      db.prepare('UPDATE episodes SET video_url = ?, status = ?, updated_at = ? WHERE id = ?').run(finalMergedUrl, 'completed', completedAt, episodeId);
+    }
+    if (taskId) {
+      taskService.updateTaskResult(db, taskId, { merge_id: mergeId, video_url: finalMergedUrl, duration: Math.round(mergedDuration) });
+    }
+    committed = true;
+  });
+  finish();
+  if (!committed) cleanupFiles([finalAbsPath, outputPath].filter(Boolean));
 }
 
 module.exports = {
   list,
   getById,
   create,
+  createPaper,
   deleteById,
   processVideoMerge,
   _test: {

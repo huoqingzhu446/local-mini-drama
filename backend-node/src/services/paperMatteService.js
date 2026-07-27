@@ -25,12 +25,211 @@ function chooseKeyColor(method, options) {
   return method === 'white_v1' ? [255, 255, 255] : [0, 255, 0];
 }
 
+function median(values) {
+  if (!values.length) return 0;
+  values.sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)];
+}
+
+/**
+ * AI-generated "white background" assets are commonly warm gray rather than
+ * RGB(255,255,255). Sample a narrow border band so the key follows the actual
+ * generated plate while avoiding most of the centered subject.
+ */
+function estimateBorderKeyColor(data, info) {
+  const { width, height, channels } = info;
+  const band = Math.max(2, Math.round(Math.min(width, height) * 0.025));
+  const stride = Math.max(1, Math.floor(Math.min(width, height) / 300));
+  const red = [];
+  const green = [];
+  const blue = [];
+  for (let y = 0; y < height; y += stride) {
+    for (let x = 0; x < width; x += stride) {
+      if (x >= band && x < width - band && y >= band && y < height - band) continue;
+      const offset = (y * width + x) * channels;
+      const r = data[offset];
+      const g = data[offset + 1];
+      const b = data[offset + 2];
+      // white_v1 intentionally targets a light plate. Excluding dark edge
+      // pixels prevents a subject touching one border from polluting the key.
+      const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      if (luminance < 128) continue;
+      red.push(r);
+      green.push(g);
+      blue.push(b);
+    }
+  }
+  if (!red.length) return [255, 255, 255];
+  return [median(red), median(green), median(blue)];
+}
+
 function alphaForPixel(r, g, b, a, key, threshold, softness) {
   if (a === 0) return 0;
   const distance = colorDistance(r, g, b, key);
   if (distance <= threshold) return 0;
   if (distance >= threshold + softness) return a;
   return Math.round(a * ((distance - threshold) / softness));
+}
+
+function clampByte(value) {
+  return Math.max(0, Math.min(255, Math.round(Number(value) || 0)));
+}
+
+function isChromaGreenKey(key) {
+  return Array.isArray(key)
+    && Number(key[1]) >= 180
+    && Number(key[1]) - Number(key[0]) >= 80
+    && Number(key[1]) - Number(key[2]) >= 80;
+}
+
+/**
+ * Alpha alone is not enough for a chroma-backed cutout. The RGB values under
+ * antialiased edge pixels still contain the matte colour and become a bright
+ * outline when composited on another background. First unmix the sampled
+ * plate colour from partial-alpha pixels, then suppress residual green only
+ * on the alpha boundary. Interior colours are deliberately left untouched.
+ */
+function defringeRgba(data, info, key, options = {}) {
+  const { width, height } = info;
+  const pixels = width * height;
+  const alpha = Buffer.allocUnsafe(pixels);
+  const chromaGreen = isChromaGreenKey(key);
+  const applyUnmix = options.apply_unmix !== false;
+  const radius = Math.max(1, Math.min(4, Math.round(Number(options.edge_radius || 2))));
+  const greenTolerance = Math.max(0, Number(options.green_tolerance ?? 8));
+  let transparentRgbCleared = 0;
+  let unmixedPixels = 0;
+
+  // Some image providers return a PNG with "transparent" checkerboard noise
+  // baked into the alpha channel: the subject is opaque, but hundreds of
+  // thousands of background pixels sit around alpha 10..60. Normal antialias
+  // edges occupy only a narrow band, so a large diffuse low-alpha population
+  // is a reliable signal that this is background noise rather than detail.
+  const lowAlphaThreshold = Math.max(8, Math.min(96, Math.round(Number(options.low_alpha_threshold || 64))));
+  let lowAlphaCandidates = 0;
+  let opaquePixels = 0;
+  for (let pixel = 0; pixel < pixels; pixel += 1) {
+    const a = data[pixel * 4 + 3];
+    if (a > 1 && a <= lowAlphaThreshold) lowAlphaCandidates += 1;
+    if (a >= 245) opaquePixels += 1;
+  }
+  const lowAlphaCandidateRatio = pixels ? lowAlphaCandidates / pixels : 0;
+  const opaqueRatio = pixels ? opaquePixels / pixels : 0;
+  const lowAlphaCleanupApplied = options.cleanup_low_alpha !== false
+    && lowAlphaCandidateRatio >= Number(options.low_alpha_noise_ratio || 0.06)
+    && opaqueRatio >= 0.02;
+  let lowAlphaCleared = 0;
+  if (lowAlphaCleanupApplied) {
+    for (let pixel = 0; pixel < pixels; pixel += 1) {
+      const offset = pixel * 4;
+      if (data[offset + 3] <= 1 || data[offset + 3] > lowAlphaThreshold) continue;
+      data[offset] = 0;
+      data[offset + 1] = 0;
+      data[offset + 2] = 0;
+      data[offset + 3] = 0;
+      lowAlphaCleared += 1;
+    }
+  }
+
+  for (let pixel = 0; pixel < pixels; pixel += 1) {
+    const offset = pixel * 4;
+    const a = data[offset + 3];
+    alpha[pixel] = a;
+    if (a <= 1) {
+      if (data[offset] || data[offset + 1] || data[offset + 2]) transparentRgbCleared += 1;
+      data[offset] = 0;
+      data[offset + 1] = 0;
+      data[offset + 2] = 0;
+      continue;
+    }
+    if (!applyUnmix || a >= 254) continue;
+    const normalizedAlpha = Math.max(1 / 255, a / 255);
+    const backgroundWeight = 1 - normalizedAlpha;
+    for (let channel = 0; channel < 3; channel += 1) {
+      data[offset + channel] = clampByte(
+        (data[offset + channel] - Number(key[channel] || 0) * backgroundWeight) / normalizedAlpha,
+      );
+    }
+    unmixedPixels += 1;
+  }
+
+  let edgePixels = 0;
+  let spillPixelsBefore = 0;
+  let despilledPixels = 0;
+  if (chromaGreen) {
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const pixel = y * width + x;
+        const a = alpha[pixel];
+        if (a < 12) continue;
+        let minNeighborAlpha = 255;
+        const minY = Math.max(0, y - radius);
+        const maxY = Math.min(height - 1, y + radius);
+        const minX = Math.max(0, x - radius);
+        const maxX = Math.min(width - 1, x + radius);
+        for (let nearbyY = minY; nearbyY <= maxY; nearbyY += 1) {
+          for (let nearbyX = minX; nearbyX <= maxX; nearbyX += 1) {
+            minNeighborAlpha = Math.min(minNeighborAlpha, alpha[nearbyY * width + nearbyX]);
+          }
+        }
+        if (a >= 254 && minNeighborAlpha >= 245) continue;
+        edgePixels += 1;
+        const offset = pixel * 4;
+        const maxRedBlue = Math.max(data[offset], data[offset + 2]);
+        const excess = data[offset + 1] - maxRedBlue;
+        if (excess <= greenTolerance) continue;
+        spillPixelsBefore += 1;
+        const edgeStrength = Math.max((255 - a) / 255, (255 - minNeighborAlpha) / 255);
+        const targetGreen = maxRedBlue + greenTolerance;
+        const correction = Math.min(1, 0.7 + edgeStrength * 0.3);
+        data[offset + 1] = clampByte(data[offset + 1] + (targetGreen - data[offset + 1]) * correction);
+        despilledPixels += 1;
+      }
+    }
+  }
+
+  let residualKeyEdgePixels = 0;
+  if (chromaGreen && edgePixels) {
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const pixel = y * width + x;
+        const a = alpha[pixel];
+        if (a < 12) continue;
+        let minNeighborAlpha = 255;
+        for (let nearbyY = Math.max(0, y - radius); nearbyY <= Math.min(height - 1, y + radius); nearbyY += 1) {
+          for (let nearbyX = Math.max(0, x - radius); nearbyX <= Math.min(width - 1, x + radius); nearbyX += 1) {
+            minNeighborAlpha = Math.min(minNeighborAlpha, alpha[nearbyY * width + nearbyX]);
+          }
+        }
+        if (a >= 254 && minNeighborAlpha >= 245) continue;
+        const offset = pixel * 4;
+        if (data[offset + 1] > Math.max(data[offset], data[offset + 2]) + greenTolerance + 4) {
+          residualKeyEdgePixels += 1;
+        }
+      }
+    }
+  }
+
+  return {
+    version: 'edge-defringe-v2',
+    key_color: key.map((value) => clampByte(value)),
+    chroma_green: chromaGreen,
+    unmixed_pixels: unmixedPixels,
+    transparent_rgb_cleared: transparentRgbCleared,
+    edge_pixels: edgePixels,
+    spill_pixels_before: spillPixelsBefore,
+    despilled_pixels: despilledPixels,
+    residual_key_edge_pixels: residualKeyEdgePixels,
+    residual_key_edge_ratio: edgePixels ? Number((residualKeyEdgePixels / edgePixels).toFixed(6)) : 0,
+    low_alpha_cleanup: {
+      applied: lowAlphaCleanupApplied,
+      threshold: lowAlphaThreshold,
+      candidate_pixels: lowAlphaCandidates,
+      candidate_ratio: Number(lowAlphaCandidateRatio.toFixed(6)),
+      opaque_ratio: Number(opaqueRatio.toFixed(6)),
+      cleared_pixels: lowAlphaCleared,
+    },
+  };
 }
 
 async function process(db, cfg, asset, options = {}) {
@@ -50,7 +249,10 @@ async function process(db, cfg, asset, options = {}) {
   let minY = input.info.height;
   let maxX = -1;
   let maxY = -1;
-  const key = chooseKeyColor(method, options);
+  const explicitKey = Array.isArray(options.key_color) && options.key_color.length >= 3;
+  const key = method === 'white_v1' && !explicitKey
+    ? estimateBorderKeyColor(data, input.info)
+    : chooseKeyColor(method, options);
   for (let y = 0; y < input.info.height; y += 1) {
     for (let x = 0; x < input.info.width; x += 1) {
       const i = (y * input.info.width + x) * 4;
@@ -65,6 +267,7 @@ async function process(db, cfg, asset, options = {}) {
       }
     }
   }
+  const defringe = defringeRgba(data, input.info, key, { apply_unmix: true });
   const total = input.info.width * input.info.height;
   const transparentRatio = total ? transparent / total : 0;
   const visibleRatio = total ? visible / total : 0;
@@ -74,10 +277,12 @@ async function process(db, cfg, asset, options = {}) {
     width: (maxX - minX + 1) / input.info.width,
     height: (maxY - minY + 1) / input.info.height,
   } : {};
-  const greenEdgeRatio = method === 'green_screen_v1' ? transparentRatio : 0;
+  const greenEdgeRatio = method === 'green_screen_v1' ? defringe.residual_key_edge_ratio : 0;
   const diagnostics = {
     schema_version: 1,
     method,
+    key_color: key,
+    key_color_source: explicitKey ? 'manual' : (method === 'white_v1' ? 'border_median' : 'preset'),
     source_hash: sha256File(source),
     width: input.info.width,
     height: input.info.height,
@@ -85,9 +290,10 @@ async function process(db, cfg, asset, options = {}) {
     transparent_ratio: Number(transparentRatio.toFixed(6)),
     visible_ratio: Number(visibleRatio.toFixed(6)),
     green_edge_ratio: Number(greenEdgeRatio.toFixed(6)),
+    defringe,
     safety_margin: Number(options.safety_margin ?? 0.04),
   };
-  const reviewPass = visibleRatio > 0.01 && visibleRatio < 0.99 && (method !== 'green_screen_v1' || greenEdgeRatio > 0.02);
+  const reviewPass = visibleRatio > 0.01 && visibleRatio < 0.99 && (method !== 'green_screen_v1' || greenEdgeRatio <= 0.02);
   diagnostics.review = { status: reviewPass ? 'pass' : 'warning', operator: 'system', at: nowIso() };
 
   const project = storageLayout.getProjectStorageSubdir(db, asset.drama_id);
@@ -128,4 +334,11 @@ async function process(db, cfg, asset, options = {}) {
   };
 }
 
-module.exports = { process, colorDistance, alphaForPixel };
+module.exports = {
+  process,
+  colorDistance,
+  alphaForPixel,
+  estimateBorderKeyColor,
+  isChromaGreenKey,
+  defringeRgba,
+};

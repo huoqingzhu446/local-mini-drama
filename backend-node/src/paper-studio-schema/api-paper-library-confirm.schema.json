@@ -1,0 +1,29 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/api-paper-library-confirm-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "items"],
+  "properties": {
+    "request_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action", "entity_type", "name"],
+        "properties": {
+          "action": { "enum": ["new", "merge", "ignore"] },
+          "entity_type": { "enum": ["character", "scene", "prop"] },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 2000 },
+          "aliases": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
+          "relative_height": { "type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 3 },
+          "merge_into_id": { "type": ["integer", "null"], "minimum": 1 },
+          "extraction_meta": { "type": "object" }
+        }
+      }
+    }
+  }
+}

@@ -10,17 +10,22 @@
     "migrate:07": "node scripts/run-migration-07.js",
     "codex:export-image-jobs": "node scripts/codex-export-image-jobs.js",
     "codex:import-image-results": "node scripts/codex-import-image-results.js",
+    "kokoro:install": "bash tools/kokoro-fastapi/install.sh",
+    "kokoro:start": "bash tools/kokoro-fastapi/start.sh",
     "paper:render:slice0": "node scripts/render-paper-storyboard.mjs --snapshot src/paper-renderer/fixtures/slice0-snapshot.json --output data/paper-slice0",
-    "paper:verify:slice0": "node scripts/verify-paper-render.js --manifest data/paper-slice0/manifest.json"
+    "paper:verify:slice0": "node scripts/verify-paper-render.js --manifest data/paper-slice0/manifest.json",
+    "paper-studio:verify-procedural": "node scripts/verify-paper-studio-procedural-render.mjs"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
     "@remotion/bundler": "4.0.491",
+    "@remotion/media": "4.0.491",
     "@remotion/renderer": "4.0.491",
     "@volcengine/openapi": "^1.36.1",
     "adm-zip": "^0.5.16",
+    "ajv": "^8.17.1",
     "better-sqlite3": "^11.6.0",
     "cors": "^2.8.5",
     "express": "^4.21.0",

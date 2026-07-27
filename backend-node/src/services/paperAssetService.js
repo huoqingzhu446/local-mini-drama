@@ -25,6 +25,8 @@ const ASSET_TYPES = new Set([
 ]);
 const ASSET_SCOPES = new Set(['drama', 'scene', 'storyboard']);
 const ASSET_STATUSES = new Set(['missing', 'candidate', 'needs_review', 'ready', 'stale', 'deleted']);
+const ALPHA_ASSET_TYPES = new Set(['cutout', 'rig_part', 'prop_state', 'mask']);
+const MIN_REVIEWABLE_TRANSPARENT_RATIO = 0.005;
 
 function rowToAsset(row) {
   if (!row) return null;
@@ -285,6 +287,19 @@ function resolveAssetForRender(db, cfg, id, options = {}) {
   if (['cutout', 'rig_part', 'prop_state', 'mask'].includes(row.asset_type) && row.matte_quality === 'fail') {
     throw new PaperError('PAPER_MATTE_INVALID', '透明素材抠图诊断未通过', { asset_id: id }, 422);
   }
+  if (ALPHA_ASSET_TYPES.has(row.asset_type)) {
+    const transparentRatio = Number(row.processing_json?.transparent_ratio);
+    if (Number.isFinite(transparentRatio) && transparentRatio < MIN_REVIEWABLE_TRANSPARENT_RATIO) {
+      throw new PaperError('PAPER_MATTE_INVALID', '透明素材几乎没有透明像素，不能通过正式审核', {
+        asset_id: id,
+        transparent_ratio: transparentRatio,
+        minimum: MIN_REVIEWABLE_TRANSPARENT_RATIO,
+      }, 422);
+    }
+    if (row.processing_json?.has_alpha === false && !row.cutout_local_path) {
+      throw new PaperError('PAPER_MATTE_INVALID', '透明素材文件没有有效 Alpha', { asset_id: id }, 422);
+    }
+  }
   return {
     ...row,
     processing_json: processing,
@@ -324,6 +339,47 @@ function refreshFileMetadata(db, cfg, id, options = {}) {
   return { ...updated, width: info.width, height: info.height };
 }
 
+async function inspectUploadedAlpha(filePath) {
+  const input = await sharp(filePath).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { width, height, channels } = input.info;
+  let transparent = 0;
+  let visible = 0;
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const alpha = input.data[(y * width + x) * channels + channels - 1];
+      if (alpha < 250) transparent += 1;
+      if (alpha >= 12) {
+        visible += 1;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+  const total = Math.max(1, width * height);
+  const transparentRatio = transparent / total;
+  const visibleRatio = visible / total;
+  const bbox = maxX >= 0 ? {
+    x: minX / width,
+    y: minY / height,
+    width: (maxX - minX + 1) / width,
+    height: (maxY - minY + 1) / height,
+  } : {};
+  return {
+    width,
+    height,
+    has_transparency: transparentRatio > 0.001 && visibleRatio > 0.001,
+    transparent_ratio: Number(transparentRatio.toFixed(6)),
+    visible_ratio: Number(visibleRatio.toFixed(6)),
+    bbox,
+  };
+}
+
 async function attachSource(db, cfg, id, sourcePath, options = {}) {
   const asset = get(db, id);
   if (!asset) throw new PaperError('PAPER_NOT_FOUND', '纸片资产不存在', { id }, 404);
@@ -336,18 +392,34 @@ async function attachSource(db, cfg, id, sourcePath, options = {}) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   await sharp(sourcePath).png().toFile(dest);
   const metadata = await sharp(dest).metadata();
+  const alpha = await inspectUploadedAlpha(dest);
   const hash = sha256File(dest);
-  const hasAlpha = Boolean(metadata.hasAlpha || metadata.channels === 4);
-  const bbox = { x: 0, y: 0, width: 1, height: 1 };
-  const status = options.status || (['background_plate', 'midground', 'occluder', 'decoration'].includes(asset.asset_type) ? 'ready' : 'needs_review');
+  const hasAlphaChannel = Boolean(metadata.hasAlpha || metadata.channels === 4);
+  const hasAlpha = hasAlphaChannel && alpha.has_transparency;
+  const bbox = Object.keys(alpha.bbox).length ? alpha.bbox : { x: 0, y: 0, width: 1, height: 1 };
+  const needsAlphaReview = ALPHA_ASSET_TYPES.has(asset.asset_type);
+  const requestedStatus = options.status || (['background_plate', 'midground', 'occluder', 'decoration'].includes(asset.asset_type) ? 'ready' : 'needs_review');
+  // Uploading a file is not itself an approval action. Transparent layers
+  // always remain reviewable until the operator checks the rendered edge and
+  // explicitly marks the asset ready.
+  const status = needsAlphaReview ? 'needs_review' : requestedStatus;
   const updated = update(db, id, {
     local_path: rel,
     image_url: asPublicStaticPath(rel),
     asset_hash: hash,
-    processing_json: { ...asset.processing_json, width: metadata.width, height: metadata.height, has_alpha: hasAlpha, source_hash: hash },
+    processing_json: {
+      ...asset.processing_json,
+      width: metadata.width,
+      height: metadata.height,
+      has_alpha_channel: hasAlphaChannel,
+      has_alpha: hasAlpha,
+      transparent_ratio: alpha.transparent_ratio,
+      visible_ratio: alpha.visible_ratio,
+      source_hash: hash,
+    },
     content_bbox_json: bbox,
     alpha_bbox_json: bbox,
-    matte_quality: hasAlpha || status === 'ready' ? 'pass' : 'unknown',
+    matte_quality: needsAlphaReview ? (hasAlpha ? 'pass' : 'unknown') : (hasAlpha || status === 'ready' ? 'pass' : 'unknown'),
     status,
   }, asset.version);
   return { ...updated, width: metadata.width, height: metadata.height };
@@ -363,6 +435,8 @@ module.exports = {
   ASSET_TYPES,
   ASSET_SCOPES,
   ASSET_STATUSES,
+  ALPHA_ASSET_TYPES,
+  MIN_REVIEWABLE_TRANSPARENT_RATIO,
   rowToAsset,
   get,
   list,
@@ -373,6 +447,7 @@ module.exports = {
   softDelete,
   resolveAssetForRender,
   refreshFileMetadata,
+  inspectUploadedAlpha,
   attachSource,
   matte,
 };

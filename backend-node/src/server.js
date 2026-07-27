@@ -16,9 +16,11 @@ const { createApp } = require('./app.js');
 const { closeDb } = require('./db/index.js');
 const logger = require('./logger.js');
 
-const { app, config } = createApp();
+const { app, config, db } = createApp();
 const port = Number(process.env.PORT) || config.server?.port || 5679;
 const host = config.server?.host || '0.0.0.0';
+const { createOrchestrator } = require('./services/paper-studio/paperOrchestratorService');
+const paperOrchestrator = createOrchestrator(db, config, logger);
 
 const server = app.listen(port, host, () => {
   logger.info('Server starting', { port, host });
@@ -26,10 +28,12 @@ const server = app.listen(port, host, () => {
   logger.info('API:       http://localhost:' + port + '/api/v1');
   logger.info('Health:    http://localhost:' + port + '/health');
   logger.info('Server is ready!');
+  paperOrchestrator.start();
 });
 
 function shutdown() {
   logger.info('Shutting down server...');
+  paperOrchestrator.stop();
   server.close(() => {
     closeDb();
     logger.info('Server exited');

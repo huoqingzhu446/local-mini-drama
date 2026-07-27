@@ -940,6 +940,20 @@
           </label>
           <span class="sb-config-divider">｜</span>
           <label class="sb-config-item">
+            <span class="sb-config-label">单批生成</span>
+            <el-input-number
+              v-model="storyboardBatchSize"
+              :min="1"
+              :max="50"
+              :step="1"
+              placeholder="一次完成"
+              class="sb-config-input"
+              @change="() => saveProjectSettings(false)"
+            />
+            <span class="sb-config-hint sb-config-hint--estimate">填 5 即每次只追加 5 镜，整集仍按总分镜数规划</span>
+          </label>
+          <span class="sb-config-divider">｜</span>
+          <label class="sb-config-item">
             <span class="sb-config-label">视频总时长(秒)</span>
             <el-input-number v-model="videoDuration" :min="10" :max="600" :step="5" placeholder="自动" class="sb-config-input" />
             <span class="sb-config-hint sb-config-hint--estimate" :title="scriptEstimateVideoDurationTitle">留空由 AI 决定{{ scriptEstimateVideoDurationHint }}</span>
@@ -1027,10 +1041,19 @@
               type="primary"
               size="large"
               :loading="storyboardGenerating || universalOmniPolishRunning"
-              :disabled="!currentEpisodeId || storyboardGenerating || universalOmniPolishRunning"
+              :disabled="!currentEpisodeId || storyboardGenerating || universalOmniPolishRunning || storyboardBatchTargetReached"
               @click="onGenerateStoryboard"
             >
-              {{ storyboards.length > 0 ? '重新生成分镜' : 'AI 生成分镜' }}
+              {{ storyboardGenerateButtonText }}
+            </el-button>
+            <el-button
+              v-if="storyboardBatchEnabled && storyboards.length > 0"
+              size="large"
+              plain
+              :disabled="storyboardGenerating || universalOmniPolishRunning"
+              @click="onRestartStoryboardBatch"
+            >
+              重新开始分批
             </el-button>
             <ElButton type="info" plain size="large" @click="onAddSingleStoryboard">
             添加一个分镜
@@ -1093,6 +1116,9 @@
               </el-tooltip>
             </div>
           </template>
+        </div>
+        <div v-if="storyboardBatchEnabled" class="sb-batch-generation-hint">
+          {{ storyboardBatchProgressHint }}
         </div>
         <!-- 批量生成进度 -->
         <div v-if="batchImageRunning || batchVideoRunning || batchImageErrors.length || batchVideoErrors.length" class="batch-status">
@@ -4453,6 +4479,7 @@ const dragOverResourceKey = ref(null) // 'char-1' | 'prop-2' | 'scene-3'
 const dragOverSbId = ref(null)
 // 公共库弹窗状态已移至各 composable
 const storyboardCount = ref(null) // 分镜数量
+const storyboardBatchSize = ref(null) // 单次追加数量；留空表示一次生成全部
 const videoDuration = ref(null) // 视频总长度
 /** 分镜生成时是否要求 AI 输出 narration（解说旁白） */
 const storyboardIncludeNarration = ref(false)
@@ -4559,6 +4586,48 @@ function getStoryboardCountForApi() {
   if (sec == null || !Number.isFinite(sec)) return undefined
   return shotCountEstimateFromDurationSec(sec).locked
 }
+
+function getStoryboardBatchSizeForApi() {
+  const value = Number(storyboardBatchSize.value)
+  return Number.isFinite(value) && value >= 1 ? Math.round(value) : undefined
+}
+
+const storyboardBatchEnabled = computed(() => !!getStoryboardBatchSizeForApi())
+const storyboardBatchTargetCount = computed(() => getStoryboardCountForApi() || 0)
+const storyboardBatchTargetReached = computed(() => (
+  storyboardBatchEnabled.value &&
+  storyboardBatchTargetCount.value > 0 &&
+  storyboards.value.length >= storyboardBatchTargetCount.value
+))
+
+function nextStoryboardNumberForBatch() {
+  return (storyboards.value || []).reduce(
+    (max, sb) => Math.max(max, Number(sb?.storyboard_number) || 0),
+    0
+  ) + 1
+}
+
+const storyboardGenerateButtonText = computed(() => {
+  if (!storyboardBatchEnabled.value) {
+    return storyboards.value.length > 0 ? '重新生成分镜' : 'AI 生成分镜'
+  }
+  const target = storyboardBatchTargetCount.value
+  if (storyboardBatchTargetReached.value) return `已完成 ${storyboards.value.length}/${target} 镜`
+  const start = storyboards.value.length > 0 ? nextStoryboardNumberForBatch() : 1
+  const remaining = Math.max(0, target - storyboards.value.length)
+  const count = Math.min(getStoryboardBatchSizeForApi() || 1, remaining || (getStoryboardBatchSizeForApi() || 1))
+  const end = start + count - 1
+  return storyboards.value.length > 0 ? `继续生成第 ${start}～${end} 镜` : `生成第 ${start}～${end} 镜`
+})
+
+const storyboardBatchProgressHint = computed(() => {
+  const target = storyboardBatchTargetCount.value
+  const batch = getStoryboardBatchSizeForApi() || 0
+  if (storyboards.value.length >= target && target > 0) {
+    return `分批生成已完成：${storyboards.value.length}/${target} 镜。已有分镜均被保留。`
+  }
+  return `分批生成：已完成 ${storyboards.value.length}/${target || '自动'} 镜，每次最多追加 ${batch} 镜；不会把整集剧情压缩进单批。`
+})
 
 function getFirstImageFile(dataTransfer) {
   if (!dataTransfer?.files?.length) return null
@@ -6085,6 +6154,9 @@ async function loadDrama() {
     projectImageQuality.value = (d.metadata && d.metadata.image_quality) ? String(d.metadata.image_quality) : 'standard'
     storyboardIncludeNarration.value = !!(d.metadata && d.metadata.storyboard_include_narration)
     storyboardUniversalOmni.value = !!(d.metadata && d.metadata.storyboard_universal_omni)
+    storyboardBatchSize.value = Number(d.metadata?.storyboard_generation_batch_size) > 0
+      ? Number(d.metadata.storyboard_generation_batch_size)
+      : null
     storyboardUseFirstLastFrame.value = !!(d.metadata && d.metadata.storyboard_use_first_last_frame)
     selectedStoryboardPromptStyleIds.value = normalizePromptStyleIds(
       Array.isArray(d.metadata?.storyboard_prompt_style_ids) ? d.metadata.storyboard_prompt_style_ids : []
@@ -6496,6 +6568,7 @@ async function saveProjectSettings(includeGenerationStyle = false) {
     // 视觉圣经由版本化草稿/激活流程保存，普通设置自动保存不再覆盖活动版本。
     storyboard_include_narration: !!storyboardIncludeNarration.value,
     storyboard_universal_omni: !!storyboardUniversalOmni.value,
+    storyboard_generation_batch_size: getStoryboardBatchSizeForApi(),
     storyboard_use_first_last_frame: !!storyboardUseFirstLastFrame.value,
     storyboard_prompt_style_ids: getSelectedPromptStyleIdsForApi(),
     last_frame_use_first_layout_lock: !!lastFrameUseFirstLayoutLock.value,
@@ -7511,7 +7584,7 @@ async function onPolishUniversalSegmentPromptStream(sb, opts = {}) {
 
 /**
  * 分镜脚本生成完成后：按镜序逐个流式润色全能片段（服务端已落库）。
- * @param {{ checkPause?: () => Promise<void>, onShotProgress?: (cur:number,total:number,sb:object)=>void, onShotError?: (sb:object,msg:string)=>void }} opts
+ * @param {{ checkPause?: () => Promise<void>, onShotProgress?: (cur:number,total:number,sb:object)=>void, onShotError?: (sb:object,msg:string)=>void, storyboardIds?: number[] }} opts
  */
 async function polishUniversalSegmentsAfterGeneration(opts = {}) {
   const checkPause = typeof opts.checkPause === 'function' ? opts.checkPause : async () => {}
@@ -7522,7 +7595,15 @@ async function polishUniversalSegmentsAfterGeneration(opts = {}) {
 
   const rawList = store.currentEpisode?.storyboards || []
   const list = rawList.slice().sort((a, b) => (Number(a.storyboard_number) || 0) - (Number(b.storyboard_number) || 0))
-  const targets = list.filter((sb) => sb?.id && isSbUniversalMode(sb.id) && sbUniversalSegmentTrimmed(sb))
+  const requestedIds = Array.isArray(opts.storyboardIds)
+    ? new Set(opts.storyboardIds.map(Number))
+    : null
+  const targets = list.filter((sb) => (
+    sb?.id &&
+    (!requestedIds || requestedIds.has(Number(sb.id))) &&
+    isSbUniversalMode(sb.id) &&
+    sbUniversalSegmentTrimmed(sb)
+  ))
 
   if (!targets.length) return { polished: 0, skipped: true }
 
@@ -8330,19 +8411,30 @@ async function refreshStoryboardsOnly() {
   return refreshStoryboardsForEpisode(currentEpisodeId.value)
 }
 
-async function onGenerateStoryboard() {
+async function onGenerateStoryboard(options = {}) {
   trackFilmCreateAction('generate_storyboard_click')
   const epId = currentEpisodeId.value
   if (!epId) return
+  const restartBatch = options?.restart === true
+  const batchSize = getStoryboardBatchSizeForApi()
+  if (batchSize && !restartBatch && storyboardBatchTargetReached.value) {
+    ElMessage.info(`当前已达到总分镜目标 ${storyboardBatchTargetCount.value} 镜`)
+    return
+  }
   const meta = buildExtractTaskMeta(store, dramaId.value, epId, GEN_RESOURCE.GENERATE_STORYBOARD, 'AI生成分镜')
   genStore.markRunning(meta)
   // 生成期间每 2 秒刷新该集分镜列表，让已解析的分镜逐步出现（切集后仍更新原集缓存）
   const refreshTimer = setInterval(() => refreshStoryboardsForEpisode(epId), 2000)
+  let generationResult = null
   try {
     const res = await dramaAPI.generateStoryboard(epId, {
       model: undefined,
       style: getSelectedStyle(),
       storyboard_count: getStoryboardCountForApi(),
+      storyboard_batch_size: batchSize,
+      storyboard_batch_mode: batchSize
+        ? (restartBatch || storyboards.value.length === 0 ? 'replace' : 'append')
+        : undefined,
       video_duration: getVideoDurationForApi(),
       aspect_ratio: projectAspectRatio.value || '16:9',
       include_narration: !!storyboardIncludeNarration.value,
@@ -8354,6 +8446,7 @@ async function onGenerateStoryboard() {
       const pollRes = await pollTask(taskId, () => loadDrama(), meta)
       // failed / timeout：pollTask 内已展示对应提示，直接返回，不显示「完成」
       if (pollRes?.status !== 'completed') return
+      generationResult = pollRes?.result || null
       if (pollRes?.result?.truncated) {
         sbTruncatedWarning.value = true
         sbTruncatedDismissed.value = false
@@ -8362,15 +8455,15 @@ async function onGenerateStoryboard() {
     await loadDrama()
     // 生成完成后静默补全空缺的摄影参数（只填未填字段，不覆盖 AI 已填的）
     storyboardsAPI.batchInferParams(epId, false).catch(() => {})
-    const polishRes = await polishUniversalSegmentsAfterGeneration({})
+    const generatedStoryboardIds = (generationResult?.storyboards || []).map((sb) => Number(sb?.id)).filter(Number.isFinite)
+    const polishRes = await polishUniversalSegmentsAfterGeneration({ storyboardIds: generatedStoryboardIds })
     const polishedN = polishRes?.polished ?? 0
-    ElMessage.success(
-      storyboardUniversalOmni.value
-        ? polishedN > 0
-          ? `全能分镜生成完成，已自动润色 ${polishedN} 条片段`
-          : '全能分镜生成完成'
-        : '分镜生成完成'
-    )
+    const batchResult = generationResult?.batch
+    let successText = batchResult
+      ? `本批已生成 ${batchResult.generated} 镜，当前共 ${batchResult.generated_total}/${batchResult.total_target} 镜`
+      : '分镜生成完成'
+    if (storyboardUniversalOmni.value && polishedN > 0) successText += `，已自动润色 ${polishedN} 条片段`
+    ElMessage.success(successText)
     trackFilmCreateAction('generate_storyboard_complete', {
       extra: { storyboard_count: (store.storyboards || []).length },
     })
@@ -8381,6 +8474,19 @@ async function onGenerateStoryboard() {
     clearInterval(refreshTimer)
     genStore.markDone(meta)
   }
+}
+
+async function onRestartStoryboardBatch() {
+  try {
+    await ElMessageBox.confirm(
+      `将删除当前 ${storyboards.value.length} 个分镜，并从第 1 镜重新按每批 ${getStoryboardBatchSizeForApi()} 镜生成。是否继续？`,
+      '重新开始分批生成',
+      { type: 'warning', confirmButtonText: '重新开始', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  await onGenerateStoryboard({ restart: true })
 }
 
 async function onAddSingleStoryboard(){
@@ -12319,6 +12425,16 @@ html.light .sb-video-placeholder {
   color: #3a3a44;
   font-size: 0.85rem;
   margin: 0 4px;
+}
+.sb-batch-generation-hint {
+  margin: -2px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  border-radius: 8px;
+  background: rgba(139, 92, 246, 0.07);
+  color: var(--el-text-color-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 .prompt-style-select-row {
   margin-top: 4px;

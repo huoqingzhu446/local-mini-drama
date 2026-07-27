@@ -171,7 +171,10 @@ function downloadEpisodeVideo(db) {
 function exportDrama(db, cfg, log) {
   return (req, res) => {
     try {
-      const { buffer, title } = dramaExportService.exportDrama(db, cfg, log, req.params.id);
+      const { buffer, title } = dramaExportService.exportDrama(db, cfg, log, req.params.id, {
+        include_paper_studio: String(req.query?.include_paper_studio || 'true') !== 'false',
+        include_diagnostics: String(req.query?.include_diagnostics || 'false') === 'true',
+      });
       const safeName = (title || 'drama').replace(/[^\w\u4e00-\u9fff\-]/g, '_').slice(0, 50);
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(safeName)}.zip`);
@@ -261,7 +264,13 @@ function generateStoryboard(db, log) {
     try {
       // 显式处理 model 为空的情况，转为 undefined 以便 service 层触发默认逻辑
       const model = (body.model && String(body.model).trim()) ? body.model : undefined;
-      log.info('Generate storyboard request', { episode_id: req.params.episode_id, storyboard_count: body.storyboard_count, video_duration: body.video_duration });
+      log.info('Generate storyboard request', {
+        episode_id: req.params.episode_id,
+        storyboard_count: body.storyboard_count,
+        storyboard_batch_size: body.storyboard_batch_size,
+        storyboard_batch_mode: body.storyboard_batch_mode,
+        video_duration: body.video_duration,
+      });
       const resData = await dramaService.generateStoryboard(db, log, req.params.episode_id, {
         model: model,
         style: body.style,
@@ -271,6 +280,8 @@ function generateStoryboard(db, log) {
         include_narration: body.include_narration,
         universal_omni_storyboard: body.universal_omni_storyboard,
         prompt_style_ids: body.prompt_style_ids,
+        storyboard_batch_size: body.storyboard_batch_size,
+        storyboard_batch_mode: body.storyboard_batch_mode,
       });
       response.success(res, resData);
     } catch (err) {

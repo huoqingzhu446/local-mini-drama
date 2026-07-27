@@ -1,0 +1,2 @@
+# text2num 3.x 通过 maturin 临时安装 Rust；2.5.1 满足 Kokoro 要求且无需 Rust 工具链。
+text2num==2.5.1

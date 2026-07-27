@@ -19,6 +19,9 @@
           <el-button type="primary" @click="goCreate">
             <el-icon><VideoPlay /></el-icon>进入制作
           </el-button>
+          <el-button class="btn-paper-studio" @click="goPaperStudio">
+            纸片动画工作室
+          </el-button>
           <el-button type="primary" plain @click="goCanvasMode">
             <el-icon><Grid /></el-icon>画布模式
           </el-button>
@@ -942,6 +945,14 @@ function goCreate() {
 
 function goCanvasMode() {
   router.push(`/film/${dramaId}/canvas`)
+}
+
+function goPaperStudio() {
+  const episodeId = episodes.value[0]?.id
+  router.push({
+    path: `/film/${dramaId}/paper-studio`,
+    query: episodeId ? { episode: episodeId } : {},
+  })
 }
 
 function goEpisode(epId) {

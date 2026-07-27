@@ -1,0 +1,14 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/api-paper-entity-update-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["expected_version"],
+  "properties": {
+    "expected_version": { "type": "integer", "minimum": 1 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "aliases": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 120 } },
+    "status": { "enum": ["confirmed", "archived"] },
+    "relative_height": { "type": ["number", "null"], "exclusiveMinimum": 0, "maximum": 3 }
+  }
+}

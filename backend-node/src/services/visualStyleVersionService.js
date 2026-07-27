@@ -376,6 +376,12 @@ function activateVersion(db, log, dramaId, versionId) {
     db.prepare(`UPDATE dramas SET style = ?, metadata = ?, active_visual_style_version_id = ?, active_visual_style_signature = ?, updated_at = ? WHERE id = ?`)
       .run(version.name || drama.style || '', JSON.stringify(metadata), Number(versionId), version.signature, now, Number(dramaId));
     markProjectStale(db, dramaId, reason);
+    try {
+      require('./paper-studio/paperSourceRevisionService').markAffectedStale(db, {
+        drama_id: Number(dramaId),
+        reason: '项目统一视觉风格已更新；旧纸片动画生产版本已失效',
+      });
+    } catch (_) {}
   });
   tx();
   log?.info?.('[视觉风格] 已激活版本', { drama_id: Number(dramaId), version: version.version, signature: version.signature });

@@ -44,6 +44,29 @@ paper_render:
     - settle
     - final_minus_hold
     - exact_final
+paper_studio:
+  enabled: true
+  legacy_v2_enabled: true
+  schema_version: 3
+  renderer: remotion
+  renderer_version: paper-studio-v3.1
+  fps: 30
+  preview_scale: 0.5
+  max_image_concurrency: 2
+  max_matte_concurrency: 1
+  max_render_concurrency: 1
+  max_auto_retries_per_slot: 2
+  max_asset_pixels: 25000000
+  max_snapshot_bytes: 5242880
+  proof_rule_version: paper-proof-v3
+  matte:
+    adapter: auto
+    model_path: null
+    service_url: null
+  render:
+    crf_preview: 28
+    crf_formal: 20
+    timeout_ms: 300000
 ai:
   default_text_provider: openai
   default_image_provider: openai

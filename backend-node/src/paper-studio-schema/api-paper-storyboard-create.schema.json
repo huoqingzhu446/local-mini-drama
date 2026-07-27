@@ -1,0 +1,25 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/api-paper-storyboard-create-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "title"],
+  "properties": {
+    "request_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "shot_number": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "description": { "type": "string", "maxLength": 8000 },
+    "action": { "type": "string", "maxLength": 8000 },
+    "dialogue": { "type": "string", "maxLength": 8000 },
+    "narration": { "type": "string", "maxLength": 8000 },
+    "duration": { "type": "number", "minimum": 1, "maximum": 120 },
+    "shot_type": { "type": ["string", "null"], "maxLength": 120 },
+    "camera_motion": { "type": ["string", "null"], "maxLength": 120 },
+    "visual_prompt": { "type": "string", "maxLength": 12000 },
+    "negative_prompt": { "type": "string", "maxLength": 8000 },
+    "environment_only": { "type": "boolean" },
+    "reference_image_url": { "type": ["string", "null"], "maxLength": 4000 },
+    "reference_local_path": { "type": ["string", "null"], "maxLength": 4000 },
+    "legacy_storyboard_id": { "type": ["integer", "null"], "minimum": 1 },
+    "source_kind": { "enum": ["paper", "legacy_import", "duplicate"] }
+  }
+}

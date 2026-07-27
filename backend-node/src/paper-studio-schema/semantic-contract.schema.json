@@ -1,0 +1,53 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/semantic-contract-v3.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "storyboard_id", "environment", "subjects", "action_beats"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "storyboard_id": { "type": "integer", "minimum": 1 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "clean_plate_required"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "clean_plate_required": { "const": true },
+        "registered_boundaries": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+      }
+    },
+    "subjects": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "kind", "identity"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "kind": { "enum": ["character", "prop", "vehicle", "effect"] },
+          "identity": { "type": "string", "minLength": 1 },
+          "support_key": { "type": ["string", "null"] },
+          "required_states": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+        }
+      }
+    },
+    "action_beats": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "start_frame", "peak_frame", "end_frame", "subject_key", "action"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "start_frame": { "type": "integer", "minimum": 0 },
+          "peak_frame": { "type": "integer", "minimum": 0 },
+          "end_frame": { "type": "integer", "minimum": 1 },
+          "subject_key": { "type": "string", "minLength": 1 },
+          "action": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/composition-node-v3.json",
+  "$ref": "#/$defs/node",
+  "$defs": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "kind", "transform", "children"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["asset", "group", "supported-subject", "registered-environment", "procedural"] },
+        "pattern": { "enum": ["free", "supported-subject", "registered-environment"] },
+        "slot": { "type": ["string", "null"] },
+        "asset_version_id": { "type": ["integer", "null"], "minimum": 1 },
+        "transform": { "type": "object", "additionalProperties": true },
+        "relation": { "type": "object", "additionalProperties": true },
+        "clip": { "type": "object", "additionalProperties": true },
+        "local_z": { "type": "integer" },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/node" } }
+      }
+    }
+  }
+}

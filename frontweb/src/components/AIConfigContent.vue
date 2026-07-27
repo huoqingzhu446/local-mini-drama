@@ -540,7 +540,12 @@ input_reference = (图片文件，可选)</pre>
                       素材库要求的 <code>Authorization: Bearer …</code> Token，由网关或即梦侧签发。
                     </template>
                     <template v-else>
-                      在对应 AI 平台申请的密钥，用于身份验证。<br>
+                      <template v-if="form.provider === 'kokoro'">
+                        本机 Kokoro-FastAPI 默认无需 API Key，可留空。<br>
+                      </template>
+                      <template v-else>
+                        在对应 AI 平台申请的密钥，用于身份验证。<br>
+                      </template>
                       通义：<b>dashscope.aliyuncs.com</b><br>
                       火山：<b>console.volcengine.com/ark</b>
                     </template>
@@ -553,7 +558,7 @@ input_reference = (图片文件，可选)</pre>
           <el-input
             v-model="form.api_key"
             type="password"
-            :placeholder="form.service_type === 'jimeng2_character_auth' ? 'Bearer Token' : (form.provider === 'jimeng_ai_api' ? '即梦 Session，多个用英文逗号分隔' : 'API 密钥')"
+            :placeholder="form.service_type === 'jimeng2_character_auth' ? 'Bearer Token' : (form.provider === 'kokoro' ? '本地服务无需填写' : (form.provider === 'jimeng_ai_api' ? '即梦 Session，多个用英文逗号分隔' : 'API 密钥'))"
             show-password
           />
         </el-form-item>
@@ -660,6 +665,8 @@ input_reference = (图片文件，可选)</pre>
                   <template #content>
                     <div class="cfg-tip-content">
                       TTS 合成使用的音色 ID。<br>
+                      <b>Kokoro 中文音色：</b><br>
+                      zf_xiaobei（女声）、zm_yunxi（男声）<br>
                       <b>MiniMax 常用音色：</b><br>
                       female-shaonv（少女）、female-chengshu（成熟）<br>
                       male-qingxin（清新男）、male-zhicheng（知城男）<br>
@@ -678,6 +685,10 @@ input_reference = (图片文件，可选)</pre>
               placeholder="选择或输入声音 ID"
               style="width: 100%"
             >
+              <el-option-group label="Kokoro 中文音色">
+                <el-option label="zf_xiaobei（中文女声）" value="zf_xiaobei" />
+                <el-option label="zm_yunxi（中文男声）" value="zm_yunxi" />
+              </el-option-group>
               <el-option-group label="MiniMax 女声">
                 <el-option label="female-shaonv（少女）" value="female-shaonv" />
                 <el-option label="female-chengshu（成熟）" value="female-chengshu" />
@@ -690,7 +701,9 @@ input_reference = (图片文件，可选)</pre>
                 <el-option label="audiobook_male_1（有声书）" value="audiobook_male_1" />
               </el-option-group>
             </el-select>
-            <p class="field-tip">MiniMax 必填；不填默认 female-shaonv。</p>
+            <p class="field-tip">
+              Kokoro 不填时默认 zf_xiaobei；MiniMax 不填时默认 female-shaonv。
+            </p>
           </el-form-item>
           <el-form-item>
             <template #label>
@@ -1084,7 +1097,7 @@ input_reference = (图片文件，可选)</pre>
           v-else
           type="success"
           title="连接成功"
-          description="文本生成接口已正常响应。"
+          :description="testServiceType === 'tts' ? 'TTS 服务已正常响应。' : '文本生成接口已正常响应。'"
           show-icon
           :closable="false"
         />
@@ -1299,6 +1312,7 @@ const rules = computed(() => ({
           if (v != null && String(v).trim()) return cb()
           return cb(new Error('请填写 Token'))
         }
+        if (st === 'tts' && form.value.provider === 'kokoro') return cb()
         const proto = form.value.api_protocol
         const ak = (form.value.kling_access_key || '').trim()
         const sk = (form.value.kling_secret_key || '').trim()
@@ -1383,6 +1397,7 @@ const providerConfigs = {
     { id: 'agnes', name: 'Agnes AI', models: ['agnes-video-v2.0'] },
   ],
   tts: [
+    { id: 'kokoro', name: 'Kokoro-FastAPI（本地）', models: ['kokoro'] },
     { id: 'minimax', name: 'MiniMax T2A', models: ['speech-02-hd', 'speech-02-turbo'] },
   ],
   jimeng2_character_auth: [
@@ -1409,6 +1424,7 @@ const providerProtocolMap = {
   xai: 'xai',
   grok: 'xai',
   minimax: 'openai',
+  kokoro: 'openai',
   openai: 'openai',
   chatfire: 'openai',
   qwen: 'openai',
@@ -1424,6 +1440,7 @@ function getBaseUrlForProvider(provider) {
   const p = String(provider).toLowerCase()
   if (p === 'gemini' || p === 'google') return 'https://generativelanguage.googleapis.com'
   if (p === 'minimax') return 'https://api.minimaxi.com/v1'
+  if (p === 'kokoro') return 'http://127.0.0.1:8880/v1'
   if (p === 'volces' || p === 'volcengine') return 'https://ark.cn-beijing.volces.com/api/v3'
   if (p === 'openai') return 'https://api.openai.com/v1'
   if (p === 'deepseek') return 'https://api.deepseek.com'
@@ -1530,7 +1547,7 @@ const endpointPreviewInfo = computed(() => {
     if (p === 'minimax') {
       submitPath = '/t2a_v2?GroupId={group_id}'
     } else {
-      submitPath = endpoint || '/tts'
+      submitPath = endpoint || '/audio/speech'
     }
   } else if (service_type === 'image' || service_type === 'storyboard_image') {
     if (endpoint) {
@@ -1668,6 +1685,11 @@ function onProviderChange(providerId) {
   }
   // 自动填充接口规范
   form.value.api_protocol = providerProtocolMap[providerId] || (st === 'text' ? '' : 'openai')
+  if (st === 'tts' && providerId === 'kokoro') {
+    form.value.voice_id = 'zf_xiaobei'
+    form.value.group_id = ''
+    form.value.api_key = ''
+  }
   if (st === 'video' && providerId === 'jimeng_ai_api') {
     form.value.endpoint = ''
     form.value.query_endpoint = ''

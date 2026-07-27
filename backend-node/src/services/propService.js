@@ -118,6 +118,14 @@ function update(db, log, id, updates) {
   if (set.length === 0) return existing;
   params.push(new Date().toISOString(), id);
   db.prepare('UPDATE props SET ' + set.join(', ') + ', updated_at = ? WHERE id = ?').run(...params);
+  try {
+    require('./paper-studio/paperSourceRevisionService').markAffectedStale(db, {
+      prop_id: Number(id),
+      reason: '分镜关联道具已更新；旧纸片动画生产版本已失效',
+    });
+  } catch (error) {
+    log.warn('Paper studio prop invalidation failed', { prop_id: Number(id), error: error.message });
+  }
   log.info('Prop updated', { prop_id: id });
   return getById(db, id);
 }

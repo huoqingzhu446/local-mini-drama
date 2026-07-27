@@ -1,6 +1,6 @@
 /**
  * TTS 语音合成服务
- * 支持多种 TTS 接口：minimax、edge-tts（本地）、通用 HTTP
+ * 支持多种 TTS 接口：MiniMax、OpenAI 兼容接口、Kokoro-FastAPI（本地）
  */
 const https = require('https');
 const http = require('http');
@@ -116,7 +116,10 @@ async function synthesizeWithOpenai(text, voice, apiKey, baseUrl, model, speed) 
  * 合成 TTS 并保存到本地文件
  * @returns {{ local_path: string, audio_url: string }}
  */
-async function synthesize(db, log, { text, storyboard_id, config, storage_base, voice_id, speed }) {
+async function synthesize(db, log, {
+  text, storyboard_id, config, storage_base, voice_id, speed,
+  output_subdir = 'audio', file_prefix = null,
+}) {
   if (!text || !text.trim()) throw new Error('text 不能为空');
   const aiConfigService = require('./aiConfigService');
   const ttsConfig = config || (() => {
@@ -134,6 +137,7 @@ async function synthesize(db, log, { text, storyboard_id, config, storage_base, 
   const groupId = ttsConfig.group_id || ttsSettings.group_id || '';
   const ttsModel = ttsConfig.default_model || (Array.isArray(ttsConfig.model) ? ttsConfig.model[0] : ttsConfig.model) || '';
   const finalSpeed = speed || ttsSettings.speed || 1.0;
+  const isKokoro = provider === 'kokoro';
   let audioBuffer;
 
   if (provider === 'minimax') {
@@ -144,30 +148,40 @@ async function synthesize(db, log, { text, storyboard_id, config, storage_base, 
       groupId,
       ttsModel || 'speech-02-hd'
     );
-  } else if (provider === 'openai' || ttsConfig.base_url) {
-    console.log('==c sxy synthesizeWithOpenai', text, voiceId, ttsConfig.api_key, ttsConfig.base_url, ttsModel, finalSpeed);
+  } else if (provider === 'openai' || isKokoro || ttsConfig.base_url) {
     audioBuffer = await synthesizeWithOpenai(
       text,
-      voiceId || 'alloy',
+      voiceId || (isKokoro ? 'zf_xiaobei' : 'alloy'),
       ttsConfig.api_key,
       ttsConfig.base_url,
-      ttsModel || 'tts-1',
+      ttsModel || (isKokoro ? 'kokoro' : 'tts-1'),
       finalSpeed
     );
   } else {
-    throw new Error(`不支持的 TTS provider: ${provider}，目前支持 openai、minimax`);
+    throw new Error(`不支持的 TTS provider: ${provider}，目前支持 openai、minimax、kokoro`);
   }
 
   // 保存到本地
-  const audioDir = path.join(storage_base, 'audio');
+  const storageRoot = path.resolve(storage_base);
+  const relativeDir = String(output_subdir || 'audio').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!relativeDir || relativeDir.split('/').includes('..')) throw new Error('TTS 输出目录无效');
+  const audioDir = path.resolve(storageRoot, relativeDir);
+  if (audioDir !== storageRoot && !audioDir.startsWith(`${storageRoot}${path.sep}`)) throw new Error('TTS 输出目录超出本地存储范围');
   if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir, { recursive: true });
-  const filename = `tts_sb${storyboard_id || 'x'}_${randomUUID().slice(0, 8)}.mp3`;
+  const prefix = String(file_prefix || `tts_sb${storyboard_id || 'x'}`).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80) || 'tts';
+  const filename = `${prefix}_${randomUUID().slice(0, 8)}.mp3`;
   const filePath = path.join(audioDir, filename);
   fs.writeFileSync(filePath, audioBuffer);
-  const localPath = `audio/${filename}`;
+  const localPath = path.relative(storageRoot, filePath).replace(/\\/g, '/');
   log.info('[TTS] 合成完成', { storyboard_id, local_path: localPath, provider });
   try { const cs = require('./cloudService'); cs.reportUsage('tts', ttsModel || '', '', 0); } catch (_) {}
-  return { local_path: localPath };
+  return {
+    local_path: localPath,
+    provider,
+    model: ttsModel || (isKokoro ? 'kokoro' : 'tts-1'),
+    voice_id: voiceId || (isKokoro ? 'zf_xiaobei' : 'alloy'),
+    speed: Number(finalSpeed || 1),
+  };
 }
 
 module.exports = { synthesize };

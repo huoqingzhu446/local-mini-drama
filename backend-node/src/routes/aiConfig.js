@@ -106,7 +106,8 @@ function bulkUpdateKey(db, log, cfg) {
 function testConnection(log) {
   return async (req, res) => {
     const body = req.body || {};
-    if (!body.base_url || !body.api_key) {
+    const provider = String(body.provider || '').toLowerCase();
+    if (!body.base_url || (!body.api_key && provider !== 'kokoro')) {
       return response.badRequest(res, '缺少 base_url 或 api_key');
     }
     try {

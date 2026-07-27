@@ -1,0 +1,18 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/api-project-update-v3.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "expected_version"],
+  "properties": {
+    "request_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "expected_version": { "type": "integer", "minimum": 1 },
+    "default_tier": { "enum": ["draft", "balanced", "full-depth"] },
+    "status": { "enum": ["active", "archived"] },
+    "config": { "type": "object", "additionalProperties": true }
+  },
+  "anyOf": [
+    { "required": ["default_tier"], "properties": { "default_tier": { "enum": ["draft", "balanced", "full-depth"] } } },
+    { "required": ["status"], "properties": { "status": { "enum": ["active", "archived"] } } },
+    { "required": ["config"], "properties": { "config": { "type": "object" } } }
+  ]
+}

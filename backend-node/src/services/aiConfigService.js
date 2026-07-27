@@ -251,11 +251,11 @@ function rowToConfig(r) {
 async function testConnection(opts) {
   const base = (opts.base_url || '').replace(/\/$/, '');
   if (!base) throw new Error('base_url 必填');
-  if (!opts.api_key) throw new Error('api_key 必填');
+  const provider = (opts.provider || 'openai').toLowerCase();
+  if (!opts.api_key && provider !== 'kokoro') throw new Error('api_key 必填');
   const models = Array.isArray(opts.model) ? opts.model : opts.model != null ? [opts.model] : [];
   const model = models[0] || '';
   if (!model && (opts.provider === 'gemini' || opts.provider === 'google')) throw new Error('model 必填');
-  const provider = (opts.provider || 'openai').toLowerCase();
   const serviceType = (opts.service_type || '').toLowerCase();
   let endpoint = opts.endpoint || '';
 
@@ -300,6 +300,21 @@ async function testConnection(opts) {
 
   // --- TTS 语音合成 ---
   if (serviceType === 'tts') {
+    if (provider === 'kokoro') {
+      const voicesUrl = base + '/audio/voices';
+      const res = await fetch(voicesUrl, {
+        method: 'GET',
+        headers: opts.api_key ? { Authorization: 'Bearer ' + opts.api_key } : {},
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Kokoro-FastAPI 未就绪: HTTP ${res.status}${text ? ` ${text.slice(0, 200)}` : ''}`);
+      }
+      const data = await res.json().catch(() => null);
+      const voices = Array.isArray(data) ? data : data?.voices;
+      if (!Array.isArray(voices)) throw new Error('Kokoro-FastAPI 音色列表响应格式不正确');
+      return;
+    }
     // MiniMax T2A：用 /v1/models 或直接对 chat 端点做轻量探针
     const ttsBase = base.includes('minimaxi.com') || base.includes('minimax') ? base : base;
     // 尝试调用一个极简的 MiniMax T2A 请求（1 字，验证 key 合法性）

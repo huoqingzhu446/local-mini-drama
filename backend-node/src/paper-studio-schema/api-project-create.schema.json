@@ -1,0 +1,27 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/api-project-create-v3.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id"],
+  "properties": {
+    "request_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "default_tier": { "enum": ["draft", "balanced", "full-depth"] },
+    "config": { "$ref": "#/$defs/config" }
+  },
+  "$defs": {
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image_provider_config_id": { "type": ["integer", "null"], "minimum": 1 },
+        "fps": { "type": "integer", "minimum": 12, "maximum": 60 },
+        "preview_scale": { "type": "number", "minimum": 0.1, "maximum": 1 },
+        "max_image_concurrency": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "max_matte_concurrency": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "max_render_concurrency": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "paper_style": { "type": "object", "additionalProperties": true },
+        "proof_policy": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}

@@ -183,6 +183,21 @@ function updateStoryboard(db, log, id, req) {
     const ins = db.prepare('INSERT OR IGNORE INTO storyboard_props (storyboard_id, prop_id) VALUES (?, ?)');
     for (const pid of propIds) ins.run(Number(id), Number(pid));
   }
+  const revisionKeys = new Set([
+    'title', 'description', 'location', 'time', 'duration', 'dialogue', 'narration', 'action',
+    'result', 'atmosphere', 'scene_id', 'characters', 'character_ids', 'prop_ids', 'movement',
+    'layout_description', 'image_url', 'local_path', 'audio_local_path', 'narration_audio_local_path',
+  ]);
+  if (Object.keys(req).some((key) => revisionKeys.has(key))) {
+    try {
+      require('./paper-studio/paperSourceRevisionService').markAffectedStale(db, {
+        storyboard_id: Number(id),
+        reason: '分镜内容、关联素材或音频已更新；旧纸片动画生产版本已失效',
+      });
+    } catch (error) {
+      log.warn('Paper studio storyboard invalidation failed', { storyboard_id: Number(id), error: error.message });
+    }
+  }
   log.info('Storyboard updated', { id });
   return getStoryboardById(db, id);
 }

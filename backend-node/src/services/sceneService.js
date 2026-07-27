@@ -113,6 +113,14 @@ function updateScene(db, log, sceneId, req) {
   if (updates.length === 0) return { ok: true };
   params.push(new Date().toISOString(), sceneId);
   db.prepare('UPDATE scenes SET ' + updates.join(', ') + ', updated_at = ? WHERE id = ?').run(...params);
+  try {
+    require('./paper-studio/paperSourceRevisionService').markAffectedStale(db, {
+      scene_id: Number(sceneId),
+      reason: '分镜关联场景已更新；旧纸片动画生产版本已失效',
+    });
+  } catch (error) {
+    log.warn('Paper studio scene invalidation failed', { scene_id: Number(sceneId), error: error.message });
+  }
   log.info('Scene updated', { scene_id: sceneId });
   return { ok: true };
 }

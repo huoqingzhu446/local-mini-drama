@@ -1,0 +1,128 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/paper-blueprint-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "environment", "entities", "relations", "action_contract", "generation_slots"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "clean_plate_required"],
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "clean_plate_required": { "const": true },
+        "camera_intent": { "type": "string" },
+        "registered_boundaries": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "type", "name", "role", "independent_layer", "reusable", "states", "attributes"],
+        "properties": {
+          "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+          "type": { "enum": ["character", "prop", "environment_anchor", "effect"] },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "role": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "independent_layer": { "type": "boolean" },
+          "reusable": { "type": "boolean" },
+          "identity_version_id": { "type": ["integer", "null"], "minimum": 1 },
+          "source_library_type": { "type": ["string", "null"] },
+          "source_library_id": { "type": ["integer", "null"], "minimum": 1 },
+          "states": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "attributes": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "relations": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "subject_key", "predicate", "object_key", "start_phase", "end_phase", "attributes"],
+        "properties": {
+          "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+          "subject_key": { "type": "string", "minLength": 1 },
+          "predicate": { "enum": ["holds", "follows", "released_beside", "sits_on", "moves_to", "occluded_by", "interacts_with", "supports"] },
+          "object_key": { "type": "string", "minLength": 1 },
+          "start_phase": { "type": "string", "minLength": 1 },
+          "end_phase": { "type": "string", "minLength": 1 },
+          "attributes": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "action_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary_action", "actor_key", "object_key", "support_key", "direction", "start_state", "end_state", "waypoints", "phases", "contact_events", "occlusion_events"],
+      "properties": {
+        "primary_action": { "enum": ["carry_move_sit", "directed_move", "state_transition", "generic_subject_action", "environmental_depth_motion"] },
+        "actor_key": { "type": ["string", "null"] },
+        "object_key": { "type": ["string", "null"] },
+        "support_key": { "type": ["string", "null"] },
+        "direction": { "enum": ["left_to_right", "right_to_left", "forward", "backward", "stationary"] },
+        "start_state": { "type": "string", "minLength": 1 },
+        "end_state": { "type": "string", "minLength": 1 },
+        "waypoints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label", "x", "y"],
+            "properties": {
+              "key": { "type": "string", "minLength": 1 },
+              "label": { "type": "string", "minLength": 1 },
+              "x": { "type": "number", "minimum": -1, "maximum": 1 },
+              "y": { "type": "number", "minimum": -1, "maximum": 1 }
+            }
+          }
+        },
+        "phases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "label", "start_ratio", "end_ratio", "actor_state", "object_state"],
+            "properties": {
+              "key": { "type": "string", "minLength": 1 },
+              "label": { "type": "string", "minLength": 1 },
+              "start_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+              "end_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+              "actor_state": { "type": ["string", "null"] },
+              "object_state": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "contact_events": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "occlusion_events": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "generation_slots": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["family_key", "slot_key", "asset_type", "reason", "required", "source"],
+        "properties": {
+          "family_key": { "type": "string", "minLength": 1 },
+          "slot_key": { "type": "string", "minLength": 1 },
+          "asset_type": { "type": "string", "minLength": 1 },
+          "reason": { "type": "string", "minLength": 1 },
+          "required": { "type": "boolean" },
+          "source": { "enum": ["image_api", "local_derivation", "existing_asset", "procedural"] }
+        }
+      }
+    }
+  }
+}

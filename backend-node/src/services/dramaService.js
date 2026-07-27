@@ -629,7 +629,18 @@ function updateDrama(db, log, dramaId, req) {
 
 function generateStoryboard(db, log, episodeId, options) {
   const episodeStoryboardService = require('./episodeStoryboardService');
-  const { model, style, storyboard_count, video_duration, aspect_ratio, include_narration, universal_omni_storyboard, prompt_style_ids } = options || {};
+  const {
+    model,
+    style,
+    storyboard_count,
+    video_duration,
+    aspect_ratio,
+    include_narration,
+    universal_omni_storyboard,
+    prompt_style_ids,
+    storyboard_batch_size,
+    storyboard_batch_mode,
+  } = options || {};
   // 转换可能为字符串的数字
   const count = storyboard_count ? Number(storyboard_count) : undefined;
   const duration = video_duration ? Number(video_duration) : undefined;
@@ -644,7 +655,9 @@ function generateStoryboard(db, log, episodeId, options) {
     aspect_ratio,
     include_narration,
     universal_omni_storyboard,
-    prompt_style_ids
+    prompt_style_ids,
+    storyboard_batch_size,
+    storyboard_batch_mode
   );
 }
 
@@ -660,6 +673,8 @@ function deleteDrama(db, log, cfg, dramaId, options = {}) {
   );
 
   const outcome = db.transaction(() => {
+    const paperStudioCleanup = require('./paper-studio/paperStudioArchiveService')
+      .softDeleteForDrama(db, did, new Date().toISOString());
     const mediaCleanup = deleteGeneratedMedia
       ? cleanupDramaGeneratedMediaRecords(db, log, dramaRow)
       : { requested: false, counts: null, project_subdir: null };
@@ -668,7 +683,7 @@ function deleteDrama(db, log, cfg, dramaId, options = {}) {
       'UPDATE dramas SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL'
     ).run(now, did);
     if (result.changes === 0) return { ok: false };
-    return { ok: true, mediaCleanup };
+    return { ok: true, mediaCleanup, paperStudioCleanup };
   })();
 
   if (!outcome.ok) return false;
@@ -692,6 +707,7 @@ function deleteDrama(db, log, cfg, dramaId, options = {}) {
           ...storageCleanup,
         }
       : { requested: false },
+    paper_studio_cleanup: outcome.paperStudioCleanup,
   };
 }
 

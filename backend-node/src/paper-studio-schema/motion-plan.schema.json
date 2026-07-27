@@ -1,0 +1,76 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/motion-plan-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "fps", "duration_frames", "primary_action", "camera_only", "subject_tracks", "camera_tracks"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "fps": { "type": "integer", "minimum": 12, "maximum": 60 },
+    "duration_frames": { "type": "integer", "minimum": 2 },
+    "primary_action": { "type": "string", "minLength": 1 },
+    "camera_only": { "const": false },
+    "subject_tracks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/track" }
+    },
+    "camera_tracks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/track" }
+    },
+    "cues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "frame"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "frame": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "gate_requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "metric"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "metric": { "enum": ["numeric_range", "distinct_states", "initial_value", "final_value", "cue_value", "cue_exists"] },
+          "target": { "type": "string", "minLength": 1 },
+          "property": { "enum": ["x", "y", "rotation", "scale", "opacity", "state", "clip_progress", "procedural_amount"] },
+          "cue": { "type": "string", "minLength": 1 },
+          "min": { "type": "number" },
+          "max": { "type": "number" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "track": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "property", "keyframes"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "property": { "enum": ["x", "y", "rotation", "scale", "opacity", "state", "clip_progress", "procedural_amount"] },
+        "keyframes": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["frame", "value"],
+            "properties": {
+              "frame": { "type": "integer", "minimum": 0 },
+              "value": {},
+              "easing": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  }
+}

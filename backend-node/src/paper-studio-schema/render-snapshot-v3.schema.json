@@ -1,0 +1,54 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/render-snapshot-v3.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "renderer_version", "composition", "source_revision_hash", "assets", "root", "motion_plan", "proof_targets", "provenance"],
+  "properties": {
+    "schema_version": { "const": 3 },
+    "renderer_version": { "type": "string", "minLength": 1 },
+    "source_revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "fps", "duration_frames"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 320, "maximum": 7680 },
+        "height": { "type": "integer", "minimum": 320, "maximum": 7680 },
+        "fps": { "type": "integer", "minimum": 12, "maximum": 60 },
+        "duration_frames": { "type": "integer", "minimum": 2 }
+      }
+    },
+    "timing": { "type": "object", "additionalProperties": true },
+    "visual_style": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["medium", "palette"],
+      "properties": {
+        "style_signature": { "type": "string" },
+        "medium": { "type": "string", "minLength": 1 },
+        "palette": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["paper", "ink", "accent", "secondary"],
+          "properties": {
+            "paper": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+            "ink": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+            "accent": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+            "secondary": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
+          }
+        },
+        "texture": { "type": "string" },
+        "lighting": { "type": "string" }
+      }
+    },
+    "source_families": { "type": "array", "items": { "$ref": "https://localminidrama.local/schemas/paper-studio/source-family-v3.json" } },
+    "assets": { "type": "array", "items": { "type": "object", "required": ["version_id", "local_path", "hash"], "properties": { "version_id": { "type": "integer", "minimum": 1 }, "local_path": { "type": "string", "minLength": 1 }, "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }, "additionalProperties": true } },
+    "root": { "$ref": "https://localminidrama.local/schemas/paper-studio/composition-node-v3.json" },
+    "motion_plan": { "$ref": "https://localminidrama.local/schemas/paper-studio/motion-plan-v1.json" },
+    "audio": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "captions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "proof_targets": { "type": "array", "minItems": 1, "items": { "$ref": "https://localminidrama.local/schemas/paper-studio/proof-target-v3.json" } },
+    "provenance": { "type": "object", "additionalProperties": true },
+    "limits": { "type": "object", "additionalProperties": true }
+  }
+}

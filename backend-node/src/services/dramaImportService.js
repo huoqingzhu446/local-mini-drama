@@ -16,7 +16,7 @@ function ensureDir(dir) {
 
 /**
  * 解析 ZIP Buffer，返回 project.json 内容和媒体文件 Map
- * @returns {{ data: object, files: Map<string,Buffer> }}
+ * @returns {{ data: object, files: Map<string,Buffer>, paperStudioManifest: object|null }}
  */
 function parseZip(zipBuffer) {
   let zip;
@@ -42,6 +42,16 @@ function parseZip(zipBuffer) {
     throw new Error('project.json 格式不正确：缺少 drama.title 字段');
   }
 
+  let paperStudioManifest = null;
+  const paperEntry = zip.getEntry('paper_studio_manifest.json');
+  if (paperEntry) {
+    try {
+      paperStudioManifest = JSON.parse(paperEntry.getData().toString('utf8'));
+    } catch (_) {
+      throw new Error('paper_studio_manifest.json 格式错误，无法解析 JSON');
+    }
+  }
+
   // 读取所有媒体文件到 Map
   const files = new Map();
   for (const entry of zip.getEntries()) {
@@ -50,7 +60,7 @@ function parseZip(zipBuffer) {
     }
   }
 
-  return { data, files };
+  return { data, files, paperStudioManifest };
 }
 
 /**
@@ -125,7 +135,7 @@ function saveExtraImages(storagePath, projectDir, category, files, zipPaths, pre
  */
 function importDrama(db, cfg, log, zipBuffer) {
   const storagePath = getStoragePath(cfg);
-  const { data, files } = parseZip(zipBuffer);
+  const { data, files, paperStudioManifest } = parseZip(zipBuffer);
 
   const d = data.drama;
   const title = resolveTitle(db, d.title || '导入项目');
@@ -145,13 +155,13 @@ function importDrama(db, cfg, log, zipBuffer) {
   // 用事务包裹全部写入：任何步骤失败时整体回滚，避免部分导入
   let result;
   const runImport = db.transaction(() => {
-    result = _doImport(db, storagePath, files, data, d, title, metaStr, now, log);
+    result = _doImport(db, cfg, storagePath, files, data, d, title, metaStr, now, log, paperStudioManifest);
   });
   runImport();
   return result;
 }
 
-function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
+function _doImport(db, cfg, storagePath, files, data, d, title, metaStr, now, log, paperStudioManifest) {
 
   // ---- 创建 drama ----
   const dramaInfo = db.prepare(
@@ -175,6 +185,8 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
     created_at: now,
     metadata: metaStr,
   });
+  const episodeIdMap = new Map();
+  const storyboardIdMap = new Map();
 
   // ---- 导入角色 ----
   const charNewIds = []; // 按导出顺序保存新角色 id，用于恢复分镜 character_indices
@@ -198,6 +210,7 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(dramaId, ep.episode_number || 1, ep.title || `第${ep.episode_number || 1}集`, ep.description || null, ep.script_content || null, ep.duration || 0, now, now);
     episodeIdList.push(epInfo.lastInsertRowid);
+    if (ep.original_id != null) episodeIdMap.set(Number(ep.original_id), Number(epInfo.lastInsertRowid));
   }
 
   // ---- 关联角色到所有集（episode_characters） ----
@@ -345,6 +358,7 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
          VALUES (${sbCols.map(() => '?').join(', ')})`
       ).run(...sbVals);
       const sbId = sbInfo.lastInsertRowid;
+      if (sb.original_id != null) storyboardIdMap.set(Number(sb.original_id), Number(sbId));
 
       // 还原 storyboard_props（分镜与道具的关联）
       if (sbPropNewIds.length > 0) {
@@ -452,8 +466,19 @@ function _doImport(db, storagePath, files, data, d, title, metaStr, now, log) {
     }
   }
 
-  log.info('Drama imported', { drama_id: dramaId, title });
-  return { drama_id: dramaId, title };
+  let paperStudio = null;
+  if (paperStudioManifest) {
+    paperStudio = require('./paper-studio/paperStudioArchiveService').importFromManifest(db, cfg, log, {
+      manifest: paperStudioManifest,
+      files,
+      drama_id: Number(dramaId),
+      episode_id_map: episodeIdMap,
+      storyboard_id_map: storyboardIdMap,
+      drama_row: { id: Number(dramaId), title, created_at: now, metadata: metaStr },
+    });
+  }
+  log.info('Drama imported', { drama_id: dramaId, title, paper_studio: paperStudio });
+  return { drama_id: dramaId, title, paper_studio: paperStudio };
 }
 
 module.exports = { importDrama, parseZip };

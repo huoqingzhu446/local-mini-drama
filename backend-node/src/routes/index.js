@@ -30,6 +30,7 @@ const paperAssetRoutes = require('./paperAssets');
 const paperSequenceRoutes = require('./paperSequences');
 const paperRigRoutes = require('./paperRigs');
 const paperRenderRoutes = require('./paperRender');
+const paperStudioRoutes = require('./paperStudio');
 
 function setupRouter(cfg, db, log) {
   const r = express.Router();
@@ -65,6 +66,7 @@ function setupRouter(cfg, db, log) {
   const paperSequences = paperSequenceRoutes(db, cfg, log);
   const paperRigs = paperRigRoutes(db, cfg, log);
   const paperRender = paperRenderRoutes(db, cfg, log);
+  const paperStudio = paperStudioRoutes(db, cfg, log);
 
   // ---------- dramas ----------
   r.get('/dramas', drama.listDramas);
@@ -290,7 +292,95 @@ function setupRouter(cfg, db, log) {
   r.get('/videos/:id', videos.get);
   r.delete('/videos/:id', videos.delete);
 
-  // ---------- paper layered animation ----------
+  // ---------- paper studio v3 (isolated from legacy v2) ----------
+  r.get('/paper-studio/projects/:drama_id', paperStudio.getProjectByDrama);
+  r.post('/paper-studio/projects/:drama_id', paperStudio.createProject);
+  r.put('/paper-studio/projects/:id', paperStudio.updateProject);
+  r.get('/paper-studio/projects/:project_id/task-center', paperStudio.getTaskCenter);
+  r.post('/paper-studio/projects/:project_id/events', paperStudio.recordProductEvent);
+  r.post('/paper-studio/projects/:project_id/example-draft', paperStudio.createExampleDraft);
+  r.get('/paper-studio/projects/:project_id/episodes', paperStudio.listEpisodes);
+  r.post('/paper-studio/projects/:project_id/episodes', paperStudio.createEpisode);
+  r.get('/paper-studio/episodes/:id', paperStudio.getEpisode);
+  r.put('/paper-studio/episodes/:id', paperStudio.updateEpisode);
+  r.delete('/paper-studio/episodes/:id', paperStudio.deleteEpisode);
+  r.get('/paper-studio/episodes/:episode_id/storyboards', paperStudio.listStoryboards);
+  r.post('/paper-studio/episodes/:episode_id/storyboards', paperStudio.createStoryboard);
+  r.post('/paper-studio/episodes/:episode_id/storyboards/reorder', paperStudio.reorderStoryboards);
+  r.post('/paper-studio/episodes/:episode_id/import-legacy', paperStudio.importLegacyStoryboards);
+  r.get('/paper-studio/episodes/:episode_id/scripts', paperStudio.listScripts);
+  r.post('/paper-studio/episodes/:episode_id/scripts', paperStudio.createScript);
+  r.get('/paper-studio/episodes/:episode_id/scripts/:script_id', paperStudio.getScript);
+  r.post('/paper-studio/episodes/:episode_id/extract-entities', paperStudio.extractEntities);
+  r.get('/paper-studio/projects/:project_id/library', paperStudio.getLibrary);
+  r.post('/paper-studio/projects/:project_id/library/confirm', paperStudio.confirmLibrary);
+  r.put('/paper-studio/library/entities/:id', paperStudio.updateLibraryEntity);
+  r.put('/paper-studio/projects/:project_id/style-anchor', paperStudio.setStyleAnchor);
+  r.post('/paper-studio/projects/:project_id/library/identity/generate', paperStudio.generateIdentities);
+  r.post('/paper-studio/library/identity-versions/:id/review', paperStudio.reviewIdentityVersion);
+  r.post('/paper-studio/episodes/:episode_id/generate-storyboards', paperStudio.generateStoryboardsFromScript);
+  r.post('/paper-studio/episodes/:episode_id/apply-generated-storyboards', paperStudio.applyGeneratedStoryboards);
+  r.get('/paper-studio/storyboards/:id/entity-links', paperStudio.listStoryboardEntityLinks);
+  r.get('/paper-studio/episodes/:id/merges', paperStudio.listEpisodeMerges);
+  r.get('/paper-studio/episodes/:id/delivery', paperStudio.getEpisodeDelivery);
+  r.post('/paper-studio/episodes/:id/merge', paperStudio.mergeEpisode);
+  r.get('/paper-studio/storyboards/:id', paperStudio.getStoryboard);
+  r.put('/paper-studio/storyboards/:id', paperStudio.updateStoryboard);
+  r.get('/paper-studio/storyboards/:id/audio', paperStudio.getStoryboardAudio);
+  r.post('/paper-studio/storyboards/:id/audio/tts', paperStudio.synthesizeStoryboardAudio);
+  r.post('/paper-studio/storyboards/:id/audio/upload', uploadModule.multerAudioSingle, paperStudio.uploadStoryboardAudio);
+  r.post('/paper-studio/storyboards/:id/audio/:audio_version_id/revise', paperStudio.reviseStoryboardAudio);
+  r.put('/paper-studio/storyboards/:id/audio-policy', paperStudio.updateStoryboardAudioPolicy);
+  r.delete('/paper-studio/storyboards/:id', paperStudio.deleteStoryboard);
+  r.post('/paper-studio/storyboards/:id/duplicate', paperStudio.duplicateStoryboard);
+  r.post('/paper-studio/storyboards/:id/reference/generate', paperStudio.generateStoryboardReference);
+  r.get('/paper-studio/storyboards/:id/references', paperStudio.listStoryboardReferences);
+  r.post('/paper-studio/storyboards/:id/reference/upload', uploadModule.multerSingle, paperStudio.uploadStoryboardReference);
+  r.post('/paper-studio/storyboards/:id/references/:reference_id/select', paperStudio.selectStoryboardReference);
+  r.put('/paper-studio/storyboards/:id/references/:reference_id/constraints', paperStudio.updateStoryboardReferenceConstraints);
+  r.post('/paper-studio/storyboards/:id/sync-to-legacy', paperStudio.syncStoryboardToLegacy);
+  r.get('/paper-studio/runs', paperStudio.listRuns);
+  r.get('/paper-studio/providers', paperStudio.listProviders);
+  r.get('/paper-studio/actions', paperStudio.listActions);
+  r.post('/paper-studio/runs', paperStudio.createRun);
+  r.get('/paper-studio/runs/:id', paperStudio.getRun);
+  r.post('/paper-studio/runs/:id/analyze', paperStudio.analyzeRun);
+  r.post('/paper-studio/runs/:id/confirm-plan', paperStudio.confirmPlan);
+  r.post('/paper-studio/runs/:id/generation-quote', paperStudio.generationQuote);
+  r.post('/paper-studio/runs/:id/generation-authorizations', paperStudio.authorizeGeneration);
+  r.post('/paper-studio/generation-authorizations/:id/execute', paperStudio.executeGenerationAuthorization);
+  r.post('/paper-studio/generation-authorizations/:id/cancel', paperStudio.cancelGenerationAuthorization);
+  r.post('/paper-studio/runs/:id/advance', paperStudio.advanceRun);
+  r.post('/paper-studio/runs/:id/recover', paperStudio.recoverRun);
+  r.post('/paper-studio/runs/:id/cancel', paperStudio.cancelRun);
+  r.post('/paper-studio/runs/:id/pause', paperStudio.pauseRun);
+  r.post('/paper-studio/runs/:id/resume', paperStudio.resumeRun);
+  r.get('/paper-studio/runs/:id/steps', paperStudio.listSteps);
+  r.get('/paper-studio/runs/:id/events', paperStudio.listEvents);
+  r.get('/paper-studio/runs/:id/continuity', paperStudio.listContinuity);
+  r.get('/paper-studio/runs/:id/report', paperStudio.getRunReport);
+  r.get('/paper-studio/shots/:id', paperStudio.getShot);
+  r.get('/paper-studio/shots/:id/blueprint', paperStudio.getBlueprint);
+  r.put('/paper-studio/shots/:id/blueprint', paperStudio.updateBlueprint);
+  r.post('/paper-studio/shots/:id/blueprint/confirm', paperStudio.confirmBlueprint);
+  r.post('/paper-studio/shots/:id/generate-assets', paperStudio.generateAssets);
+  r.post('/paper-studio/shots/:id/rematte-assets', paperStudio.rematteAssets);
+  r.post('/paper-studio/shots/:id/slots/:slot_id/upload', uploadModule.multerSingle, paperStudio.uploadAssetReplacement);
+  r.post('/paper-studio/shots/:id/assets/:asset_version_id/mask-patch', paperStudio.patchAssetMask);
+  r.post('/paper-studio/shots/:id/review-assets', paperStudio.reviewAssets);
+  r.post('/paper-studio/shots/:id/plan-motion', paperStudio.planMotion);
+  r.post('/paper-studio/shots/:id/revise', paperStudio.reviseMotion);
+  r.get('/paper-studio/shots/:id/revisions', paperStudio.listRevisions);
+  r.get('/paper-studio/shots/:id/evidence', paperStudio.getEvidence);
+  r.post('/paper-studio/shots/:id/proof', paperStudio.proof);
+  r.post('/paper-studio/shots/:id/preview', paperStudio.preview);
+  r.post('/paper-studio/shots/:id/approve-preview', paperStudio.approvePreview);
+  r.post('/paper-studio/shots/:id/reject-preview', paperStudio.rejectPreview);
+  r.post('/paper-studio/shots/:id/render', paperStudio.renderFormal);
+  r.post('/paper-studio/shots/:id/publish', paperStudio.publish);
+  r.get('/paper-studio/doctor', paperStudio.doctor);
+
+  // ---------- paper layered animation v2 legacy ----------
   r.get('/paper-render/doctor', paperRender.doctor);
   r.get('/paper-compositions', paperCompositions.list);
   r.post('/storyboards/:id/paper-composition/plan', paperCompositions.plan);

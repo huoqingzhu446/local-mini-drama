@@ -93,14 +93,30 @@ function ensureColumns(database, table, columns) {
 // tables self-healing in the same way as the older business tables.  We only
 // replay CREATE statements here; ALTER statements are handled by the normal
 // migration runner/ensureColumns path and remain idempotent.
-function ensurePaperTables(database) {
-  const migrationPath = path.join(__dirname, '..', '..', 'migrations', '30_paper_layer_animation.sql');
+function ensureMigrationCreateStatements(database, filename) {
+  const migrationPath = path.join(__dirname, '..', '..', 'migrations', filename);
   if (!fs.existsSync(migrationPath)) return;
   const sql = fs.readFileSync(migrationPath, 'utf8');
-  for (const statement of sql.split(';').map((item) => item.trim()).filter(Boolean)) {
-    if (!/^CREATE\s+(?:TABLE|INDEX)/i.test(statement)) continue;
-    try { database.exec(`${statement};`); } catch (_) {}
+  for (const rawStatement of sql.split(';').map((item) => item.trim()).filter(Boolean)) {
+    const statement = stripLeadingComments(rawStatement);
+    if (!/^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)/i.test(statement)) continue;
+    try { database.exec(`${statement};`); } catch (err) {
+      console.warn(`ensureMigrationCreateStatements: failed ${filename}:`, err.message);
+    }
   }
+}
+
+function ensurePaperTables(database) {
+  ensureMigrationCreateStatements(database, '30_paper_layer_animation.sql');
+}
+
+function ensurePaperStudioTables(database) {
+  ensureMigrationCreateStatements(database, '31_paper_studio_v3.sql');
+  ensureMigrationCreateStatements(database, '32_paper_studio_motion_continuity.sql');
+  ensureMigrationCreateStatements(database, '33_paper_studio_independent_authoring.sql');
+  ensureMigrationCreateStatements(database, '34_paper_studio_business_ux_phase0.sql');
+  ensureMigrationCreateStatements(database, '39_paper_studio_audio_delivery.sql');
+  ensureMigrationCreateStatements(database, '40_paper_studio_product_experience.sql');
 }
 
 /**
@@ -113,6 +129,39 @@ function ensurePaperTables(database) {
  */
 function ensureAllColumns(database) {
   ensurePaperTables(database);
+  ensurePaperStudioTables(database);
+  ensureColumns(database, 'paper_studio_runs', [
+    { name: 'paper_episode_id', type: 'INTEGER' },
+    { name: 'legacy_episode_id', type: 'INTEGER' },
+    { name: 'paused_at', type: 'TEXT' },
+    { name: 'attention_required', type: "TEXT NOT NULL DEFAULT 'none'" },
+    { name: 'active_authorization_id', type: 'INTEGER' },
+  ]);
+  ensureColumns(database, 'paper_studio_shots', [
+    { name: 'paper_storyboard_id', type: 'INTEGER' },
+    { name: 'paper_storyboard_revision_id', type: 'INTEGER' },
+    { name: 'legacy_storyboard_id', type: 'INTEGER' },
+    { name: 'source_kind', type: "TEXT NOT NULL DEFAULT 'legacy'" },
+    { name: 'attention_required', type: "TEXT NOT NULL DEFAULT 'none'" },
+  ]);
+  ensureColumns(database, 'paper_studio_episodes', [
+    { name: 'request_id', type: 'TEXT' },
+  ]);
+  ensureColumns(database, 'paper_storyboards', [
+    { name: 'request_id', type: 'TEXT' },
+    { name: 'environment_only', type: 'INTEGER NOT NULL DEFAULT 0' },
+    { name: 'current_dialogue_audio_version_id', type: 'INTEGER' },
+    { name: 'current_narration_audio_version_id', type: 'INTEGER' },
+    { name: 'audio_mode', type: "TEXT NOT NULL DEFAULT 'auto'" },
+    { name: 'audio_mix_json', type: "TEXT NOT NULL DEFAULT '{}'" },
+    { name: 'audio_status', type: "TEXT NOT NULL DEFAULT 'empty'" },
+  ]);
+  ensureColumns(database, 'paper_job_steps', [
+    { name: 'authorization_id', type: 'INTEGER' },
+    { name: 'blocked_reason', type: 'TEXT' },
+    { name: 'user_visible_status', type: 'TEXT' },
+    { name: 'cancel_requested_at', type: 'TEXT' },
+  ]);
   // --- dramas ---
   ensureColumns(database, 'dramas', [
     { name: 'title',          type: 'TEXT NOT NULL DEFAULT \'\'' },
@@ -371,6 +420,12 @@ function ensureAllColumns(database) {
     { name: 'task_id',          type: 'TEXT' },
     { name: 'completed_at',     type: 'TEXT' },
     { name: 'error_msg',        type: 'TEXT' },
+    { name: 'generation_kind',  type: "TEXT DEFAULT 'standard'" },
+    { name: 'paper_asset_version_id', type: 'INTEGER' },
+    { name: 'generation_purpose', type: 'TEXT' },
+    { name: 'request_fingerprint', type: 'TEXT' },
+    { name: 'provider_task_id', type: 'TEXT' },
+    { name: 'paper_storyboard_id', type: 'INTEGER' },
     { name: 'created_at',       type: 'TEXT' },
     { name: 'updated_at',       type: 'TEXT' },
     { name: 'deleted_at',       type: 'TEXT' },
@@ -406,6 +461,9 @@ function ensureAllColumns(database) {
     { name: 'render_snapshot',      type: 'TEXT' },
     { name: 'render_hash',          type: 'TEXT' },
     { name: 'renderer_version',     type: 'TEXT' },
+    { name: 'paper_studio_shot_id', type: 'INTEGER' },
+    { name: 'paper_snapshot_id',    type: 'INTEGER' },
+    { name: 'paper_storyboard_id',  type: 'INTEGER' },
     { name: 'created_at',           type: 'TEXT' },
     { name: 'updated_at',           type: 'TEXT' },
     { name: 'deleted_at',           type: 'TEXT' },
@@ -414,6 +472,7 @@ function ensureAllColumns(database) {
   // --- video_merges ---
   ensureColumns(database, 'video_merges', [
     { name: 'episode_id',   type: 'INTEGER' },
+    { name: 'paper_episode_id', type: 'INTEGER' },
     { name: 'drama_id',     type: 'INTEGER' },
     { name: 'title',        type: 'TEXT' },
     { name: 'provider',     type: 'TEXT' },
@@ -426,6 +485,9 @@ function ensureAllColumns(database) {
     { name: 'duration',     type: 'INTEGER' },
     { name: 'completed_at', type: 'TEXT' },
     { name: 'error_msg',    type: 'TEXT' },
+    { name: 'subtitle_local_path', type: 'TEXT' },
+    { name: 'delivery_hash', type: 'TEXT' },
+    { name: 'source_manifest_json', type: "TEXT NOT NULL DEFAULT '{}'" },
     { name: 'created_at',   type: 'TEXT' },
     { name: 'deleted_at',   type: 'TEXT' },
   ]);

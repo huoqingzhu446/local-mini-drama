@@ -1,0 +1,35 @@
+/* ============================================================
+ * Paper Studio 设计令牌（方案第 11.2 节）
+ * 规则：paper-studio 相关组件禁止裸写 px 字号，一律使用以下变量。
+ * 守门：frontweb/test/paper-token-guard.test.js 会拒绝 <11px 字面量。
+ * ============================================================ */
+:root {
+  /* 字阶 —— 全局最小 11px */
+  --paper-fs-xs: 11px;      /* 仅限大写字距标签、徽标（SHOT 01 / READY） */
+  --paper-fs-sm: 12px;      /* 辅助说明、时间戳、次级状态 */
+  --paper-fs-base: 14px;    /* 正文、表单、按钮、列表项 —— 默认值 */
+  --paper-fs-lg: 16px;      /* 卡片标题、分镜标题 */
+  --paper-fs-xl: 20px;      /* 工作区标题 */
+  --paper-fs-display: 24px; /* 页面主标题 */
+
+  /* 控件与点按目标 */
+  --paper-control-h: 36px;         /* 输入框 / 次按钮 */
+  --paper-control-h-primary: 42px; /* 主操作按钮 */
+  --paper-hit-min: 32px;           /* 任何可点元素最小高度 */
+
+  /* 间距阶梯 */
+  --paper-sp-1: 4px;
+  --paper-sp-2: 8px;
+  --paper-sp-3: 12px;
+  --paper-sp-4: 16px;
+  --paper-sp-5: 24px;
+  --paper-sp-6: 32px;
+}
+
+/* 点按目标兜底：主/次操作按钮达到控件高度标准 */
+.paper-studio .primary-action { min-height: var(--paper-control-h-primary); }
+.paper-studio .secondary-action,
+.paper-studio .danger-action { min-height: var(--paper-control-h); }
+.paper-studio select,
+.paper-studio input[type='text'],
+.paper-studio input[type='number'] { min-height: var(--paper-control-h); }

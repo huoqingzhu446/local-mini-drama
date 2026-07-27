@@ -109,6 +109,106 @@ test('paperAssetService enforces hash, dimensions and storyboard-reference prohi
   db.close();
 });
 
+test('transparent PNG upload records real alpha bounds before manual review', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-paper-upload-'));
+  const db = makeDb();
+  seedDrama(db);
+  const asset = paperAssetService.create(db, {
+    drama_id: 1,
+    episode_id: 1,
+    storyboard_id: 165,
+    asset_key: 'boat-cutout',
+    asset_type: 'prop_state',
+    status: 'missing',
+  });
+  const source = path.join(root, 'transparent-boat.png');
+  const width = 10;
+  const height = 10;
+  const pixels = Buffer.alloc(width * height * 4, 0);
+  for (let y = 3; y < 7; y += 1) {
+    for (let x = 2; x < 8; x += 1) {
+      const offset = (y * width + x) * 4;
+      pixels[offset] = 80;
+      pixels[offset + 1] = 50;
+      pixels[offset + 2] = 20;
+      pixels[offset + 3] = 255;
+    }
+  }
+  await require('sharp')(pixels, { raw: { width, height, channels: 4 } }).png().toFile(source);
+  const uploaded = await paperAssetService.attachSource(db, cfg(root), asset.id, source);
+  assert.equal(uploaded.status, 'needs_review');
+  assert.equal(uploaded.matte_quality, 'pass');
+  assert.equal(uploaded.processing_json.has_alpha, true);
+  assert.equal(uploaded.processing_json.has_alpha_channel, true);
+  assert.ok(uploaded.processing_json.transparent_ratio > 0.5);
+  assert.ok(uploaded.alpha_bbox_json.width < 1);
+  assert.ok(uploaded.alpha_bbox_json.height < 1);
+
+  const approved = paperAssetService.update(db, asset.id, { status: 'ready', matte_quality: 'manual_pass' }, uploaded.version);
+  assert.equal(approved.status, 'ready');
+  assert.equal(paperAssetService.resolveAssetForRender(db, cfg(root), asset.id).matte_quality, 'manual_pass');
+
+  const opaqueSource = path.join(root, 'opaque-alpha-channel.png');
+  const opaquePixels = Buffer.alloc(width * height * 4, 255);
+  await require('sharp')(opaquePixels, { raw: { width, height, channels: 4 } }).png().toFile(opaqueSource);
+  const opaqueUpload = await paperAssetService.attachSource(db, cfg(root), asset.id, opaqueSource);
+  assert.equal(opaqueUpload.status, 'needs_review');
+  assert.equal(opaqueUpload.matte_quality, 'unknown');
+  assert.equal(opaqueUpload.processing_json.has_alpha_channel, true);
+  assert.equal(opaqueUpload.processing_json.has_alpha, false);
+  const incorrectlyApproved = paperAssetService.update(db, asset.id, { status: 'ready', matte_quality: 'manual_pass' }, opaqueUpload.version);
+  assert.throws(
+    () => paperAssetService.resolveAssetForRender(db, cfg(root), asset.id),
+    (error) => error.code === 'PAPER_MATTE_INVALID' && error.details.transparent_ratio === 0,
+  );
+  assert.equal(incorrectlyApproved.status, 'ready');
+  db.close();
+});
+
+test('white matte samples the real warm-gray border instead of fixed pure white', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-paper-adaptive-white-'));
+  const db = makeDb();
+  seedDrama(db);
+  const width = 80;
+  const height = 50;
+  const pixels = Buffer.alloc(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3;
+      const gradient = Math.round((x / width) * 5);
+      pixels[offset] = 223 + gradient;
+      pixels[offset + 1] = 219 + gradient;
+      pixels[offset + 2] = 215 + gradient;
+      if (x >= 20 && x < 60 && y >= 15 && y < 38) {
+        pixels[offset] = 72;
+        pixels[offset + 1] = 46;
+        pixels[offset + 2] = 24;
+      }
+    }
+  }
+  const sourceRel = 'projects/warm-gray-boat.png';
+  const source = path.join(root, sourceRel);
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  await require('sharp')(pixels, { raw: { width, height, channels: 3 } }).png().toFile(source);
+  const asset = paperAssetService.create(db, {
+    drama_id: 1,
+    episode_id: 1,
+    storyboard_id: 165,
+    asset_key: 'warm-gray-boat',
+    asset_type: 'prop_state',
+    local_path: sourceRel,
+    status: 'needs_review',
+  });
+  const result = await paperAssetService.matte(db, cfg(root), asset.id, { method: 'white_v1' });
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(result.diagnostics.key_color, [226, 222, 218]);
+  assert.equal(result.diagnostics.key_color_source, 'border_median');
+  assert.ok(result.diagnostics.transparent_ratio > 0.5);
+  assert.ok(result.diagnostics.visible_ratio > 0.1);
+  db.close();
+});
+
 test('rig validation rejects missing roots and cycles', () => {
   assert.throws(() => paperRigService.validateParts([
     { key: 'root', parent: null, pivot: [0.5, 0.5] },

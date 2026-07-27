@@ -1,0 +1,15 @@
+{
+  "$id": "https://localminidrama.local/schemas/paper-studio/api-paper-audio-upload-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "expected_version", "audio_kind"],
+  "properties": {
+    "request_id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "expected_version": { "type": "integer", "minimum": 1 },
+    "audio_kind": { "enum": ["dialogue", "narration"] },
+    "volume": { "type": "number", "minimum": 0, "maximum": 2 },
+    "start_seconds": { "type": "number", "minimum": 0, "maximum": 120 },
+    "captions_enabled": { "type": "boolean" },
+    "caption_text": { "type": "string", "maxLength": 12000 }
+  }
+}

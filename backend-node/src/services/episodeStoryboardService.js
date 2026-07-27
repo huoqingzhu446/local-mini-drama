@@ -567,7 +567,7 @@ function insertOneStoryboard(db, episodeIdNum, sb, style, videoRatio, now, deriv
  * 在流式输出过程中，从已积累的文本尝试解析并保存尚未保存的分镜。
  * savedNums：已保存的 storyboard_number Set，用于去重。
  */
-function tryIncrementalSave(db, log, episodeIdNum, accumulated, savedNums, style, videoRatio, deriveOpts = {}) {
+function tryIncrementalSave(db, log, episodeIdNum, accumulated, savedNums, style, videoRatio, deriveOpts = {}, savePolicy = null) {
   try {
     let cleaned = accumulated.trim()
       .replace(/^```json\s*/gm, '').replace(/^```\s*/gm, '').replace(/```\s*$/gm, '').trim();
@@ -601,6 +601,13 @@ function tryIncrementalSave(db, log, episodeIdNum, accumulated, savedNums, style
     let newCount = 0;
     for (const sb of items) {
       const shotNumber = normalizeStoryboardShotNumber(sb);
+      if (
+        savePolicy &&
+        ((savePolicy.minShotNumber && shotNumber < savePolicy.minShotNumber) ||
+          (savePolicy.maxShotNumber && shotNumber > savePolicy.maxShotNumber))
+      ) {
+        continue;
+      }
       if (shotNumber > 0 && savedNums.has(shotNumber)) continue;
       const id = insertOneStoryboard(db, episodeIdNum, sb, style, videoRatio, now, deriveOpts);
       if (id !== null) {
@@ -788,35 +795,123 @@ function saveStoryboards(db, log, episodeId, storyboards, cfg, styleOverride, sk
   return saved;
 }
 
-/**
- * 构建续写 prompt：当首次响应被截断时，携带已生成分镜完整列表 + 末尾详情作为上下文，
- * 请求 AI 从 lastShotNum+1 继续生成剩余分镜。
- * 关键：必须把所有已生成分镜的 shot_number + segment_title + title 全部列出，
- * 防止 AI 因不知道哪些情节已覆盖而重复生成相同内容。
- */
-function buildContinuationPrompt(originalUserPrompt, alreadySaved, lastShotNum, attempt, includeNarration, universalOmni = false) {
-  const narrLine = includeNarration
-    ? '\n- 每条新增分镜必须含非空字符串 narration（至少一句解说，与首次任务一致；禁止留空）'
-    : '';
-  const uniLine = universalOmni
-    ? '\n- 每条新增分镜必须含 creation_mode:"universal" 与非空 universal_segment_text（单行：须含「叙事动态」时间线+「镜头」运镜链至少两步如定镜/缓推轨/横移从遮挡后滑出；按 duration 秒写视频动势，禁止静帧式描写；与首轮要求一致）'
-    : '';
-  // 全量已生成分镜摘要（每行一个，仅 shot_number + segment + title）
-  const allSummary = alreadySaved.map((sb) => {
+function summarizeStoryboardsForContinuation(storyboards) {
+  const allSummary = (storyboards || []).map((sb) => {
     const num = sb.shot_number ?? sb.storyboard_number ?? 0;
     const seg = (sb.segment_title || '').replace(/"/g, '\\"');
     const title = (sb.title || '').replace(/"/g, '\\"');
     return `  ${num}. [${seg}] ${title}`;
   }).join('\n');
 
-  // 末尾 5 个分镜的详细内容（供衔接用）
-  const lastCtx = alreadySaved.slice(-5).map((sb) => {
+  const lastCtx = (storyboards || []).slice(-5).map((sb) => {
     const num = sb.shot_number ?? sb.storyboard_number ?? 0;
     const title = (sb.title || '').replace(/"/g, '\\"');
     const loc = (sb.location || '').replace(/"/g, '\\"');
-    const action = (sb.action || '').slice(0, 120).replace(/"/g, '\\"');
-    return `  {"shot_number": ${num}, "title": "${title}", "location": "${loc}", "action": "${action}"}`;
+    const action = (sb.action || '').slice(0, 160).replace(/"/g, '\\"');
+    const result = (sb.result || '').slice(0, 100).replace(/"/g, '\\"');
+    return `  {"shot_number": ${num}, "title": "${title}", "location": "${loc}", "action": "${action}", "result": "${result}"}`;
   }).join(',\n');
+
+  return { allSummary, lastCtx };
+}
+
+/** 将一批 AI 输出强制编号为连续镜号，避免续写模型从 1 重新编号或返回越界镜号。 */
+function normalizeStoryboardBatchItems(items, startShotNumber, maxCount) {
+  const start = Math.max(1, Math.floor(Number(startShotNumber) || 1));
+  const limit = Math.max(0, Math.floor(Number(maxCount) || 0));
+  return (Array.isArray(items) ? items : []).slice(0, limit).map((item, index) => ({
+    ...item,
+    shot_number: start + index,
+    storyboard_number: start + index,
+  }));
+}
+
+function createStoryboardBatchContext(existingStoryboards, totalTargetValue, batchSizeValue, batchMode = 'replace') {
+  const totalTarget = Number.isFinite(Number(totalTargetValue)) && Number(totalTargetValue) > 0
+    ? Math.floor(Number(totalTargetValue))
+    : null;
+  const requestedBatchSize = Number.isFinite(Number(batchSizeValue)) && Number(batchSizeValue) > 0
+    ? Math.floor(Number(batchSizeValue))
+    : null;
+  if (!requestedBatchSize) return null;
+  if (!totalTarget) throw new Error('分批生成需要提供整集总分镜数');
+
+  const existing = Array.isArray(existingStoryboards) ? existingStoryboards : [];
+  const wantsAppend = String(batchMode || '').toLowerCase() === 'append';
+  const mode = wantsAppend && existing.length > 0 ? 'append' : 'replace';
+  const retainedStoryboards = mode === 'append' ? existing : [];
+  if (retainedStoryboards.length >= totalTarget) {
+    throw new Error(`当前已有 ${retainedStoryboards.length} 个分镜，已达到总目标 ${totalTarget}，如需重做请使用“重新开始分批”`);
+  }
+  const lastShotNumber = retainedStoryboards.reduce(
+    (max, sb) => Math.max(max, normalizeStoryboardShotNumber(sb)),
+    0
+  );
+  const expectedCount = Math.min(requestedBatchSize, totalTarget - retainedStoryboards.length);
+  const startShotNumber = mode === 'append' ? lastShotNumber + 1 : 1;
+  return {
+    enabled: true,
+    mode,
+    totalTarget,
+    requestedBatchSize,
+    expectedCount,
+    startShotNumber,
+    endShotNumber: startShotNumber + expectedCount - 1,
+    existingStoryboards: retainedStoryboards,
+  };
+}
+
+/**
+ * 构建手动分批 prompt。总分镜数用于全剧规划，本次只允许返回指定连续区间，
+ * 从而避免把完整剧本压进单批 5 镜。
+ */
+function buildStoryboardBatchPrompt(originalUserPrompt, existingStoryboards, batchContext) {
+  const start = batchContext.startShotNumber;
+  const end = batchContext.endShotNumber;
+  const count = batchContext.expectedCount;
+  const target = batchContext.totalTarget;
+  const isFinalBatch = end >= target;
+  const { allSummary, lastCtx } = summarizeStoryboardsForContinuation(existingStoryboards);
+  const existingBlock = existingStoryboards.length > 0
+    ? `\n\n━━━ 已生成分镜完整列表（不得重复或覆盖）━━━\n${allSummary}\n━━━ 列表结束 ━━━\n\n末尾 5 镜衔接详情：\n[\n${lastCtx}\n]`
+    : '';
+
+  return `${originalUserPrompt}${existingBlock}\n\n【最高优先级——分批生成，不压缩剧情】
+整集最终规划目标仍为约 ${target} 个分镜；该目标作用于所有批次合计，绝不是要求本次讲完整集。
+本次仅生成第 ${start}～${end} 镜，共 ${count} 个分镜，并且只返回这 ${count} 个 JSON 对象。
+- shot_number 必须从 ${start} 开始连续递增，到 ${end} 结束
+- 按原剧本顺序${start > 1 ? '从已生成内容之后自然续写' : '从开头开始'}，不得重复已生成情节
+- 不得为了在本批讲完剧本而合并、跳过、概括后续剧情；后续内容保留给下一批
+- 仍按整集约 ${target} 镜的正常颗粒度拆分动作，本批只是其中连续的一段
+${isFinalBatch ? '- 这是最后一批，应在保持正常颗粒度的前提下覆盖剧本结尾' : `- 本批结束后仍需为第 ${end + 1} 镜及之后保留未覆盖剧情`}
+- 不要输出任何解释文字，只返回 JSON 数组`;
+}
+
+function buildStoryboardBatchSystemSuffix(batchContext) {
+  return `\n\n【最高优先级——当前分批输出范围】
+整集目标为约 ${batchContext.totalTarget} 镜，但当前响应只能输出第 ${batchContext.startShotNumber}～${batchContext.endShotNumber} 镜，共 ${batchContext.expectedCount} 条。
+“总分镜数量”约束适用于所有批次的最终合计，不适用于当前单次响应。严禁在本批压缩或讲完整集，严禁输出范围外镜号。`;
+}
+
+/**
+ * 构建续写 prompt：当响应被截断或当前批数量不足时，携带已生成分镜上下文继续。
+ * targetEndShot 传入时只补齐当前手动批次，不会越过本批范围。
+ */
+function buildContinuationPrompt(originalUserPrompt, alreadySaved, lastShotNum, attempt, includeNarration, universalOmni = false, targetEndShot = null) {
+  const narrLine = includeNarration
+    ? '\n- 每条新增分镜必须含非空字符串 narration（至少一句解说，与首次任务一致；禁止留空）'
+    : '';
+  const uniLine = universalOmni
+    ? '\n- 每条新增分镜必须含 creation_mode:"universal" 与非空 universal_segment_text（单行：须含「叙事动态」时间线+「镜头」运镜链至少两步如定镜/缓推轨/横移从遮挡后滑出；按 duration 秒写视频动势，禁止静帧式描写；与首轮要求一致）'
+    : '';
+  const { allSummary, lastCtx } = summarizeStoryboardsForContinuation(alreadySaved);
+  const hasBatchEnd = Number.isFinite(Number(targetEndShot)) && Number(targetEndShot) > lastShotNum;
+  const completionLine = hasBatchEnd
+    ? `请从 shot_number ${lastShotNum + 1} 继续补齐当前批次，仅生成到 shot_number ${Number(targetEndShot)} 后停止。`
+    : `请从 shot_number ${lastShotNum + 1} 继续生成剩余分镜，直至剧本全部场景覆盖完毕。`;
+  const rangeLine = hasBatchEnd
+    ? `\n- 当前续写最多返回 ${Number(targetEndShot) - lastShotNum} 条，严禁输出 shot_number ${Number(targetEndShot) + 1} 或更大的内容`
+    : '';
 
   return `[续写指令 - 第${attempt}次续写]
 之前的分镜生成因长度限制在 shot_number ${lastShotNum} 处中断，已生成 ${alreadySaved.length} 个分镜。
@@ -830,21 +925,30 @@ ${allSummary}
 ${lastCtx}
 ]
 
-请从 shot_number ${lastShotNum + 1} 继续生成剩余分镜，直至剧本全部场景覆盖完毕。
+${completionLine}
 要求：
 - 仅返回新增分镜（JSON数组），shot_number 从 ${lastShotNum + 1} 开始递增
 - 格式与之前完全相同，字段保持一致${narrLine}${uniLine}
 - 严禁重复已生成列表中的任何情节或场景
+- 不得为了在当前续写中讲完剧本而压缩或跳过后续情节${rangeLine}
 - 不要输出任何解释文字，直接输出 JSON
 
 原始剧本与任务说明：
 ${originalUserPrompt}`;
 }
 
-async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, model, style, userPrompt, systemPrompt, includeNarration, universalOmni, targetClipDurationSec = null) {
+async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, model, style, userPrompt, systemPrompt, includeNarration, universalOmni, targetClipDurationSec = null, batchContext = null) {
   // 增量保存状态放在 try 外，catch 里可用于部分恢复
   const episodeIdNum = Number(episodeId);
   const streamSavedNums = new Set();
+  const manualBatch = !!batchContext?.enabled;
+  const appendBatch = manualBatch && batchContext.mode === 'append';
+  const batchSavePolicy = manualBatch
+    ? {
+        minShotNumber: batchContext.startShotNumber,
+        maxShotNumber: batchContext.endShotNumber,
+      }
+    : null;
   const streamStyle = (style && String(style).trim()) || cfg?.style?.default_style || '';
   const streamVideoRatio = cfg?.style?.default_video_ratio || '16:9';
   const deriveOpts = {
@@ -863,9 +967,11 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
     });
     logDebugStoryboardPrompts(log, `task-${taskId}-initial`, userPrompt, systemPrompt);
 
-    // 提前删除旧分镜，为增量流式保存腾出位置
-    const deleteNow = new Date().toISOString();
-    db.prepare('UPDATE storyboards SET deleted_at = ? WHERE episode_id = ? AND deleted_at IS NULL').run(deleteNow, episodeIdNum);
+    // 普通生成或分批重新开始：先清空旧分镜。分批续写则保留已有分镜并从末尾追加。
+    if (!appendBatch) {
+      const deleteNow = new Date().toISOString();
+      db.prepare('UPDATE storyboards SET deleted_at = ? WHERE episode_id = ? AND deleted_at IS NULL').run(deleteNow, episodeIdNum);
+    }
 
     // 不使用 json_mode：response_format:json_object 要求返回 JSON 对象而非数组，会导致模型包装成
     // {"storyboards":[...]} 或产生乱码 key，改由 extractFirstArray 统一处理任意包装格式。
@@ -875,7 +981,7 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
       streamCallback: (accumulated) => {
         if (accumulated.length - streamThrottle < 400) return;
         streamThrottle = accumulated.length;
-        tryIncrementalSave(db, log, episodeIdNum, accumulated, streamSavedNums, streamStyle, streamVideoRatio, deriveOpts);
+        tryIncrementalSave(db, log, episodeIdNum, accumulated, streamSavedNums, streamStyle, streamVideoRatio, deriveOpts, batchSavePolicy);
         // 同步更新任务进度（根据已保存分镜数量）
         if (streamSavedNums.size > 0) {
           taskService.updateTaskStatus(db, taskId, 'processing', 30,
@@ -898,6 +1004,13 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
     try {
       const parsed = safeParseAIJSON(text, null, log, parseMeta);
       storyboards = extractFirstArray(parsed) || [];
+      if (manualBatch) {
+        storyboards = normalizeStoryboardBatchItems(
+          storyboards,
+          batchContext.startShotNumber,
+          batchContext.expectedCount
+        );
+      }
     } catch (e) {
       log.error('Parse storyboard JSON failed', {
         error: e.message,
@@ -964,18 +1077,23 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
     }
     log.info('Storyboard initial parse', { task_id: taskId, episode_id: episodeId, count: storyboards.length, truncated: parseMeta.truncated || false });
 
-    // ── 自动续写：若 AI 输出被截断，最多续写 3 次直到完整 ──────────────────
+    // ── 自动续写：AI 输出被截断，或手动批次数量不足时，最多续写 3 次 ──────
     const MAX_CONTINUATION = 3;
     let contAttempt = 0;
-    while (parseMeta.truncated && storyboards.length > 0 && contAttempt < MAX_CONTINUATION) {
+    const batchNeedsMore = () => manualBatch && storyboards.length < batchContext.expectedCount;
+    while ((parseMeta.truncated || batchNeedsMore()) && storyboards.length > 0 && contAttempt < MAX_CONTINUATION) {
       contAttempt++;
       const lastShot = Math.max(...storyboards.map(s => Number(s.shot_number ?? s.storyboard_number) || 0));
       log.info('Storyboard continuation start', { task_id: taskId, attempt: contAttempt, last_shot: lastShot, current_count: storyboards.length });
       taskService.updateTaskStatus(db, taskId, 'processing', 50 + contAttempt * 5,
         `已生成 ${storyboards.length} 个分镜，正在续写剩余部分（第${contAttempt}次）...`);
 
-      const contPrompt = buildContinuationPrompt(userPrompt, storyboards, lastShot, contAttempt, !!includeNarration, !!universalOmni);
-      logDebugStoryboardPrompts(log, `task-${taskId}-continuation-${contAttempt}`, contPrompt, systemPrompt);
+      const targetEndShot = manualBatch ? batchContext.endShotNumber : null;
+      const contPrompt = buildContinuationPrompt(userPrompt, storyboards, lastShot, contAttempt, !!includeNarration, !!universalOmni, targetEndShot);
+      const contSystemPrompt = manualBatch
+        ? `${systemPrompt}\n\n【最高优先级——当前批次补齐】本次续写响应只返回第 ${lastShot + 1}～${batchContext.endShotNumber} 镜，共 ${Math.max(0, batchContext.endShotNumber - lastShot)} 条；到 ${batchContext.endShotNumber} 立即停止。`
+        : systemPrompt;
+      logDebugStoryboardPrompts(log, `task-${taskId}-continuation-${contAttempt}`, contPrompt, contSystemPrompt);
       streamThrottle = 0; // 重置节流，让续写段落也能增量保存
 
       // 等待 3 秒后再发续写请求：避免流式请求刚结束服务端连接未释放导致 "socket hang up"
@@ -983,12 +1101,12 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
 
       let contText;
       try {
-        contText = await generateTextForStoryboard(db, log, contPrompt, systemPrompt, {
+        contText = await generateTextForStoryboard(db, log, contPrompt, contSystemPrompt, {
           model: model || undefined,
           streamCallback: (accumulated) => {
             if (accumulated.length - streamThrottle < 400) return;
             streamThrottle = accumulated.length;
-            tryIncrementalSave(db, log, episodeIdNum, accumulated, streamSavedNums, streamStyle, streamVideoRatio, deriveOpts);
+            tryIncrementalSave(db, log, episodeIdNum, accumulated, streamSavedNums, streamStyle, streamVideoRatio, deriveOpts, batchSavePolicy);
           },
         });
       } catch (e) {
@@ -1001,6 +1119,13 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
       try {
         const contParsed = safeParseAIJSON(contText, null, log, contMeta);
         contItems = extractFirstArray(contParsed) || [];
+        if (manualBatch) {
+          contItems = normalizeStoryboardBatchItems(
+            contItems,
+            lastShot + 1,
+            batchContext.endShotNumber - lastShot
+          );
+        }
       } catch (e) {
         log.warn('Continuation parse failed', { task_id: taskId, attempt: contAttempt, error: e.message });
         break;
@@ -1011,7 +1136,8 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
         break;
       }
 
-      // 按 shot_number 去重，防止 AI 重复已生成的分镜
+      // 按 shot_number 去重，防止 AI 重复已生成的分镜。
+      // 手动批次已在上方强制重排为 lastShot+1 起的连续镜号。
       const existingNums = new Set(storyboards.map((s) => normalizeStoryboardShotNumber(s)));
       const newItems = contItems.filter((s) => !existingNums.has(normalizeStoryboardShotNumber(s)));
       if (newItems.length === 0) {
@@ -1028,18 +1154,21 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
     }
     // ── 续写结束 ────────────────────────────────────────────────────────────
 
-    const totalDuration = storyboards.reduce((sum, sb) => sum + (Number(sb.duration) || 0), 0);
-    if (parseMeta.truncated) {
+    const batchIncomplete = manualBatch && storyboards.length < batchContext.expectedCount;
+    const batchDuration = storyboards.reduce((sum, sb) => sum + (Number(sb.duration) || 0), 0);
+    if (parseMeta.truncated || batchIncomplete) {
       log.warn('Storyboard still truncated after max continuations', {
-        task_id: taskId, final_count: storyboards.length, continuation_attempts: contAttempt,
+        task_id: taskId, final_count: storyboards.length, continuation_attempts: contAttempt, batch_incomplete: batchIncomplete,
       });
     }
-    log.info('Storyboard generated', { task_id: taskId, episode_id: episodeId, count: storyboards.length, total_duration_seconds: totalDuration, truncated: parseMeta.truncated || false, continuation_attempts: contAttempt });
+    log.info('Storyboard generated', { task_id: taskId, episode_id: episodeId, count: storyboards.length, batch_duration_seconds: batchDuration, truncated: parseMeta.truncated || false, batch_incomplete: batchIncomplete, continuation_attempts: contAttempt });
 
     taskService.updateTaskStatus(db, taskId, 'processing', 70, '正在保存分镜头...');
 
     // 传入 streamSavedNums：已增量保存的项目直接从 DB 读取，跳过重复 INSERT
     const saved = saveStoryboards(db, log, episodeId, storyboards, cfg, style, streamSavedNums, deriveOpts);
+    const allActiveStoryboards = getStoryboardsForEpisode(db, episodeIdNum);
+    const totalDuration = allActiveStoryboards.reduce((sum, sb) => sum + (Number(sb.duration) || 0), 0);
 
     // ── 分镜角色补全（字符串匹配，无 AI，极快）──────────────────────────────────
     taskService.updateTaskStatus(db, taskId, 'processing', 75, '正在校验分镜角色关联...');
@@ -1062,10 +1191,25 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
     const resultData = {
       storyboards: saved,
       total: saved.length,
+      generated_total: allActiveStoryboards.length,
       total_duration: totalDuration,
       duration_minutes: durationMinutes,
-      truncated: parseMeta.truncated || false,
+      truncated: parseMeta.truncated || batchIncomplete || false,
     };
+    if (manualBatch) {
+      resultData.batch = {
+        enabled: true,
+        mode: batchContext.mode,
+        start: batchContext.startShotNumber,
+        end: batchContext.startShotNumber + Math.max(0, saved.length - 1),
+        requested: batchContext.expectedCount,
+        generated: saved.length,
+        generated_total: allActiveStoryboards.length,
+        total_target: batchContext.totalTarget,
+        remaining: Math.max(0, batchContext.totalTarget - allActiveStoryboards.length),
+        has_more: allActiveStoryboards.length < batchContext.totalTarget,
+      };
+    }
     taskService.updateTaskResult(db, taskId, resultData);
     log.info('Storyboard generation completed', { task_id: taskId, episode_id: episodeId });
   } catch (err) {
@@ -1097,7 +1241,7 @@ async function processStoryboardGeneration(db, log, cfg, taskId, episodeId, mode
   }
 }
 
-function generateStoryboard(db, log, episodeId, model, style, storyboardCount, videoDuration, aspectRatio, includeNarration, universalOmni, promptStyleIds = []) {
+function generateStoryboard(db, log, episodeId, model, style, storyboardCount, videoDuration, aspectRatio, includeNarration, universalOmni, promptStyleIds = [], storyboardBatchSize = null, storyboardBatchMode = 'replace') {
   const cfg = loadConfig();
   const episode = db.prepare(
     'SELECT id, script_content, description, drama_id FROM episodes WHERE id = ? AND deleted_at IS NULL'
@@ -1153,6 +1297,14 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
   if (!scriptContent) {
     throw new Error('剧本内容为空，请先生成剧集内容');
   }
+
+  const existingStoryboards = getStoryboardsForEpisode(db, Number(episodeId));
+  const batchContext = createStoryboardBatchContext(
+    existingStoryboards,
+    storyboardCount,
+    storyboardBatchSize,
+    storyboardBatchMode
+  );
 
   const characters = db.prepare(
     'SELECT id, name FROM characters WHERE drama_id = ? AND deleted_at IS NULL ORDER BY name ASC'
@@ -1251,6 +1403,9 @@ function generateStoryboard(db, log, episodeId, model, style, storyboardCount, v
   if (promptStyleBlock) {
     userPrompt += `\n\n${promptStyleBlock}`;
   }
+  if (batchContext) {
+    userPrompt = buildStoryboardBatchPrompt(userPrompt, batchContext.existingStoryboards, batchContext);
+  }
 
   let systemPrompt = promptI18n.getStoryboardSystemPrompt(cfg);
 
@@ -1293,6 +1448,9 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
   if (wantUniversalOmni) {
     systemPrompt += promptI18n.getStoryboardUniversalOmniModeSuffix(cfg);
   }
+  if (batchContext) {
+    systemPrompt += buildStoryboardBatchSystemSuffix(batchContext);
+  }
 
   const task = taskService.createTask(db, log, 'storyboard_generation', String(episodeId));
   log.info('Generating storyboard asynchronously', {
@@ -1303,6 +1461,9 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
     character_count: characters.length,
     scene_count: scenes.length,
     storyboard_count: storyboardCount,
+    storyboard_batch_size: batchContext?.expectedCount || null,
+    storyboard_batch_mode: batchContext?.mode || null,
+    storyboard_batch_range: batchContext ? `${batchContext.startShotNumber}-${batchContext.endShotNumber}` : null,
     video_duration: videoDuration,
     universal_omni_storyboard: wantUniversalOmni,
     prompt_style_count: promptStyleService.normalizeIds(promptStyleIds).length,
@@ -1327,11 +1488,28 @@ The user enabled narrator voice-over for the whole episode. Every shot object MU
       systemPrompt,
       wantNarration,
       wantUniversalOmni,
-      clipSec
+      clipSec,
+      batchContext
     );
   });
 
-  return { task_id: task.id, status: 'pending', message: '分镜生成任务已创建，正在后台处理...' };
+  return {
+    task_id: task.id,
+    status: 'pending',
+    message: batchContext
+      ? `分镜第 ${batchContext.startShotNumber}～${batchContext.endShotNumber} 镜生成任务已创建`
+      : '分镜生成任务已创建，正在后台处理...',
+    batch: batchContext
+      ? {
+          enabled: true,
+          mode: batchContext.mode,
+          start: batchContext.startShotNumber,
+          end: batchContext.endShotNumber,
+          requested: batchContext.expectedCount,
+          total_target: batchContext.totalTarget,
+        }
+      : undefined,
+  };
 }
 
 
@@ -1616,6 +1794,10 @@ function splitStoryboardByAudio(db, log, storyboardId) {
 module.exports = {
   normalizeStoryboardShotNumber,
   dedupeStoryboardRowsByNumber,
+  normalizeStoryboardBatchItems,
+  createStoryboardBatchContext,
+  buildStoryboardBatchPrompt,
+  buildStoryboardBatchSystemSuffix,
   getStoryboardsForEpisode,
   generateStoryboard,
   /** 与分镜入库时一致的「视频提示词」拼装（供经典模式润色等复用） */
