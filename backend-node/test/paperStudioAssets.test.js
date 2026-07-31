@@ -10,6 +10,8 @@ const sharp = require('sharp');
 const { runMigrationsAndEnsure } = require('../src/db/migrate');
 const imageClient = require('../src/services/imageClient');
 const projectService = require('../src/services/paper-studio/paperStudioProjectService');
+const episodeService = require('../src/services/paper-studio/paperStudioEpisodeService');
+const storyboardService = require('../src/services/paper-studio/paperStoryboardService');
 const runService = require('../src/services/paper-studio/paperStudioRunService');
 const shotService = require('../src/services/paper-studio/paperStudioShotService');
 const analyzerService = require('../src/services/paper-studio/paperStudioAnalyzerService');
@@ -52,6 +54,54 @@ async function setup() {
   const analyzed = analyzerService.analyzeRun(db, log, draft.id, { request_id: randomUUID(), expected_version: draft.version }, { fps: 30 }).run;
   const confirmed = analyzerService.confirmPlan(db, log, draft.id, { request_id: randomUUID(), expected_version: analyzed.version }).run;
   return { db, storage, run: confirmed, soldierPng, riverPng: fs.readFileSync(path.join(storage, 'scenes', 'river.png')) };
+}
+
+async function setupIndependentEnvironment() {
+  const storage = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-paper-environment-'));
+  fs.mkdirSync(path.join(storage, 'references'), { recursive: true });
+  const referencePath = 'references/zhanghe-cold-mist.png';
+  const referencePng = await sharp({
+    create: { width: 640, height: 360, channels: 4, background: { r: 52, g: 58, b: 57, alpha: 1 } },
+  }).composite([{
+    input: Buffer.from('<svg width="640" height="360"><path d="M0 240 Q210 180 640 215 V360 H0Z" fill="#697879"/><path d="M330 155 L430 155 L455 235 L305 235Z" fill="#252725"/><path d="M470 225 L540 170 L610 225Z" fill="#8a4e35"/></svg>'),
+    top: 0,
+    left: 0,
+  }]).png().toBuffer();
+  fs.writeFileSync(path.join(storage, referencePath), referencePng);
+
+  const db = new Database(':memory:');
+  runMigrationsAndEnsure(db);
+  const now = '2026-07-27T00:00:00.000Z';
+  db.prepare("INSERT INTO dramas (id,title,style,metadata,created_at,updated_at) VALUES (1,'漳河寒雾','custom:1',?, ?, ?)")
+    .run(JSON.stringify({ style_prompt_en: 'photorealistic RAW photo marker', scene_style_prompt_en: 'generic bright landscape marker' }), now, now);
+  db.prepare(`INSERT INTO ai_service_configs
+    (id,service_type,provider,name,base_url,api_key,model,default_model,is_default,is_active,created_at,updated_at)
+    VALUES (1,'image','openai','测试图片模型','https://example.invalid','test-key','["gpt-image-2"]','gpt-image-2',1,1,?,?)`).run(now, now);
+  const project = projectService.create(db, log, 1, { request_id: randomUUID() }).project;
+  const episode = episodeService.create(db, log, project.id, { request_id: randomUUID(), title: '漳河之战' }).episode;
+  const storyboard = storyboardService.create(db, log, episode.id, {
+    request_id: randomUUID(),
+    title: '漳河寒雾',
+    description: '漳河两岸被寒雾覆盖，远处城池、焚毁营帐、船只与废墟若隐若现',
+    visual_prompt: '阴冷战争遗迹，深灰矿物颜料和旧纸肌理',
+    action: '',
+    environment_only: true,
+    duration: 10,
+    reference_local_path: referencePath,
+  }).storyboard;
+  const draft = runService.create(db, log, {
+    request_id: randomUUID(), project_id: project.id, paper_episode_id: episode.id,
+    paper_storyboard_ids: [storyboard.id],
+    expected_paper_storyboard_revisions: { [storyboard.id]: storyboard.current_revision_id },
+    image_provider_config_id: 1,
+  }).run;
+  const analyzed = analyzerService.analyzeRun(db, log, draft.id, {
+    request_id: randomUUID(), expected_version: draft.version,
+  }, { fps: 30 }).run;
+  const confirmed = analyzerService.confirmPlan(db, log, analyzed.id, {
+    request_id: randomUUID(), expected_version: analyzed.version,
+  }).run;
+  return { db, storage, run: confirmed, storyboard, referencePath, referencePng };
 }
 
 function authorizeGeneration(db, runId) {
@@ -138,6 +188,184 @@ test('asset production generates clean transparent layers from reusable referenc
   }
 });
 
+test('independent environment plate reuses the selected composition reference without an image call', async () => {
+  const { db, storage, run, referencePath } = await setupIndependentEnvironment();
+  const original = imageClient.callImageApi;
+  let apiCalls = 0;
+  imageClient.callImageApi = async () => {
+    apiCalls += 1;
+    throw new Error('environment reference reuse must not call the image API');
+  };
+  try {
+    const before = shotService.get(db, run.shots[0].id);
+    const cleanSlot = before.families[0].slots.find((slot) => slot.slot_key === 'clean_plate');
+    const references = assetService.referenceImagesForSlot(db, before, cleanSlot, {
+      capabilities: { reference_images: true, max_reference_images: 4 },
+    });
+    assert.deepEqual(references, [referencePath]);
+    const prompt = assetService.promptForSlot(db, before, cleanSlot);
+    assert.match(prompt, /SELECTED STORYBOARD REFERENCE — highest priority/);
+    assert.match(prompt, /漳河两岸被寒雾覆盖/);
+    assert.match(prompt, /焚毁营帐、船只与废墟/);
+    assert.match(prompt, /selected reference overrides that conflict/);
+    assert.doesNotMatch(prompt, /Do not visualize anything from the storyboard/);
+
+    const quote = authorizationService.buildQuote(db, run.id, {
+      request_id: randomUUID(), expected_version: run.version,
+    });
+    assert.equal(quote.estimated_image_count, 0);
+    assert.deepEqual(quote.slots, []);
+    const authorizationId = authorizeGeneration(db, run.id);
+    const readyToGenerate = shotService.get(db, before.id);
+    const generated = await assetService.generateAssets(db, { storage: { local_path: storage } }, log, before.id, {
+      request_id: randomUUID(), expected_version: readyToGenerate.version, authorization_id: authorizationId,
+    });
+    assert.equal(apiCalls, 0);
+    const version = generated.shot.families[0].slots.find((slot) => slot.slot_key === 'clean_plate').current_version;
+    assert.equal(version.derivation_kind, 'source_import');
+    assert.equal(version.provenance_json.source_kind, 'storyboard_reference');
+    assert.equal(version.provenance_json.local_path, referencePath);
+    assert.equal(version.quality_report_json.width, 640);
+    assert.equal(version.quality_report_json.height, 360);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM image_generations WHERE paper_asset_version_id = ?').get(version.id).count, 0);
+    const approved = assetReviewService.review(db, log, before.id, {
+      request_id: randomUUID(), expected_version: generated.shot.version,
+      action: 'approve', asset_version_ids: [Number(version.id)],
+    });
+    assert.equal(approved.shot.status, 'asset_ready');
+  } finally {
+    imageClient.callImageApi = original;
+    db.close();
+    fs.rmSync(storage, { recursive: true, force: true });
+  }
+});
+
+test('explicit environment plate regeneration remains opt-in and keeps the composition reference gate', async () => {
+  const { db, storage, run, referencePath, referencePng } = await setupIndependentEnvironment();
+  const original = imageClient.callImageApi;
+  let request = null;
+  imageClient.callImageApi = async (unusedDb, unusedLog, opts) => {
+    request = opts;
+    return { image_url: `data:image/png;base64,${referencePng.toString('base64')}` };
+  };
+  try {
+    const before = shotService.get(db, run.shots[0].id);
+    const cleanSlot = before.families[0].slots.find((slot) => slot.slot_key === 'clean_plate');
+    const quote = authorizationService.buildQuote(db, run.id, {
+      request_id: randomUUID(), expected_version: run.version,
+      shot_ids: [before.id], slot_ids: [cleanSlot.id],
+    });
+    assert.equal(quote.estimated_image_count, 1);
+    assert.equal(quote.slots[0].force_regeneration, true);
+    const authorization = authorizationService.authorize(db, log, run.id, {
+      request_id: randomUUID(), expected_version: run.version,
+      quote_fingerprint: quote.quote_fingerprint, confirmed: true,
+      shot_ids: quote.shot_ids, slot_ids: quote.requested_slot_ids,
+    }).authorization;
+    authorizationService.execute(db, log, authorization.id, {
+      request_id: randomUUID(), expected_version: authorization.version,
+    });
+    const readyToGenerate = shotService.get(db, before.id);
+    const generated = await assetService.generateAssets(db, { storage: { local_path: storage } }, log, before.id, {
+      request_id: randomUUID(), expected_version: readyToGenerate.version, authorization_id: authorization.id,
+    });
+    assert.deepEqual(request.reference_image_urls, [referencePath]);
+    assert.match(request.system_prompt, /selected storyboard reference and the primary visual authority/);
+    assert.match(request.user_negative_prompt, /changed era/);
+    const version = generated.shot.families[0].slots.find((slot) => slot.slot_key === 'clean_plate').current_version;
+    assert.equal(version.derivation_kind, 'image_api');
+    assert.equal(version.quality_report_json.reference_count, 1);
+    assert.equal(version.quality_report_json.reference_required, true);
+    assert.equal(version.quality_report_json.reference_gate_passed, true);
+    assert.equal(version.provenance_json.reference_evidence[0].local_path, referencePath);
+    assert.match(version.provenance_json.reference_evidence[0].content_hash, /^sha256:[0-9a-f]{64}$/);
+  } finally {
+    imageClient.callImageApi = original;
+    db.close();
+    fs.rmSync(storage, { recursive: true, force: true });
+  }
+});
+
+test('optional procedural state is free, auto-adopted, and repairs an already stuck motion run', async () => {
+  const { db, storage, run, soldierPng, riverPng } = await setup();
+  const original = imageClient.callImageApi;
+  let apiCalls = 0;
+  imageClient.callImageApi = async (unusedDb, unusedLog, opts) => {
+    apiCalls += 1;
+    const image = /clean plate/i.test(opts.prompt) ? riverPng : soldierPng;
+    return { image_url: `data:image/png;base64,${image.toString('base64')}` };
+  };
+  try {
+    const before = shotService.get(db, run.shots[0].id);
+    const stateSlots = before.families.flatMap((family) => family.slots)
+      .filter((slot) => slot.constraints_json?.state);
+    assert.ok(stateSlots.length >= 3);
+    const transitionSlot = stateSlots[1];
+    db.prepare('UPDATE paper_asset_slots SET required_for_gate = 0, constraints_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...transitionSlot.constraints_json, fallback: 'procedural' }), transitionSlot.id);
+
+    const authorizationId = authorizeGeneration(db, run.id);
+    const readyToGenerate = shotService.get(db, before.id);
+    const generated = await assetService.generateAssets(db, { storage: { local_path: storage } }, log, before.id, {
+      request_id: randomUUID(), expected_version: readyToGenerate.version, authorization_id: authorizationId,
+    });
+    assert.equal(apiCalls, 4);
+    const automatic = generated.shot.families.flatMap((family) => family.slots)
+      .find((slot) => Number(slot.id) === Number(transitionSlot.id)).current_version;
+    assert.equal(automatic.derivation_kind, 'procedural_state_fallback');
+    assert.equal(automatic.latest_review_decision.reviewer, 'system_procedural_fallback');
+    assert.equal(automatic.quality_report_json.auto_accepted, true);
+
+    // Simulate a production version created before this fix: the optional state
+    // was skipped, while all visible/paid assets were already approved.
+    db.prepare('DELETE FROM paper_asset_review_decisions WHERE asset_version_id = ?').run(automatic.id);
+    db.prepare('UPDATE paper_asset_slots SET current_version_id = NULL, status = \'planned\' WHERE id = ?').run(transitionSlot.id);
+    db.prepare('DELETE FROM paper_asset_versions WHERE id = ?').run(automatic.id);
+    let liveShot = shotService.get(db, before.id);
+    const pendingReviewIds = assetReviewService.currentVersions(db, before.id)
+      .filter((row) => row.latest_review_decision?.decision !== 'approved')
+      .map((row) => Number(row.id));
+    for (const assetVersionId of pendingReviewIds) {
+      const reviewed = assetReviewService.review(db, log, before.id, {
+        request_id: randomUUID(), expected_version: liveShot.version,
+        action: 'approve', asset_version_ids: [assetVersionId],
+      });
+      liveShot = reviewed.shot;
+    }
+    assert.equal(liveShot.status, 'asset_ready');
+    db.prepare("UPDATE paper_studio_shots SET status = 'motion_failed', last_error_json = ?, version = version + 1 WHERE id = ?")
+      .run(JSON.stringify({ code: 'PAPER_STUDIO_STATE_ASSET_MISSING', message: '动作状态缺少正式素材版本' }), before.id);
+    liveShot = shotService.get(db, before.id);
+    const motion = motionGateService.planMotion(db, {
+      storage: { local_path: storage },
+      paper_studio: { renderer_version: 'paper-studio-v3', proof_rule_version: 'paper-proof-v3' },
+    }, log, before.id, { request_id: randomUUID(), expected_version: liveShot.version });
+    assert.equal(motion.shot.status, 'motion_ready');
+    assert.equal(motion.fallback_repair.repaired_count, 1);
+    const repairedSlot = motion.shot.families.flatMap((family) => family.slots)
+      .find((slot) => Number(slot.id) === Number(transitionSlot.id));
+    assert.equal(repairedSlot.status, 'ready');
+    assert.equal(repairedSlot.current_version.derivation_kind, 'procedural_state_fallback');
+    assert.equal(repairedSlot.current_version.latest_review_decision.reviewer, 'system_procedural_fallback');
+    const frozen = snapshotService.get(db, motion.snapshot.id).snapshot_json;
+    const stack = [frozen.root];
+    let repairedMapping = null;
+    while (stack.length) {
+      const current = stack.pop();
+      if (current.relation?.state_asset_version_ids
+        && Object.values(current.relation.state_asset_version_ids).includes(repairedSlot.current_version.id)) {
+        repairedMapping = current.relation.state_asset_version_ids;
+        break;
+      }
+      stack.push(...(current.children || []));
+    }
+    assert.ok(repairedMapping);
+  } finally {
+    imageClient.callImageApi = original;
+    db.close();
+  }
+});
+
 test('safe storage resolver rejects traversal before reading or writing assets', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-paper-path-'));
   assert.throws(
@@ -180,17 +408,18 @@ test('semantic asset review rejects one current version and retries only that sl
   }
 });
 
-test('clean-plate prompt uses fixed environment only and does not copy narrative props from scene prose', async () => {
+test('layered clean-plate prompt preserves atmosphere while explicitly removing independent subjects', async () => {
   const { db, storage, run } = await setup();
   try {
     db.prepare("UPDATE storyboards SET atmosphere = 'NARRATIVE_PROP_MARKER 陶片与粮袋散落前景' WHERE id = 101").run();
     const shot = shotService.get(db, run.shots[0].id);
     const cleanSlot = shot.families.flatMap((family) => family.slots).find((slot) => slot.slot_key === 'clean_plate');
     const prompt = assetService.promptForSlot(db, shot, cleanSlot);
-    assert.match(prompt, /fixed terrain, shoreline, water, sky/);
-    assert.match(prompt, /no discrete narrative entity, movable item, clustered debris/);
+    assert.match(prompt, /Preserve fixed terrain, shoreline, water, sky/);
+    assert.match(prompt, /Remove only the characters or movable hero props/);
+    assert.match(prompt, /Keep the storyboard atmosphere and environmental description/);
     assert.doesNotMatch(prompt, /秦末木船/);
-    assert.doesNotMatch(prompt, /NARRATIVE_PROP_MARKER|陶片与粮袋散落前景/);
+    assert.match(prompt, /NARRATIVE_PROP_MARKER|陶片与粮袋散落前景/);
   } finally {
     db.close();
     fs.rmSync(storage, { recursive: true, force: true });

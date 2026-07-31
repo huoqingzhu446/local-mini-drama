@@ -13,6 +13,7 @@ const runAggregateService = require('./paperRunAggregateService');
 const continuityService = require('./paperContinuityService');
 const revisionService = require('./paperSourceRevisionService');
 const sourceService = require('./paperStudioSourceService');
+const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStudioPlannerVersion');
 const {
   normalizeVisualBible,
   parseDramaMetadata,
@@ -69,6 +70,103 @@ function insertVersion(db, slot, derivationKind, provenance = {}) {
      VALUES (?, ?, ?, ?, '{}', '{}', ?, '{}', 'candidate', ?)`,
   ).run(Number(slot.id), Number(slot.family_id), Number(next.attempt), derivationKind, JSON.stringify(provenance), nowIso());
   return Number(result.lastInsertRowid);
+}
+
+function isProceduralStateFallback(slot) {
+  return Boolean(
+    slot
+    && slot.required_for_gate === false
+    && slot.constraints_json?.fallback === 'procedural'
+    && slot.constraints_json?.state,
+  );
+}
+
+function deriveProceduralStateFallback(db, slot) {
+  if (slot.current_version_id) {
+    const current = db.prepare("SELECT id FROM paper_asset_versions WHERE id = ? AND slot_id = ? AND status = 'accepted'")
+      .get(Number(slot.current_version_id), Number(slot.id));
+    if (current) return { versionId: Number(current.id), created: false };
+  }
+  const source = db.prepare(
+    `SELECT pav.*, pas.slot_key AS source_slot_key
+     FROM paper_asset_slots pas
+     JOIN paper_asset_versions pav ON pav.id = pas.current_version_id AND pav.status = 'accepted'
+     WHERE pas.family_id = ? AND pas.id != ? AND pas.deleted_at IS NULL
+     ORDER BY CASE WHEN pas.id < ? THEN 0 ELSE 1 END, ABS(pas.id - ?), pas.id
+     LIMIT 1`,
+  ).get(Number(slot.family_id), Number(slot.id), Number(slot.id), Number(slot.id));
+  if (!source?.source_local_path) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_PROCEDURAL_FALLBACK_SOURCE_MISSING',
+      '自动环境过渡缺少可复用的相邻状态素材',
+      { slot_id: Number(slot.id), slot_key: slot.slot_key, state: slot.constraints_json?.state || null },
+      409,
+    );
+  }
+  const versionId = insertVersion(db, slot, 'procedural_state_fallback', {
+    fallback_strategy: 'reuse_nearest_state_with_motion',
+    source_asset_version_id: Number(source.id),
+    source_slot_key: source.source_slot_key,
+  });
+  const now = nowIso();
+  const requestId = `auto-procedural-fallback:${slot.id}:${versionId}`;
+  const quality = {
+    ...parseJson(source.quality_report_json, {}),
+    pass: true,
+    auto_accepted: true,
+    fallback_strategy: 'reuse_nearest_state_with_motion',
+    source_asset_version_id: Number(source.id),
+    semantic_review: { status: 'approved', reviewer: 'system_procedural_fallback', reviewed_at: now },
+  };
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE paper_asset_versions
+       SET parent_version_id = ?, source_local_path = ?, alpha_local_path = ?, mask_local_path = ?,
+           source_hash = ?, alpha_hash = ?, mask_hash = ?, processing_json = ?, registration_json = ?,
+           quality_report_json = ?, status = 'accepted', accepted_at = ?
+       WHERE id = ?`,
+    ).run(
+      Number(source.id), source.source_local_path, source.alpha_local_path, source.mask_local_path,
+      source.source_hash, source.alpha_hash, source.mask_hash,
+      JSON.stringify({ fallback_strategy: 'reuse_nearest_state_with_motion', source_asset_version_id: Number(source.id) }),
+      source.registration_json || '{}', JSON.stringify(quality), now, versionId,
+    );
+    db.prepare("UPDATE paper_asset_slots SET current_version_id = ?, status = 'ready', version = version + 1, updated_at = ? WHERE id = ?")
+      .run(versionId, now, Number(slot.id));
+    db.prepare(
+      `INSERT INTO paper_asset_review_decisions
+        (shot_id, slot_id, asset_version_id, decision, reason, reviewer, request_id, created_at)
+       SELECT psf.shot_id, ?, ?, 'approved', ?, 'system_procedural_fallback', ?, ?
+       FROM paper_source_families psf WHERE psf.id = ?`,
+    ).run(
+      Number(slot.id), versionId, '相邻正式状态已通过审核；中间状态由本地动作轨道自动过渡',
+      requestId, now, Number(slot.family_id),
+    );
+  })();
+  return { versionId, created: true };
+}
+
+function ensureProceduralStateFallbacks(db, shotId) {
+  const slots = db.prepare(
+    `SELECT pas.*
+     FROM paper_asset_slots pas
+     JOIN paper_source_families psf ON psf.id = pas.family_id
+     WHERE psf.shot_id = ? AND psf.deleted_at IS NULL AND pas.deleted_at IS NULL
+     ORDER BY psf.id, pas.id`,
+  ).all(Number(shotId)).map((slot) => ({
+    ...slot,
+    id: Number(slot.id),
+    family_id: Number(slot.family_id),
+    current_version_id: slot.current_version_id == null ? null : Number(slot.current_version_id),
+    required_for_gate: Boolean(slot.required_for_gate),
+    constraints_json: parseJson(slot.constraints_json, {}),
+  }));
+  const repaired = [];
+  for (const slot of slots.filter(isProceduralStateFallback)) {
+    const result = deriveProceduralStateFallback(db, slot);
+    if (result.created) repaired.push({ slot_id: Number(slot.id), slot_key: slot.slot_key, version_id: result.versionId });
+  }
+  return { repaired, repaired_count: repaired.length };
 }
 
 function ensureVersionPath(db, cfg, shot, versionId, slotKey, extension = 'png') {
@@ -148,6 +246,16 @@ async function alphaReport(inputPath, outputPath, { requireAlpha = true } = {}) 
 function sourceForSlot(db, shot, slot) {
   const constraints = slot.constraints_json || {};
   if (constraints.allow_source_import === false) return null;
+  if (constraints.source_storyboard_reference === true && sourceService.isPaperShot(shot)) {
+    const storyboard = sourceService.storyboard(db, shot);
+    if (storyboard?.local_path) {
+      return {
+        local_path: storyboard.local_path,
+        source_kind: 'storyboard_reference',
+        source_id: Number(storyboard.id),
+      };
+    }
+  }
   const librarySource = require('./paperLibraryReuseService').sourceForSlot(db, shot, slot);
   if (librarySource) return librarySource;
   if (constraints.source_scene_id && constraints.source_is_clean_plate === true) {
@@ -191,6 +299,26 @@ function referenceImagesForSlot(db, shot, slot, provider) {
   const canUseSceneReference = slot.asset_type === 'environment'
     ? constraints.source_is_clean_plate === true
     : constraints.use_scene_as_reference === true;
+  // The first scene uses the selected storyboard as a composition authority.
+  // Later scenes use an accepted sibling plate (when available) and the
+  // storyboard only as style continuity references.
+  if (sourceService.isPaperShot(shot) && slot.asset_type === 'environment') {
+    if (constraints.use_storyboard_composition_reference !== false) {
+      add(sourceService.referenceMedia(db, shot));
+    } else {
+      const acceptedEnvironment = db.prepare(
+        `SELECT pav.alpha_local_path, pav.source_local_path
+         FROM paper_asset_versions pav
+         JOIN paper_asset_slots pas ON pas.id = pav.slot_id
+         JOIN paper_source_families psf ON psf.id = pas.family_id
+         WHERE psf.shot_id = ? AND pas.asset_type = 'environment'
+           AND pas.id != ? AND pav.status = 'accepted'
+         ORDER BY pav.id DESC LIMIT 1`,
+      ).get(Number(shot.id), Number(slot.id));
+      add(acceptedEnvironment?.alpha_local_path || acceptedEnvironment?.source_local_path);
+      add(sourceService.referenceMedia(db, shot));
+    }
+  }
   if (canUseSceneReference) {
     const scene = constraints.source_scene_id
       ? db.prepare('SELECT * FROM scenes WHERE id = ? AND drama_id = ? AND deleted_at IS NULL').get(Number(constraints.source_scene_id), Number(shot.drama_id))
@@ -227,6 +355,29 @@ function referenceImagesForSlot(db, shot, slot, provider) {
     add(sourceService.referenceMedia(db, shot));
   }
   return refs.slice(0, Math.max(0, Number(provider.capabilities.max_reference_images || 0)));
+}
+
+function referenceEvidence(cfg, referenceImages = []) {
+  return referenceImages.map((reference, index) => {
+    const value = String(reference || '');
+    if (/^data:image\//i.test(value)) {
+      return { order: index + 1, kind: 'data_url', content_hash: sha256(value) };
+    }
+    if (/^https?:\/\//i.test(value)) {
+      return { order: index + 1, kind: 'remote_url', url: value, locator_hash: sha256(value) };
+    }
+    try {
+      const absolute = safeStorageFile(cfg, value);
+      return {
+        order: index + 1,
+        kind: 'local_file',
+        local_path: value,
+        content_hash: fs.existsSync(absolute) ? hashFile(absolute) : null,
+      };
+    } catch (_) {
+      return { order: index + 1, kind: 'unresolved', reference: value, locator_hash: sha256(value) };
+    }
+  });
 }
 
 async function importSource(db, cfg, shot, slot, source) {
@@ -343,19 +494,47 @@ function promptForSlot(db, shot, slot) {
   const primarySubject = constrainedSubject || (semantic.subjects || []).find((subject) => subject.key === 'primary_subject') || (semantic.subjects || [])[0] || {};
   if (slot.asset_type === 'environment') {
     const styleLock = styleLockForSlot(drama, 'scene');
+    const environmentOnly = Boolean(summary.environment_only || storyboard?.environment_only);
+    const mapBase = Boolean(summary.map_route || /map-route-reveal/.test(String(summary.catalog_key || '')));
+    const selectedReference = sourceService.isPaperShot(shot) ? sourceService.referenceMedia(db, shot) : null;
+    const sceneDescription = String(slot.constraints_json?.environment_description || semantic.environment?.description || '').trim();
+    const compositionReference = slot.constraints_json?.use_storyboard_composition_reference !== false;
     const fixedSceneContext = [scene?.location, scene?.time].filter(Boolean);
     const place = (fixedSceneContext.length ? fixedSceneContext : [storyboard?.location, storyboard?.time].filter(Boolean))
       .join('，') || 'the fixed storyboard location and time';
-    const cleanDescription = summary.catalog_key === 'map-route-reveal-v1'
-      ? `Create an unannotated old-silk geographic base map for ${place}. Keep only fixed physical geography: rivers, plains, hills, ancient roads and small city silhouettes. The base map must contain no routes, arrows, dots, encirclement rings, army symbols, colored strategy lines, labels or readable writing; all strategic information will be added later as independent procedural layers.`
-      : `Create an empty clean environment at ${place}. Keep only continuous fixed terrain, shoreline, water, sky, distant permanent architecture, vegetation, atmospheric depth, lighting and perspective. Foreground and midground staging areas must be clear continuous terrain with no discrete narrative entity, movable item, clustered debris or subject shadow; all narrative content will be added later as independent transparent layers.`;
+    const cleanDescription = mapBase
+      ? `Create the clean unannotated strategic-map base shown by the selected storyboard reference. Preserve its exact top-down geography, river course, bridges, mountains, plains, city positions, paper boundary, tabletop framing, palette and camera composition. Remove every route arrow, dot, encirclement ring, army symbol, commander silhouette, title card, label and readable character; all strategic information and people will be added later as independent layers.`
+      : environmentOnly
+        ? `Create the full environmental base frame at ${place}. Preserve the selected storyboard reference's visible environment storytelling, including its terrain, river or shoreline, fortifications, ruins, damaged structures, camps, fire and smoke, banners, vessels, distant silhouettes, debris, weather and atmospheric depth. These are part of this environment-only shot and must not be replaced by a generic empty landscape.`
+        : `Create a clean environment plate for this exact visual scene: ${sceneDescription || place}. Preserve fixed terrain, shoreline, water, sky, permanent architecture, vegetation, damage to the location, weather, atmospheric depth, lighting and perspective. Remove only the characters or movable hero props that are explicitly planned as separate animation layers, then reconstruct the areas hidden behind them. Do not erase fixed story-world evidence such as ruined architecture or environmental damage.`;
+    const storyContext = uniqueTextBlocks(environmentOnly || mapBase
+      ? [storyboard?.description, storyboard?.action, storyboard?.atmosphere, storyboard?.visual_prompt, storyboard?.prompt]
+      : [storyboard?.atmosphere, storyboard?.visual_prompt, storyboard?.prompt]).join('\n');
     return [
-      'Create a production clean plate for layered paper animation, not a finished storyboard frame.',
+      mapBase
+        ? 'Create the production clean strategic-map plate for layered paper animation, not a finished annotated map.'
+        : environmentOnly
+        ? 'Create the production environment plate for this paper-animation shot.'
+        : 'Create a production clean plate for layered paper animation, not a finished storyboard frame.',
       cleanDescription,
-      'Keep the reference composition, camera angle, lighting, perspective and visual style, but reconstruct every area hidden by foreground subjects.',
-      'Do not visualize anything from the storyboard action, result, atmosphere or description. The final image contains only the fixed environment, with no text, logo, unexplained holes or subject-shaped shadows.',
+      selectedReference && compositionReference
+        ? 'SELECTED STORYBOARD REFERENCE — highest priority composition and style authority: Match its composition, camera angle, era, location, geography, weather, damage state, lighting, color palette, paper texture and rendering medium. If any project-wide style text conflicts with the selected reference, the selected reference overrides that conflict.'
+        : selectedReference
+        ? `SELECTED STORYBOARD REFERENCE — STYLE ONLY: preserve its era, weather family, lighting direction, color palette, paper texture and rendering medium, but do not copy its location or composition. The required location and composition are: ${sceneDescription || place}.`
+        : 'Keep the supplied reference composition, camera angle, lighting, perspective and visual style.',
+      mapBase
+        ? 'Keep the full map canvas and all fixed geographic features, but reconstruct clean paper and terrain underneath every removed arrow, person, title card and label. No blank cutout holes or erased smudges may remain.'
+        : environmentOnly
+        ? 'Do not simplify, beautify, modernize, relight or relocate the scene. Do not turn a cold, damaged, smoky or war-torn environment into a sunny, clean or peaceful generic landscape.'
+        : 'Reconstruct every area hidden by the removed animation subjects. Keep the storyboard atmosphere and environmental description; the final image must have no text, logo, unexplained holes or subject-shaped shadows.',
+      storyContext ? `STORYBOARD ENVIRONMENT CONTEXT — preserve unless it conflicts with the selected reference:\n${storyContext}` : '',
       'Single continuous 16:9 background, full canvas, opaque output, no collage and no split panel.',
       styleLock,
+      selectedReference && compositionReference
+        ? 'FINAL PRIORITY RULE: the selected storyboard reference controls composition, era, place, weather, damage, palette and medium; project defaults may refine details but may not replace those facts.'
+        : selectedReference
+        ? 'FINAL PRIORITY RULE: the scene-specific description controls place, camera and composition; references control only shared visual identity, era, weather family, palette and paper medium.'
+        : '',
     ].filter(Boolean).join('\n\n');
   }
   const state = slot.constraints_json?.state || slot.generation_purpose.replace(/^.*state_/, '') || 'action';
@@ -374,6 +553,7 @@ function promptForSlot(db, shot, slot) {
     broken: 'a fully broken settled state with separated readable fragments',
     raised: 'a raised preparation state before contact',
     released: 'a released state after contact',
+    map_marker: 'one iconic full-body ink silhouette designed to appear as a commander marker on a strategic map, matching the selected storyboard reference',
   };
   const propSubject = primarySubject.kind === 'prop' || slot.asset_type.includes('prop');
   const styleScope = propSubject
@@ -449,6 +629,64 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
   const provider = selectedProvider(db, run);
   const prompt = promptForSlot(db, shot, slot);
   const referenceImages = referenceImagesForSlot(db, shot, slot, provider);
+  const sourceStoryboard = sourceService.storyboard(db, shot);
+  const environmentOnly = Boolean(shot.plan_summary_json?.environment_only || sourceStoryboard?.environment_only);
+  const mapBase = Boolean(shot.plan_summary_json?.map_route || /map-route-reveal/.test(String(shot.plan_summary_json?.catalog_key || '')));
+  const selectedStoryboardReference = sourceService.isPaperShot(shot)
+    ? sourceService.referenceMedia(db, shot)
+    : null;
+  const compositionReferenceRequired = slot.constraints_json?.use_storyboard_composition_reference !== false;
+  const styleReferenceRequired = slot.asset_type === 'environment'
+    && slot.constraints_json?.reference_role === 'style_only'
+    && Boolean(selectedStoryboardReference);
+  if (slot.asset_type === 'environment' && selectedStoryboardReference && compositionReferenceRequired && !provider.capabilities?.reference_images) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_COMPOSITION_REFERENCE_UNSUPPORTED',
+      '当前图片模型不支持构图参考，已阻止生成不一致的正式环境素材；请改用支持参考图的图片模型',
+      {
+        shot_id: Number(shot.id),
+        slot_id: Number(slot.id),
+        provider: provider.provider,
+        model: provider.model,
+      },
+      409,
+    );
+  }
+  if (styleReferenceRequired && !provider.capabilities?.reference_images) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_STYLE_REFERENCE_UNSUPPORTED',
+      '当前图片模型不支持参考图，无法保证第二场景与第一场景的时代、色调和纸片媒介一致；已在调用图片 API 前阻止生成',
+      { shot_id: Number(shot.id), slot_id: Number(slot.id), scene_key: slot.constraints_json?.scene_key || null, provider: provider.provider, model: provider.model },
+      409,
+    );
+  }
+  const selectedReferenceRequired = Boolean(
+    slot.asset_type === 'environment'
+    && selectedStoryboardReference
+    && compositionReferenceRequired
+  );
+  if (selectedReferenceRequired && referenceImages[0] !== selectedStoryboardReference) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_COMPOSITION_REFERENCE_NOT_ATTACHED',
+      '正式环境素材未携带已选构图参考，已阻止生成；请重试当前素材，不会进入错误审核流程',
+      {
+        shot_id: Number(shot.id),
+        slot_id: Number(slot.id),
+        selected_reference: selectedStoryboardReference,
+        reference_images: referenceImages,
+      },
+      409,
+    );
+  }
+  if (styleReferenceRequired && referenceImages.length < 1) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_STYLE_REFERENCE_NOT_ATTACHED',
+      '第二场景环境素材未携带风格连续性参考，已在调用图片 API 前阻止生成',
+      { shot_id: Number(shot.id), slot_id: Number(slot.id), scene_key: slot.constraints_json?.scene_key || null },
+      409,
+    );
+  }
+  const referencesProvenance = referenceEvidence(cfg, referenceImages);
   const requireAlpha = slot.asset_type !== 'environment';
   const capabilityKey = providerCapabilityKey(provider);
   const canRequestTransparent = requireAlpha
@@ -477,10 +715,22 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
       storage_local_path: storageRoot(cfg),
       reference_image_urls: referenceImages,
       system_prompt: referenceImages.map((_, index) => slot.asset_type === 'environment'
-        ? `Image ${index + 1}: geography, perspective, lighting and style reference only. Remove every person, vehicle, movable prop, route, label and narrative subject.`
+        ? (mapBase
+          ? `Image ${index + 1}${index === 0 ? ' is the selected strategic-map composition and the primary visual authority' : ''}: preserve its complete map geometry, river, bridge, mountains, cities, paper boundary, tabletop framing, palette and camera. Remove all arrows, encirclement marks, people, title cards and readable text so they can be animated independently.`
+          : slot.constraints_json?.reference_role === 'style_only'
+          ? `Image ${index + 1}: STYLE CONTINUITY reference only. Preserve era, weather family, lighting direction, palette, paper texture and rendering medium. Do not copy its place, architecture, subject layout, camera composition or perspective; build the different scene required by environment_description.`
+          : environmentOnly
+          ? `Image ${index + 1}${index === 0 ? ' is the selected storyboard reference and the primary visual authority' : ''}: preserve its composition, era, location, weather, damage, palette, paper medium and visible environmental storytelling. Do not replace it with a generic landscape.`
+          : `Image ${index + 1}${index === 0 ? ' is the selected storyboard reference and the primary visual authority' : ''}: preserve geography, perspective, era, weather, environmental damage, lighting and style. Remove only characters or hero props explicitly separated into independent animation layers.`)
         : `Image ${index + 1}: identity, historical form, silhouette or same-family pose reference only. Treat its background, lighting and rendering medium as obsolete. Do not copy photography, photorealistic surface rendering or CGI from the reference; redraw the subject from scratch in the mandatory PROJECT VISUAL STYLE and PAPER-ANIMATION MEDIUM.`).join('\n'),
       user_negative_prompt: slot.asset_type === 'environment'
-        ? 'people, person, character, animal, vehicle, movable prop, weapon, tool, container, supplies, banner, route arrow, strategy line, map label, key prop, subject-shaped hole, text, logo, split panel, collage'
+        ? (mapBase
+          ? 'route arrow, arrowhead, route line, encirclement ring, strategy dot, army marker, commander, person, silhouette, title card, label, readable text, Chinese character, changed geography, changed river, changed city position, changed composition, photorealism, smooth CGI, split panel, collage'
+          : slot.constraints_json?.reference_role === 'style_only'
+          ? 'copied reference location, copied reference composition, wrong scene, hybrid indoor-outdoor location, independent foreground character, independent hero prop, subject-shaped hole, changed era, changed weather family, text, logo, split panel, collage'
+          : environmentOnly
+          ? 'reference drift, changed composition, changed era, changed location, changed weather, changed damage state, sunny generic landscape, clean peaceful beach, modern scenery, cheerful palette, photorealism, smooth CGI, text, logo, split panel, collage'
+          : 'independent foreground character, independent hero prop, subject-shaped hole, changed composition, changed era, changed weather, text, logo, split panel, collage')
         : 'background, scenery, floor, cast shadow, text, logo, split panel, collage, duplicate limbs, cropped body',
     };
     let requestedBackground = canRequestTransparent ? 'transparent' : 'opaque';
@@ -540,10 +790,18 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
         prompt,
         request_fingerprint: fingerprint,
         reference_images: referenceImages,
+        reference_evidence: referencesProvenance,
+        selected_storyboard_reference: selectedStoryboardReference,
         background_strategy: backgroundStrategy,
         requested_background: requestedBackground,
       }),
-      JSON.stringify({ ...report, reference_count: referenceImages.length }),
+      JSON.stringify({
+        ...report,
+        reference_count: referenceImages.length,
+        reference_required: selectedReferenceRequired,
+        reference_gate_passed: !selectedReferenceRequired || referenceImages.length > 0,
+        reference_hashes: referencesProvenance.map((item) => item.content_hash || item.locator_hash).filter(Boolean),
+      }),
       nowIso(),
       versionId,
     );
@@ -601,10 +859,14 @@ async function produceSlot(db, cfg, log, run, shot, slot, force, authorizationId
     if (accepted) return { slot_id: Number(slot.id), version_id: Number(accepted.id), reused: true };
   }
   let versionId;
-  const source = sourceForSlot(db, shot, slot);
+  // An explicit slot regeneration is the opt-in path for creating a new clean
+  // plate from the frozen reference. Normal production reuses the approved
+  // source verbatim and therefore makes no image API call.
+  const source = force ? null : sourceForSlot(db, shot, slot);
   if (slot.asset_type === 'occlusion-mask') versionId = await deriveMask(db, cfg, shot, slot);
   else if (slot.constraints_json?.derivation === 'registered_alpha_band') versionId = await deriveOccluder(db, cfg, shot, slot);
   else if (source) versionId = await importSource(db, cfg, shot, slot, source);
+  else if (isProceduralStateFallback(slot)) versionId = deriveProceduralStateFallback(db, slot).versionId;
   else if (slot.required_for_gate || slot.constraints_json?.fallback !== 'procedural') versionId = await generateViaApi(db, cfg, log, run, shot, slot, authorizationId);
   else return { slot_id: Number(slot.id), version_id: null, skipped_optional: true };
   return { slot_id: Number(slot.id), version_id: Number(versionId), reused: false };
@@ -615,6 +877,18 @@ async function generateAssets(db, cfg, log, shotId, body = {}) {
   schemaService.assertValid('apiShotAction', body, '生成纸片素材的参数无效');
   const shot = shotService.get(db, shotId);
   assertExpectedVersion(shot.version, body.expected_version, '纸片动画镜头');
+  if (!isCurrentPlannerVersion(shot.plan_summary_json)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_PLAN_VERSION_STALE',
+      '生产计划版本已经更新，已阻止旧计划继续生成素材',
+      {
+        shot_id: Number(shot.id),
+        expected_planner_version: CURRENT_PLANNER_VERSION,
+        actual_planner_version: Number(shot.plan_summary_json?.planner_version || 0),
+      },
+      409,
+    );
+  }
   if (!['plan_confirmed', 'asset_failed', 'asset_review'].includes(shot.status)) {
     throw new PaperStudioError('PAPER_STUDIO_SHOT_STATE_CONFLICT', '当前镜头状态不允许生成素材', { shot_id: shot.id, status: shot.status }, 409);
   }
@@ -667,6 +941,7 @@ async function generateAssets(db, cfg, log, shotId, body = {}) {
       const authorized = authorizedSlots.get(Number(slot.id));
       const localOnly = slot.asset_type === 'occlusion-mask'
         || slot.constraints_json?.derivation === 'registered_alpha_band'
+        || isProceduralStateFallback(slot)
         || Boolean(sourceForSlot(db, shot, slot));
       if (!localOnly && !authorized) {
         const currentAccepted = slot.current_version_id == null ? null : db.prepare(
@@ -922,6 +1197,8 @@ module.exports = {
   propStateInstruction,
   isTransparentBackgroundUnsupported,
   promptForSlot,
+  isProceduralStateFallback,
+  ensureProceduralStateFallbacks,
   deriveOccluder,
   generateAssets,
   rematteAssets,

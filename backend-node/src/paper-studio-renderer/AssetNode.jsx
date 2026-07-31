@@ -45,7 +45,10 @@ export const AssetNode = ({ node, motion, assetMap, style, debug, quality = null
   const shadowEnabled = Boolean(quality?.contact_shadow?.enabled) && isCutout && !held && current.src;
   // 起伏抬升时阴影缩小变浅（脚离地暗示）
   const lift = Math.max(0, -Number(secondary?.y || 0));
-  const anchorY = Number(node.transform?.anchor_y == null ? 0.88 : node.transform.anchor_y);
+  const contactAnchor = node.relation?.state_contact_anchors?.[motion.state]
+    || node.relation?.contact_anchor
+    || null;
+  const anchorY = Number(contactAnchor?.y == null ? (node.transform?.anchor_y == null ? 0.88 : node.transform.anchor_y) : contactAnchor.y);
 
   return (
     <div data-paper-node={node.key} data-paper-kind="asset" data-paper-version={current.versionId || ''} data-paper-state={motion.state || ''} style={{ ...style, outline: debug ? '2px solid rgba(238,184,83,.5)' : 'none' }}>
@@ -81,6 +84,13 @@ export const AssetNode = ({ node, motion, assetMap, style, debug, quality = null
           {debug ? `${node.key}: missing asset` : null}
         </div>
       )}
+      {debug && contactAnchor ? (
+        <span style={{
+          position: 'absolute', left: `${Number(contactAnchor.x) * 100}%`, top: `${Number(contactAnchor.y) * 100}%`,
+          width: 10, height: 10, marginLeft: -5, marginTop: -5, borderRadius: '50%',
+          background: '#45e07b', border: '2px solid #102a18', boxSizing: 'border-box', zIndex: 99,
+        }} />
+      ) : null}
     </div>
   );
 };

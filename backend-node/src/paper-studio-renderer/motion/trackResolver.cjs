@@ -4,6 +4,7 @@ const DEFAULT_MOTION = Object.freeze({
   rotation: 0,
   scale: 1,
   opacity: 1,
+  blur: 0,
   state: null,
   clip_progress: 0,
   procedural_amount: 0,
@@ -78,6 +79,8 @@ function allTracks(motionPlan) {
   return [
     ...(motionPlan?.subject_tracks || []),
     ...(motionPlan?.camera_tracks || []),
+    ...(motionPlan?.scene_tracks || []),
+    ...(motionPlan?.transition_tracks || []),
   ];
 }
 

@@ -7,7 +7,8 @@ const relationPrimitiveService = require('./paperRelationPrimitiveService');
 const continuityService = require('./paperContinuityService');
 const sourceService = require('./paperStudioSourceService');
 const eventService = require('./paperStudioEventService');
-const { CURRENT_PLANNER_VERSION } = require('./paperStudioPlannerVersion');
+const storyboardAudioService = require('./paperStoryboardAudioService');
+const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStudioPlannerVersion');
 const {
   PaperStudioError,
   assertExpectedVersion,
@@ -22,8 +23,10 @@ function frameAt(durationFrames, ratio) {
   return Math.max(0, Math.min(durationFrames - 1, Math.round((durationFrames - 1) * ratio)));
 }
 
-function storyboardContext(db, shot) {
-  return sourceService.context(db, shot);
+function storyboardContext(db, shot, config = {}) {
+  const context = sourceService.context(db, shot);
+  if (context.source_kind !== 'paper') return context;
+  return storyboardAudioService.applyTimingToContext(db, context, Number(config.fps || 30));
 }
 
 function inferredActorIdentity(context) {
@@ -290,6 +293,19 @@ function finalizePlan(plan) {
     planner_version: CURRENT_PLANNER_VERSION,
     semantic_primitives: relationPrimitiveService.derive(plan),
   };
+  if (plan.motionPlan?.primary_action === 'environmental_depth_motion') {
+    const generatedEffectSlots = plan.families
+      .flatMap((family) => family.slots || [])
+      .filter((slot) => slot.asset_type === 'effect-cutout');
+    if (generatedEffectSlots.length) {
+      throw new PaperStudioError(
+        'PAPER_STUDIO_ENVIRONMENT_EFFECT_ASSET_FORBIDDEN',
+        '纯环境镜头只能使用环境底图和程序化氛围，不能生成独立效果贴图',
+        { slot_keys: generatedEffectSlots.map((slot) => slot.slot_key) },
+        422,
+      );
+    }
+  }
   schemaService.assertValid('semanticContract', plan.semanticContract, '镜头语义合同不符合 Schema');
   plan.families.forEach((family) => schemaService.assertValid('sourceFamily', family, `素材族 ${family.family_key} 不符合 Schema`));
   schemaService.assertValid('compositionNode', plan.root, '镜头组合树不符合 Schema');
@@ -304,6 +320,15 @@ function buildPlan(context, config) {
   if (normalizedContext.source_kind === 'paper') {
     const inferredBlueprint = blueprintCompiler.infer(normalizedContext);
     const plan = finalizePlan(blueprintCompiler.compile(inferredBlueprint, normalizedContext, config));
+    if (normalizedContext.audio_timing) {
+      plan.summary = {
+        ...plan.summary,
+        authored_duration_seconds: normalizedContext.audio_timing.authored_duration_seconds,
+        effective_duration_seconds: normalizedContext.audio_timing.effective_duration_seconds,
+        speech_end_seconds: normalizedContext.audio_timing.speech_end_seconds,
+        audio_driven_duration: Boolean(normalizedContext.audio_timing.duration_extended),
+      };
+    }
     plan.blueprint = blueprintCompiler.withGenerationSlots(inferredBlueprint, plan);
     schemaService.assertValid('paperBlueprint', plan.blueprint, '镜头生产蓝图不符合 Schema');
     return plan;
@@ -367,8 +392,8 @@ function persistPlan(db, run, shot, plan) {
     `INSERT INTO paper_motion_plans
       (shot_id, schema_version, semantic_contract_hash, timing_hash, plan_json,
        compiled_tracks_json, status, version, created_at, updated_at)
-     VALUES (?, 1, ?, ?, ?, ?, 'draft', 1, ?, ?)`,
-  ).run(Number(shot.id), sha256(canonicalJson(plan.semanticContract)), sha256(canonicalJson({ fps: plan.motionPlan.fps, duration_frames: plan.motionPlan.duration_frames, cues: plan.motionPlan.cues })), JSON.stringify(plan.motionPlan), JSON.stringify({ subject_tracks: plan.motionPlan.subject_tracks, camera_tracks: plan.motionPlan.camera_tracks }), now, now);
+     VALUES (?, ?, ?, ?, ?, ?, 'draft', 1, ?, ?)`,
+  ).run(Number(shot.id), Number(plan.motionPlan.schema_version || 1), sha256(canonicalJson(plan.semanticContract)), sha256(canonicalJson({ fps: plan.motionPlan.fps, duration_frames: plan.motionPlan.duration_frames, cues: plan.motionPlan.cues })), JSON.stringify(plan.motionPlan), JSON.stringify({ subject_tracks: plan.motionPlan.subject_tracks, camera_tracks: plan.motionPlan.camera_tracks, scene_tracks: plan.motionPlan.scene_tracks || [], transition_tracks: plan.motionPlan.transition_tracks || [] }), now, now);
 
   const steps = [
     ['analyze_shot', [], 'completed'],
@@ -430,7 +455,7 @@ function analyzeRun(db, log, runId, body = {}, config = {}) {
     throw new PaperStudioError('PAPER_STUDIO_RUN_STATE_CONFLICT', '当前状态不允许重新分析', { run_id: run.id, status: run.status }, 409);
   }
   const shots = selectedShots(run, body);
-  const contexts = shots.map((shot) => ({ shot, context: storyboardContext(db, shot) }));
+  const contexts = shots.map((shot) => ({ shot, context: storyboardContext(db, shot, config) }));
   const incomplete = contexts.map(({ shot, context }) => {
     const storyboard = context.storyboard || {};
     const missing = [];
@@ -472,6 +497,21 @@ function confirmPlan(db, log, runId, body = {}) {
   const invalid = shots.filter((shot) => shot.status !== 'analyzed');
   if (invalid.length) {
     throw new PaperStudioError('PAPER_STUDIO_PLAN_NOT_READY', '部分镜头尚未完成分析', { shot_ids: invalid.map((shot) => shot.id) }, 409);
+  }
+  const stale = shots.filter((shot) => !isCurrentPlannerVersion(shot.plan_summary_json));
+  if (stale.length) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_PLAN_VERSION_STALE',
+      '生产计划版本已经更新，请重新分析后再确认',
+      {
+        expected_planner_version: CURRENT_PLANNER_VERSION,
+        shots: stale.map((shot) => ({
+          shot_id: Number(shot.id),
+          actual_planner_version: Number(shot.plan_summary_json?.planner_version || 0),
+        })),
+      },
+      409,
+    );
   }
   const confirm = db.transaction(() => {
     const now = nowIso();

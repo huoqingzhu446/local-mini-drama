@@ -18,6 +18,34 @@ function ffprobeDurationSec(filePath) {
   return Number.isFinite(d) && d > 0 ? d : null;
 }
 
+function ffprobeMediaInfo(filePath) {
+  const probe = getFfprobePath();
+  const r = spawnSync(
+    probe,
+    ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,duration', '-of', 'json', filePath],
+    { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 },
+  );
+  if (r.status !== 0) return null;
+  try {
+    const data = JSON.parse(String(r.stdout || '{}'));
+    const streams = Array.isArray(data.streams) ? data.streams : [];
+    const durationFor = (kind) => {
+      const value = Number(streams.find((stream) => stream.codec_type === kind)?.duration || 0);
+      return Number.isFinite(value) && value > 0 ? value : null;
+    };
+    const formatDuration = Number(data.format?.duration || 0);
+    return {
+      format_duration_seconds: Number.isFinite(formatDuration) && formatDuration > 0 ? formatDuration : null,
+      video_duration_seconds: durationFor('video'),
+      audio_duration_seconds: durationFor('audio'),
+      has_video: streams.some((stream) => stream.codec_type === 'video'),
+      has_audio: streams.some((stream) => stream.codec_type === 'audio'),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function formatSrtTimestamp(ms) {
   if (!Number.isFinite(ms) || ms < 0) ms = 0;
   const h = Math.floor(ms / 3600000);
@@ -482,4 +510,5 @@ function ffprobeHasAudio(filePath) {
 module.exports = {
   runMergedEpisodePostProcess,
   ffprobeDurationSec,
+  ffprobeMediaInfo,
 };

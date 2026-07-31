@@ -38,11 +38,17 @@
       </ul>
     </section>
 
+    <div v-if="selectedTransitionKey" class="transition-focus">
+      <span>当前只显示 {{ selectedTransitionKey }} 的五阶段证据</span>
+      <button type="button" @click="clearTransitionFocus">查看全部证据</button>
+    </div>
+
     <div v-if="evidence.length" class="evidence-workspace">
       <nav aria-label="动作证据帧">
         <button
-          v-for="item in evidence"
+          v-for="item in visibleEvidence"
           :key="item.id || item.target_key"
+          :id="transitionAnchorId(item)"
           type="button"
           :class="{ active: item === selectedEvidence, failed: item.status !== 'passed' }"
           @click="selectedEvidenceKey = item.id || item.target_key"
@@ -66,6 +72,9 @@
         <dl>
           <div><dt>画面变化</dt><dd>{{ percent(selectedEvidence?.metrics_json?.changed_pixel_ratio) }}</dd></div>
           <div><dt>平均差异</dt><dd>{{ decimal(selectedEvidence?.metrics_json?.mean_absolute_difference) }}</dd></div>
+          <div v-if="selectedEvidence?.metrics_json?.transition_phase"><dt>转场阶段</dt><dd>{{ transitionPhaseLabel(selectedEvidence.metrics_json.transition_phase) }}</dd></div>
+          <div v-if="selectedEvidence?.metrics_json?.mean_luminance != null"><dt>画面亮度</dt><dd>{{ decimal(selectedEvidence.metrics_json.mean_luminance) }}</dd></div>
+          <div v-if="selectedEvidence?.metrics_json?.luminance_delta_ratio != null"><dt>亮度跳变</dt><dd>{{ percent(selectedEvidence.metrics_json.luminance_delta_ratio) }}</dd></div>
         </dl>
         <ul>
           <li v-for="(item, index) in selectedEvidence?.assertion_json || []" :key="`${item.type}-${index}`" :class="item.pass ? 'passed' : 'failed'">
@@ -88,7 +97,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   shot: { type: Object, default: null },
@@ -97,30 +106,90 @@ const props = defineProps({
 defineEmits(['revise'])
 
 const selectedEvidenceKey = ref(null)
+const selectedTransitionKey = ref(null)
 const proof = computed(() => (props.shot?.proof_runs || []).find((item) => item.run_kind === 'motion_proof' && item.report_json?.motion_gate)
   || (props.shot?.proof_runs || []).find((item) => item.report_json?.motion_gate)
   || null)
 const report = computed(() => proof.value?.report_json?.motion_gate || null)
 const evidence = computed(() => props.shot?.evidence || [])
-const selectedEvidence = computed(() => evidence.value.find((item) => String(item.id || item.target_key) === String(selectedEvidenceKey.value))
-  || evidence.value[0]
+const visibleEvidence = computed(() => {
+  if (!selectedTransitionKey.value) return evidence.value
+  const focused = evidence.value.filter((item) => String(item.target_key || '').startsWith(`${selectedTransitionKey.value}_`))
+  return focused.length ? focused : evidence.value
+})
+const selectedEvidence = computed(() => visibleEvidence.value.find((item) => String(item.id || item.target_key) === String(selectedEvidenceKey.value))
+  || visibleEvidence.value[0]
   || null)
 const businessAssertions = computed(() => (report.value?.assertions || []).filter((item) => (
-  item.metric || ['camera_only_false', 'visible_subject_tracks', 'primary_action_catalogued'].includes(item.key)
+  item.metric
+  || ['camera_only_false', 'visible_subject_tracks', 'primary_action_catalogued', 'event_density'].includes(item.key)
+  || /^(?:transition:|scene:)/.test(item.key)
+  || item.key.includes(':opacity_duration:')
+  || item.key.includes(':movement_duration:')
+  || item.key.includes(':vehicle_entry_duration:')
+  || item.key.endsWith(':vehicle_speed')
+  || item.key.endsWith(':rotation_slope')
+  || item.key.endsWith(':scale_slope')
 )))
 const technicalAssertions = computed(() => (report.value?.assertions || []).filter((item) => !businessAssertions.value.includes(item)))
 const passedCount = computed(() => businessAssertions.value.filter((item) => item.pass).length)
 const latestRevision = computed(() => props.shot?.motion_revisions?.[0] || null)
 const revisionChanges = computed(() => latestRevision.value?.patch_json?.changes || [])
 
-watch(() => props.shot?.id, () => { selectedEvidenceKey.value = evidence.value[0]?.id || evidence.value[0]?.target_key || null }, { immediate: true })
+watch(() => props.shot?.id, () => {
+  selectedTransitionKey.value = null
+  selectedEvidenceKey.value = evidence.value[0]?.id || evidence.value[0]?.target_key || null
+}, { immediate: true })
 watch(evidence, () => {
   if (!evidence.value.some((item) => String(item.id || item.target_key) === String(selectedEvidenceKey.value))) {
     selectedEvidenceKey.value = evidence.value[0]?.id || evidence.value[0]?.target_key || null
   }
+  if (typeof window !== 'undefined') selectTransitionFromHash()
 }, { deep: true })
 
+onMounted(() => {
+  selectTransitionFromHash()
+  window.addEventListener('hashchange', selectTransitionFromHash)
+})
+onBeforeUnmount(() => window.removeEventListener('hashchange', selectTransitionFromHash))
+
+function transitionAnchorId(item) {
+  const targetKey = String(item?.target_key || '')
+  return targetKey.endsWith('_pre') ? `transition-evidence-${targetKey.slice(0, -4)}` : null
+}
+function selectTransitionFromHash() {
+  const prefix = '#transition-evidence-'
+  if (!window.location.hash.startsWith(prefix)) return
+  const transitionKey = decodeURIComponent(window.location.hash.slice(prefix.length))
+  const first = evidence.value.find((item) => String(item.target_key || '').startsWith(`${transitionKey}_`))
+  if (!first) return
+  selectedTransitionKey.value = transitionKey
+  selectedEvidenceKey.value = first.id || first.target_key
+}
+function clearTransitionFocus() {
+  selectedTransitionKey.value = null
+  selectedEvidenceKey.value = evidence.value[0]?.id || evidence.value[0]?.target_key || null
+  if (window.location.hash.startsWith('#transition-evidence-')) {
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+  }
+}
+
 function assertionLabel(key) {
+  if (key.startsWith('transition:') && key.endsWith(':duration')) return '转场时长'
+  if (key.startsWith('transition:') && key.endsWith(':references')) return '场景引用'
+  if (key.startsWith('transition:') && key.endsWith(':new_plate')) return '独立场景背景'
+  if (key.startsWith('transition:') && key.endsWith(':crossfade_coverage')) return '转场连续覆盖'
+  if (key.startsWith('transition:') && key.endsWith(':matched_velocity')) return '出入场速度衔接'
+  if (key.startsWith('transition:') && key.endsWith(':incoming_initially_hidden')) return '新场景入场前隐藏'
+  if (key.startsWith('transition:') && key.endsWith(':audio_continuity')) return '声音连续'
+  if (key.startsWith('transition:') && key.endsWith(':caption_continuity')) return '字幕全局稳定'
+  if (key.startsWith('scene:') && key.endsWith(':environment')) return '场景环境素材'
+  if (key.includes(':opacity_duration:')) return '显隐持续时间'
+  if (key.includes(':movement_duration:')) return '主体移动时长'
+  if (key.includes(':vehicle_entry_duration:')) return '车辆驶入时长'
+  if (key.endsWith(':vehicle_speed')) return '车辆运动速度'
+  if (key.endsWith(':rotation_slope')) return '旋转速度'
+  if (key.endsWith(':scale_slope')) return '缩放速度'
   return {
     camera_only_false: '主体动作不是运镜替代',
     visible_subject_tracks: '可见主体轨道',
@@ -137,6 +206,9 @@ function assertionLabel(key) {
     prop_follows_actor: '道具跟随人物',
     prop_releases: '道具释放状态',
     support_occlusion_final: '前景遮挡关系',
+    event_density: '主要事件错峰',
+    transition_structure_scene_groups: '完整场景组',
+    transition_structure_boundaries: '转场边界合同',
   }[key] || key
 }
 function formatActual(item) {
@@ -148,11 +220,15 @@ function formatActual(item) {
   return item.pass ? '已通过' : '未通过'
 }
 function assertionExplanation(item) {
+  if (item.message) return item.message
   if (item.min != null) return `实测 ${formatActual(item)}，合同要求至少 ${decimal(item.min)}`
   if (item.expected != null && !Array.isArray(item.expected)) return `实测 ${formatActual(item)}，合同期望 ${String(item.expected)}`
   return item.pass ? '符合当前动作合同' : '与当前动作合同不一致'
 }
 function repairInstruction(key) {
+  if (key.startsWith('transition:') || key.startsWith('scene:')) return `只修正${assertionLabel(key)}：保持声音、字幕和已通过主体动作不变，重新分配完整场景组与转场时间。`
+  if (key.includes('opacity_duration')) return '只修正显隐速度：把主体或场景的淡入淡出延长到至少 0.30 秒。'
+  if (key.includes('movement_duration') || key.includes('vehicle_entry_duration') || key.endsWith('vehicle_speed')) return '只修正入场运动：延长位移时间并保持接地，不改变素材身份和画面终点。'
   return {
     subject_translation: '只修正人物位移：让人物清楚地从起点移动到目标位置，不改变其他素材和动作时刻。',
     actor_reaches_destination: '只修正人物终点：让人物到达动作合同中的目标关键点。',
@@ -178,7 +254,12 @@ function changeValue(value) {
   if (value.range != null) return `${decimal(value.range)}（${decimal(value.initial)} / ${decimal(value.final)}）`
   return '已变化'
 }
-function targetLabel(key) { return { subject_start: '起始状态', subject_action: '动作过程', subject_final: '结束状态', carry_start: '持物起点', carry_arrive: '到达目标', carry_final: '坐下与放置' }[key] || key || '证据帧' }
+function targetLabel(key) {
+  const value = String(key || '')
+  const phase = ['pre', 'start', 'mid', 'end', 'post'].find((item) => value.endsWith(`_${item}`))
+  if (phase) return `转场${transitionPhaseLabel(phase)}`
+  return { subject_start: '起始状态', subject_action: '动作过程', subject_final: '结束状态', carry_start: '持物起点', carry_arrive: '到达目标', carry_final: '坐下与放置' }[key] || key || '证据帧'
+}
 function frameTime(frame) { return `${(Number(frame || 0) / Number(props.shot?.motion_plan?.plan_json?.fps || 30)).toFixed(1)}s` }
 function evidenceAssertionLabel(item) {
   if (item.type === 'state_equals') return `${item.target} 状态`
@@ -186,6 +267,13 @@ function evidenceAssertionLabel(item) {
   if (item.type === 'relation_exists') return `${item.node} 关系`
   if (item.type === 'subject_pixel_change') return '主体像素变化'
   if (item.type === 'camera_only') return '是否仅运镜'
+  if (item.type === 'transition_visual_change') return '转场画面变化'
+  if (item.type === 'transition_luminance_continuity') return '亮度连续性'
+  if (item.type === 'transition_plan_gate') return '计划级转场门禁'
+  if (item.type === 'transition_endpoint_stability') return '转场端点稳定'
+  if (item.type === 'transition_spatial_gate') return '转场后接地'
+  if (item.type === 'transition_caption_continuity') return '字幕保持全局稳定'
+  if (item.type === 'transition_audio_continuity') return '声音保持连续'
   return item.type
 }
 function evidenceActual(item) {
@@ -196,6 +284,7 @@ function evidenceActual(item) {
 }
 function percent(value) { return `${(Number(value || 0) * 100).toFixed(1)}%` }
 function decimal(value) { return Number.isFinite(Number(value)) ? Number(value).toFixed(2).replace(/\.00$/, '') : '—' }
+function transitionPhaseLabel(phase) { return { pre: '前', start: '开始', mid: '中点', end: '结束', post: '后' }[phase] || phase }
 </script>
 
 <style scoped>
@@ -225,6 +314,8 @@ function decimal(value) { return Number.isFinite(Number(value)) ? Number(value).
 .revision-summary li { display: flex; justify-content: space-between; gap: 14px; padding: 5px 0; border-bottom: 1px solid var(--paper-line-soft); font-size: var(--paper-fs-xs); }
 .revision-summary li span { color: var(--paper-muted); }
 .revision-summary li strong { color: #83a982; font: 600 var(--paper-fs-xs) ui-monospace, monospace; text-align: right; }
+.transition-focus { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; padding: 9px 12px; border-left: 2px solid #83a982; background: #1a2119; color: var(--paper-muted); font-size: var(--paper-fs-xs); }
+.transition-focus button { border: 0; background: transparent; color: #9bc39a; font-size: var(--paper-fs-xs); cursor: pointer; }
 .evidence-workspace { display: grid; grid-template-columns: 150px minmax(320px, 1fr) 230px; min-height: 360px; margin-top: 16px; border: 1px solid var(--paper-line); background: #11120f; }
 .evidence-workspace nav { border-right: 1px solid var(--paper-line); background: #191a17; }
 .evidence-workspace nav button { width: 100%; display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; padding: 12px; border: 0; border-bottom: 1px solid #292a26; background: transparent; color: var(--paper-muted); text-align: left; cursor: pointer; }

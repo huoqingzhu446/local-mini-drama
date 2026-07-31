@@ -12,11 +12,13 @@ const storyboardService = require('./paperStoryboardService');
 const { PaperStudioError, nowIso } = require('./paperStudioUtils');
 
 const MAX_SCRIPT_CHARS = 30000;
+const MAX_REPAIR_ATTEMPTS = 2;
 
-async function generateTextWithRetry(db, log, prompt, systemPrompt, options, attempts = 3) {
+async function generateTextWithRetry(db, log, prompt, systemPrompt, options, attempts = 3, onAttempt = null) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
+      if (onAttempt) onAttempt(attempt);
       return await aiClient.generateText(db, log, 'text', prompt, systemPrompt, options);
     } catch (error) {
       lastError = error;
@@ -109,6 +111,94 @@ function normalizeShot(raw, order, entities, defaultDuration, warnings) {
   };
 }
 
+function scanDraftIssues(shots = []) {
+  return shots.flatMap((shot, index) => {
+    const missingFields = [];
+    if (!String(shot?.description || '').trim()) missingFields.push('description');
+    if (!Boolean(shot?.environment_only) && !String(shot?.action || '').trim()) missingFields.push('action');
+    if (!missingFields.length) return [];
+    return [{
+      shot_index: index,
+      shot_number: index + 1,
+      title: String(shot?.title || `分镜 ${index + 1}`),
+      missing_fields: missingFields,
+      environment_only: Boolean(shot?.environment_only),
+    }];
+  });
+}
+
+function repairSystemPrompt() {
+  return `你是短剧纸片动画的分镜修复助手。只补全明确标记为缺失的字段，不得改写其他内容。
+
+输出严格 JSON（不要解释、不要 markdown 代码块）：
+{
+  "repairs": [{
+    "shot_number": 1,
+    "description": "仅在要求补画面描述时填写，60-120字",
+    "action": "仅在要求补主体动作时填写，30-80字"
+  }]
+}
+
+规则：
+1. 每个待修复镜头都必须返回，shot_number 与输入完全一致。
+2. 主体动作要写清谁或什么对象做了什么，以及状态如何变化；地图箭头、车辆、道具和图形也可以是主体。
+3. 推近、拉远、摇移等运镜不能冒充主体动作。
+4. 画面描述要包含地点、主体位置、前中后景和关键构图，可直接用于生成单张参考图。
+5. 不得返回未要求修复的字段，不得修改对白、旁白、时长、景别、运镜和实体绑定。`;
+}
+
+function repairUserPrompt(script, entities, shots, issues) {
+  const issuePayload = issues.map((issue) => {
+    const shot = shots[issue.shot_index] || {};
+    return {
+      shot_number: issue.shot_number,
+      missing_fields: issue.missing_fields,
+      title: shot.title || '',
+      description: shot.description || '',
+      action: shot.action || '',
+      dialogue: shot.dialogue || '',
+      narration: shot.narration || '',
+      duration: shot.duration || 0,
+      shot_type: shot.shot_type || '',
+      camera_motion: shot.camera_motion || '',
+      scene: shot.scene_entity_name || '',
+      characters: shot.character_entity_names || [],
+      props: shot.prop_entity_names || [],
+    };
+  });
+  const entityPayload = entities.map((item) => ({ type: item.entity_type, name: item.name }));
+  return `【剧本内容】\n${String(script.content || '').slice(0, MAX_SCRIPT_CHARS)}\n\n【可用实体】\n${JSON.stringify(entityPayload)}\n\n【只修复以下缺失字段】\n${JSON.stringify(issuePayload)}`;
+}
+
+function mergeRepairCandidates(shots, issues, candidates, patches) {
+  const allowed = new Map(issues.map((issue) => [issue.shot_number, new Set(issue.missing_fields)]));
+  let changed = false;
+  for (const candidate of candidates) {
+    const shotNumber = Number(candidate?.shot_number);
+    const allowedFields = allowed.get(shotNumber);
+    const shot = shots[shotNumber - 1];
+    if (!allowedFields || !shot) continue;
+    for (const field of ['description', 'action']) {
+      if (!allowedFields.has(field)) continue;
+      if (field === 'action' && Boolean(shot.environment_only)) continue;
+      if (String(shot[field] || '').trim()) continue;
+      const next = String(candidate?.[field] || '').trim().slice(0, 8000);
+      if (!next) continue;
+      shot[field] = next;
+      patches.push({
+        shot_index: shotNumber - 1,
+        shot_number: shotNumber,
+        title: String(shot.title || `分镜 ${shotNumber}`),
+        field,
+        before: '',
+        after: next,
+      });
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function generate(db, cfg, log, episodeId, body = {}) {
   schemaService.assertValid('apiPaperStoryboardGenerate', body, '生成纸片分镜的参数无效');
   const episode = episodeService.get(db, episodeId);
@@ -160,18 +250,123 @@ async function generate(db, cfg, log, episodeId, body = {}) {
 
   const warnings = [];
   const shots = rawShots.slice(0, 48).map((raw, index) => normalizeShot(raw, index + 1, entities, defaultDuration, warnings));
+  const issues = scanDraftIssues(shots);
   if (truncated) warnings.unshift('剧本较长，本次只分析了前 3 万字');
-  if (log) log.info('Paper storyboards generated (draft)', { paper_episode_id: episode.id, script_id: script.id, shot_count: shots.length, warnings: warnings.length });
+  if (log) log.info('Paper storyboards generated (draft)', {
+    paper_episode_id: episode.id,
+    script_id: script.id,
+    shot_count: shots.length,
+    warnings: warnings.length,
+    incomplete_shots: issues.length,
+  });
   return {
     script: { id: script.id, version_number: script.version_number },
     shots,
     warnings,
+    issues,
+  };
+}
+
+async function repair(db, cfg, log, episodeId, body = {}) {
+  schemaService.assertValid('apiPaperStoryboardsRepair', body, 'AI 补全分镜草稿的参数无效');
+  const episode = episodeService.get(db, episodeId);
+  const script = body.script_version_id
+    ? scriptService.getForEpisode(db, episode.id, body.script_version_id)
+    : scriptService.latest(db, episode.id);
+  if (!script || !String(script.content || '').trim()) {
+    throw new PaperStudioError('PAPER_STUDIO_SCRIPT_MISSING', '当前分集还没有可用于补全的剧本版本', { paper_episode_id: episode.id }, 409);
+  }
+  const entities = libraryService.listEntities(db, episode.project_id).filter((item) => item.status !== 'archived');
+  const shots = body.shots.map((shot) => ({ ...shot }));
+  const originalIssues = scanDraftIssues(shots);
+  if (!originalIssues.length) {
+    return { shots, patches: [], issues: [], repaired_shot_count: 0, text_model_calls: 0 };
+  }
+
+  const patches = [];
+  let issues = originalIssues;
+  let textModelCalls = 0;
+  let lastFailure = null;
+  for (let attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS && issues.length; attempt += 1) {
+    let responseText;
+    try {
+      responseText = await generateTextWithRetry(
+        db,
+        log,
+        repairUserPrompt(script, entities, shots, issues),
+        repairSystemPrompt(),
+        {
+          scene_key: 'paper_storyboard_repair',
+          max_tokens: Math.max(1800, Math.min(6000, 800 + issues.length * 420)),
+          temperature: 0.3,
+          deepseek_thinking: 'disabled',
+        },
+        3,
+        () => { textModelCalls += 1; },
+      );
+    } catch (error) {
+      throw new PaperStudioError(
+        'PAPER_STUDIO_STORYBOARD_REPAIR_AI_FAILED',
+        `文本模型补全分镜失败：${error.message || '未知错误'}`,
+        { paper_episode_id: episode.id, script_id: script.id, issues },
+        502,
+      );
+    }
+
+    let parsed;
+    try {
+      parsed = safeParseAIJSON(responseText, log);
+    } catch (_) {
+      parsed = null;
+    }
+    const candidates = Array.isArray(parsed?.repairs) ? parsed.repairs : (Array.isArray(parsed) ? parsed : null);
+    if (!candidates?.length) {
+      lastFailure = '模型没有返回可识别的 repairs 数组';
+      continue;
+    }
+    const changed = mergeRepairCandidates(shots, issues, candidates, patches);
+    issues = scanDraftIssues(shots);
+    if (!changed) lastFailure = '模型返回的补全内容仍为空或镜头编号不匹配';
+  }
+
+  if (!patches.length) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_STORYBOARD_REPAIR_INCOMPLETE',
+      'AI 没有生成可用的补全内容，请重试或手动填写',
+      { issues, reason: lastFailure, text_model_calls: textModelCalls },
+      422,
+    );
+  }
+  if (log) log.info('Paper storyboards repaired (preview)', {
+    paper_episode_id: episode.id,
+    script_id: script.id,
+    repaired_shots: new Set(patches.map((item) => item.shot_number)).size,
+    repaired_fields: patches.length,
+    remaining_issues: issues.length,
+    text_model_calls: textModelCalls,
+  });
+  return {
+    script: { id: script.id, version_number: script.version_number },
+    shots,
+    patches,
+    issues,
+    repaired_shot_count: new Set(patches.map((item) => item.shot_number)).size,
+    text_model_calls: textModelCalls,
   };
 }
 
 function apply(db, log, episodeId, body = {}) {
   schemaService.assertValid('apiPaperStoryboardsApply', body, '应用生成分镜的参数无效');
   const episode = episodeService.get(db, episodeId);
+  const issues = scanDraftIssues(body.shots);
+  if (issues.length) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_STORYBOARD_INCOMPLETE',
+      `还有 ${issues.length} 个分镜缺少画面描述或主体动作，不能应用`,
+      { storyboards: issues },
+      409,
+    );
+  }
   const now = nowIso();
   const replaced = { count: 0 };
   const created = [];
@@ -246,4 +441,4 @@ function listEntityLinks(db, storyboardId) {
   }));
 }
 
-module.exports = { generate, apply, listEntityLinks, MAX_SCRIPT_CHARS };
+module.exports = { generate, repair, apply, listEntityLinks, scanDraftIssues, MAX_SCRIPT_CHARS };

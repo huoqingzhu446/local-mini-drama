@@ -16,6 +16,7 @@ const ACTION_CATALOG = Object.freeze({
   environmental_depth_motion: { family: 'environment', revision_axes: ['intensity', 'timing', 'direction', 'depth'] },
   map_route_reveal: { family: 'information-reveal', revision_axes: ['intensity', 'timing', 'direction'] },
   object_sequence_transition: { family: 'object-sequence', revision_axes: ['intensity', 'timing', 'direction', 'rotation', 'state', 'relation', 'staging'] },
+  siege_supply_sequence: { family: 'multi-beat-grounded-sequence', revision_axes: ['timing', 'direction', 'state', 'relation', 'staging', 'grounding'] },
 });
 
 const NUMERIC_LIMITS = Object.freeze({
@@ -24,6 +25,7 @@ const NUMERIC_LIMITS = Object.freeze({
   rotation: [-360, 360],
   scale: [0.05, 8],
   opacity: [0, 1],
+  blur: [0, 50],
   clip_progress: [0, 1],
   procedural_amount: [0, 1],
 });
@@ -67,7 +69,12 @@ function validatePlan(plan = {}) {
     actual: plan.primary_action || null,
     expected: Object.keys(ACTION_CATALOG),
   }];
-  for (const track of [...(plan.subject_tracks || []), ...(plan.camera_tracks || [])]) {
+  for (const track of [
+    ...(plan.subject_tracks || []),
+    ...(plan.camera_tracks || []),
+    ...(plan.scene_tracks || []),
+    ...(plan.transition_tracks || []),
+  ]) {
     assertions.push(...validateTrack(track, durationFrames));
   }
   assertions.push({

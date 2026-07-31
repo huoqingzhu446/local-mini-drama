@@ -1,5 +1,5 @@
 <template>
-  <section v-if="blueprint" class="blueprint-editor" aria-labelledby="blueprint-title">
+  <section v-if="blueprintCompatibility.editable" class="blueprint-editor" aria-labelledby="blueprint-title">
     <header class="blueprint-header">
       <div>
         <span>PRODUCTION BLUEPRINT · B{{ String(shot?.blueprint?.revision_number || 1).padStart(2, '0') }}</span>
@@ -58,6 +58,13 @@
             <label><input v-model="entity.independent_layer" type="checkbox" :disabled="!editable || entity.type === 'environment_anchor'" />独立图层</label>
             <label><input v-model="entity.reusable" type="checkbox" :disabled="!editable" />跨镜复用</label>
           </div>
+          <div v-if="entity.attributes?.source_evidence || entity.source_library_id" class="entity-binding" :class="{ warning: bindingWarning(entity) }">
+            <strong>{{ entity.source_library_id ? `实体库 #${entity.source_library_id}` : '匿名/临时实体' }}</strong>
+            <span>剧本证据：{{ entity.attributes?.source_evidence || '未提供' }}</span>
+          </div>
+          <div v-if="entity.attributes?.placement" class="entity-placement">
+            接触：{{ entity.attributes.placement.contact_kind || 'base' }} · 落地区域：{{ entity.attributes.placement.region_key || '未指定' }}
+          </div>
           <div v-if="blueprint.entities.length > 1" class="merge-row">
             <select v-model="mergeTargetByKey[entity.key]" :disabled="!editable">
               <option value="">选择合并目标</option>
@@ -83,6 +90,8 @@
               <option value="state_transition">姿态切换</option>
               <option value="generic_subject_action">通用主体动作</option>
               <option value="environmental_depth_motion">环境层次运动</option>
+              <option value="map_route_reveal">战役地图推进</option>
+              <option value="siege_supply_sequence">缺粮·运粮·围城多阶段</option>
             </select>
           </label>
           <label>
@@ -157,8 +166,43 @@
       </div>
     </section>
 
+    <section v-if="visualScenes.length" class="blueprint-panel scene-panel">
+      <div class="panel-heading">
+        <div><span>04</span><strong>场景与转场时间轴</strong></div>
+        <b>{{ visualScenes.length }} 个场景 · {{ transitionContracts.length }} 个转场</b>
+      </div>
+      <p class="panel-help">地点变化会拆成完整场景组；字幕和声音保持在全局轨道，不跟随背景甩出画面。</p>
+      <div class="scene-timeline">
+        <template v-for="(scene, index) in visualScenes" :key="scene.key">
+          <article class="scene-card">
+            <header><span>SCENE {{ index + 1 }}</span><strong>{{ scene.label }}</strong><i>{{ confidenceLabel(scene.confidence) }}</i></header>
+            <p>{{ scene.description }}</p>
+            <dl>
+              <div><dt>地点</dt><dd>{{ scene.location }}</dd></div>
+              <div><dt>时间</dt><dd>{{ scene.time_context || '连续' }}</dd></div>
+              <div><dt>环境素材</dt><dd><code>{{ scene.environment_family_key }}</code></dd></div>
+              <div><dt>主体</dt><dd>{{ sceneSubjectLabel(scene) }}</dd></div>
+              <div v-if="beatsForScene(scene.key).length"><dt>视觉节拍</dt><dd>{{ beatsForScene(scene.key).map((beat) => beat.motion_verb || beat.key).join(' / ') }}</dd></div>
+            </dl>
+          </article>
+          <div v-if="transitionAfter(index)" class="transition-card">
+            <span>{{ transitionKindLabel(transitionAfter(index).kind) }}</span>
+            <strong>{{ transitionDuration(transitionAfter(index)) }}</strong>
+            <small>{{ transitionAfter(index).direction || '无方向' }} · {{ transitionAfter(index).requires_new_plate ? '正确模式：独立新背景' : '零调用模式：同地点虚拟机位' }}</small>
+            <a
+              v-if="shot?.evidence?.some((item) => String(item.target_key || '').startsWith(`${transitionAfter(index).key}_`))"
+              :href="`#transition-evidence-${transitionAfter(index).key}`"
+            >只看这个转场</a>
+            <em v-else>生成动态证明后可逐帧查看</em>
+          </div>
+        </template>
+      </div>
+      <div v-if="lowConfidenceScenes.length" class="scene-warning">{{ lowConfidenceScenes.map((scene) => scene.label).join('、') }} 的场景识别置信度较低，请先核对地点和主体再确认蓝图。</div>
+      <div v-if="lowConfidenceTransitions.length" class="scene-warning">{{ lowConfidenceTransitions.map((item) => transitionKindLabel(item.kind)).join('、') }} 的边界置信度较低，请核对关联字幕和转场位置。</div>
+    </section>
+
     <section class="blueprint-panel slot-panel">
-      <div class="panel-heading"><div><span>04</span><strong>预计正式素材</strong></div><b>{{ generationCount }} 个图片 API 槽位</b></div>
+      <div class="panel-heading"><div><span>05</span><strong>预计正式素材</strong></div><b>{{ generationCount }} 个图片 API 槽位</b></div>
       <div class="slot-list">
         <article v-for="slot in blueprint.generation_slots" :key="`${slot.family_key}:${slot.slot_key}`">
           <div><strong>{{ slotLabel(slot) }}</strong><small>{{ slot.reason }}</small></div>
@@ -179,10 +223,26 @@
       <button type="button" class="primary" :disabled="dirty || busy || validationIssues.length || shot?.status !== 'analyzed'" @click="$emit('confirm')">确认蓝图，下一步查看费用</button>
     </footer>
   </section>
+
+  <section v-else-if="blueprint" class="blueprint-editor blueprint-compatibility" aria-labelledby="blueprint-compatibility-title">
+    <header class="blueprint-header">
+      <div>
+        <span>PRODUCTION BLUEPRINT · {{ blueprintCompatibility.recovered ? 'RECOVERED' : 'LEGACY' }}</span>
+        <h3 id="blueprint-compatibility-title">{{ blueprintCompatibility.recovered ? '恢复版蓝图仅供查看' : '历史蓝图格式不完整' }}</h3>
+        <p>这个生产版本早于当前可编辑蓝图结构，已恢复的素材、声音和视频仍会在下方正常展示。</p>
+      </div>
+      <div class="blueprint-state legacy">只读</div>
+    </header>
+    <div class="blueprint-impact">
+      <strong>继续生产</strong>
+      <span>请返回对应分镜新建生产版本；系统会按当前结构重新分析，不会覆盖这份历史记录，也不会在进入页面时调用图片 API。</span>
+    </div>
+  </section>
 </template>
 
 <script setup>
 import { computed, defineComponent, h, ref, watch } from 'vue'
+import { paperBlueprintCompatibility } from '../../utils/paperBlueprintCompatibility.js'
 
 const EntitySelect = defineComponent({
   name: 'EntitySelect',
@@ -219,7 +279,13 @@ const mergeTargetByKey = ref({})
 
 const editable = computed(() => ['analyzed', 'plan_confirmed'].includes(props.shot?.status))
 const dirty = computed(() => blueprint.value && JSON.stringify(blueprint.value) !== original.value)
+const blueprintCompatibility = computed(() => paperBlueprintCompatibility(blueprint.value))
 const generationCount = computed(() => (blueprint.value?.generation_slots || []).filter((slot) => slot.source === 'image_api').length)
+const visualScenes = computed(() => blueprint.value?.visual_scenes || [])
+const transitionContracts = computed(() => blueprint.value?.transition_contracts || [])
+const visualBeats = computed(() => props.shot?.plan_summary_json?.visual_beats || [])
+const lowConfidenceScenes = computed(() => visualScenes.value.filter((scene) => Number(scene.confidence ?? 1) < 0.75))
+const lowConfidenceTransitions = computed(() => transitionContracts.value.filter((item) => Number(item.confidence ?? 1) < 0.75))
 const predicates = [
   { value: 'holds', label: '手持' },
   { value: 'follows', label: '跟随' },
@@ -332,14 +398,40 @@ const validationIssues = computed(() => {
   if (blueprint.value.action_contract.object_key && !keySet.has(blueprint.value.action_contract.object_key)) issues.push('作用对象已不存在')
   if (blueprint.value.action_contract.support_key && !keySet.has(blueprint.value.action_contract.support_key)) issues.push('支撑物已不存在')
   if (blueprint.value.relations.some((relation) => !keySet.has(relation.subject_key) || !keySet.has(relation.object_key))) issues.push('关系中存在已删除的实体')
+  const byKey = new Map(blueprint.value.entities.map((entity) => [entity.key, entity]))
+  if (blueprint.value.relations.some((relation) => relation.predicate === 'holds' && /ground_vehicle|vehicle/.test(String(byKey.get(relation.object_key)?.role || '')))) {
+    issues.push('粮车、车辆等大型接地道具不能设置为手持关系')
+  }
+  if (blueprint.value.entities.some((entity) => bindingIssue(entity))) issues.push('实体库绑定与剧本证据不一致，请改为匿名角色或选择正确实体')
   if (blueprint.value.action_contract.waypoints.some((item) => !Number.isFinite(Number(item.x)) || !Number.isFinite(Number(item.y)))) issues.push('关键点坐标必须是数字')
   if (blueprint.value.action_contract.phases.some((item) => Number(item.start_ratio) > Number(item.end_ratio))) issues.push('动作阶段的开始时间不能晚于结束时间')
   if (blueprint.value.action_contract.primary_action === 'carry_move_sit') {
     if (!blueprint.value.action_contract.object_key) issues.push('“携带移动并坐下”必须选择独立道具')
     if (!blueprint.value.action_contract.support_key) issues.push('“携带移动并坐下”必须选择目标支撑物')
   }
+  const sceneKeys = new Set(visualScenes.value.map((scene) => scene.key))
+  if (visualScenes.value.length > 1 && transitionContracts.value.length !== visualScenes.value.length - 1) issues.push('每两个相邻视觉场景之间必须有且只有一个转场合同')
+  if (transitionContracts.value.some((item) => !sceneKeys.has(item.from_scene_key) || !sceneKeys.has(item.to_scene_key))) issues.push('转场合同引用了不存在的视觉场景')
+  if (transitionContracts.value.some((item) => item.relation === 'location_change' && !item.requires_new_plate)) issues.push('地点变化必须使用独立新背景，不能按零调用机位变化处理')
   return [...new Set(issues)]
 })
+
+function bindingIssue(entity) {
+  if (!entity?.source_library_id) return false
+  const evidence = String(entity.attributes?.source_evidence || '').trim()
+  const name = String(entity.name || '').trim()
+  // Legacy blueprints did not record source evidence. Keep them editable while
+  // still highlighting that the binding needs review.
+  if (!evidence || !name) return false
+  if (evidence.includes(name)) return false
+  const shortName = name.replace(/^(?:秦军|楚军|赵军|军用|一辆|一队)/, '')
+  return !shortName || !evidence.includes(shortName)
+}
+
+function bindingWarning(entity) {
+  if (!entity?.source_library_id) return false
+  return !String(entity.attributes?.source_evidence || '').trim() || bindingIssue(entity)
+}
 
 function save() {
   if (!dirty.value || validationIssues.value.length) return
@@ -358,6 +450,24 @@ function slotLabel(slot) {
 function sourceLabel(source) {
   return { image_api: '图片 API', local_derivation: '本地生成', existing_asset: '复用素材', procedural: '程序效果' }[source] || source
 }
+function transitionAfter(index) { return transitionContracts.value[index] || null }
+function beatsForScene(key) { return visualBeats.value.filter((beat) => beat.scene_key === key) }
+function confidenceLabel(value) {
+  const score = Number(value ?? 1)
+  return score >= 0.9 ? '高置信' : score >= 0.75 ? '可确认' : '需核对'
+}
+function sceneSubjectLabel(scene) {
+  const names = (scene.subject_keys || []).map((key) => blueprint.value?.entities?.find((entity) => entity.key === key)?.name || key)
+  return names.length ? names.join('、') : '环境主体'
+}
+function transitionKindLabel(kind) {
+  return { dust_whip_pan: '尘土甩镜', soft_crossfade: '柔和叠化', soft_dissolve: '溶解', color_dip: '色彩压暗', hard_cut: '显式硬切' }[kind] || kind || '场景转场'
+}
+function transitionDuration(transition) {
+  const fps = Number(props.shot?.motion_plan?.plan_json?.fps || 30)
+  if (Number.isFinite(Number(transition.end_frame)) && Number.isFinite(Number(transition.start_frame))) return `${((Number(transition.end_frame) - Number(transition.start_frame)) / fps).toFixed(2)} 秒`
+  return `${Number(transition.duration_seconds || 0).toFixed(2)} 秒`
+}
 </script>
 
 <style scoped>
@@ -368,6 +478,7 @@ function sourceLabel(source) {
 .blueprint-header p, .panel-help { margin: 0; color: var(--paper-muted); font-size: var(--paper-fs-sm); line-height: 1.65; }
 .blueprint-state { flex: 0 0 auto; padding: 7px 9px; border: 1px solid #695a38; color: #d9b975; font-size: var(--paper-fs-sm); }
 .blueprint-state.confirmed { border-color: #476246; color: #8fbb8d; }
+.blueprint-state.legacy { border-color: #6b6250; color: #bdb09a; }
 .blueprint-impact { display: flex; gap: 12px; padding: 11px 24px; border-bottom: 1px solid #4a3d25; background: #252116; color: #b9a67a; font-size: var(--paper-fs-sm); line-height: 1.55; }
 .blueprint-impact strong { color: #dbc183; white-space: nowrap; }
 .blueprint-grid { display: grid; grid-template-columns: minmax(300px, .8fr) minmax(420px, 1.2fr); }
@@ -396,6 +507,9 @@ input:disabled, select:disabled { opacity: .65; }
 .merge-row { display: grid; grid-template-columns: 1fr auto; gap: 7px; margin-top: 9px; }
 .merge-row button { padding: 0 5px; border: 1px solid var(--paper-line); }
 .entity-card > small { display: block; margin-top: 8px; color: var(--paper-dim); font-size: var(--paper-fs-xs); }
+.entity-binding, .entity-placement { display: flex; justify-content: space-between; gap: 8px; margin-top: 9px; padding: 7px 8px; border: 1px solid var(--paper-line-soft); color: var(--paper-dim); font-size: var(--paper-fs-xs); }
+.entity-binding.warning { border-color: #9f5c51; background: #2b1e1b; color: #dba99f; }
+.entity-binding strong { color: inherit; }
 .subsection-heading { margin-top: 19px; padding-top: 14px; border-top: 1px solid var(--paper-line-soft); }
 .waypoint-list, .phase-list { display: grid; gap: 7px; margin-top: 9px; }
 .waypoint-row { display: grid; grid-template-columns: minmax(120px, 1fr) 76px 76px auto; gap: 7px; align-items: end; }
@@ -413,6 +527,26 @@ input:disabled, select:disabled { opacity: .65; }
 .slot-list article > span { flex: 0 0 auto; color: #b49a62; font-size: var(--paper-fs-xs); }
 .slot-list .local_derivation, .slot-list .procedural { color: #7fa0ab; }
 .slot-list .existing_asset { color: #83a982; }
+.scene-timeline { display: flex; align-items: stretch; gap: 10px; overflow-x: auto; padding: 4px 0 10px; }
+.scene-card { flex: 1 0 280px; padding: 14px; border: 1px solid var(--paper-line); background: #151613; }
+.scene-card header { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; }
+.scene-card header span { color: var(--paper-accent); font: 700 var(--paper-fs-xs) ui-monospace, monospace; }
+.scene-card header strong { color: var(--paper-text); font-size: var(--paper-fs-base); }
+.scene-card header i { color: #83a982; font-size: var(--paper-fs-xs); font-style: normal; }
+.scene-card p { min-height: 42px; margin: 10px 0; color: var(--paper-muted); font-size: var(--paper-fs-xs); line-height: 1.6; }
+.scene-card dl { margin: 0; }
+.scene-card dl div { display: grid; grid-template-columns: 64px 1fr; gap: 8px; padding: 5px 0; border-top: 1px solid var(--paper-line-soft); font-size: var(--paper-fs-xs); }
+.scene-card dt { color: var(--paper-dim); }
+.scene-card dd { min-width: 0; margin: 0; color: var(--paper-muted); overflow-wrap: anywhere; }
+.scene-card code { color: #b9a67a; }
+.transition-card { flex: 0 0 138px; align-self: center; position: relative; display: flex; flex-direction: column; gap: 5px; padding: 12px; border-top: 1px solid #6f5d35; border-bottom: 1px solid #6f5d35; color: var(--paper-muted); text-align: center; }
+.transition-card::before, .transition-card::after { content: ''; position: absolute; top: 50%; width: 10px; border-top: 1px solid #6f5d35; }
+.transition-card::before { left: -10px; }.transition-card::after { right: -10px; }
+.transition-card span { color: var(--paper-accent); font-size: var(--paper-fs-xs); }
+.transition-card strong { color: var(--paper-text); font: 600 var(--paper-fs-sm) ui-monospace, monospace; }
+.transition-card small, .transition-card em { color: var(--paper-dim); font-size: var(--paper-fs-xs); font-style: normal; line-height: 1.45; }
+.transition-card a { color: #83a982; font-size: var(--paper-fs-xs); }
+.scene-warning { margin-top: 8px; padding: 9px 11px; border-left: 2px solid #b98252; background: #292117; color: #d7b889; font-size: var(--paper-fs-xs); }
 .blueprint-errors { margin: 16px 24px; padding: 12px 14px; border-left: 2px solid #bb695b; background: #2b1e1b; color: #dba99f; font-size: var(--paper-fs-sm); }
 .blueprint-errors ul { margin: 7px 0 0; padding-left: 18px; line-height: 1.7; }
 .blueprint-actions { position: sticky; bottom: 0; z-index: 2; display: flex; align-items: center; justify-content: flex-end; gap: 9px; padding: 13px 24px; border-top: 1px solid var(--paper-line); background: rgb(25 26 24 / 96%); backdrop-filter: blur(12px); }

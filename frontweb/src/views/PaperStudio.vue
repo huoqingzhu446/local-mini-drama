@@ -107,6 +107,7 @@
             :run="currentRun"
             :shot="currentShot"
             :acting="acting"
+            :regenerating-slot-id="regeneratingSlotId"
             @approve-asset="approveAsset"
             @rematte-asset="rematteAsset"
             @reject-asset="rejectAsset"
@@ -145,11 +146,16 @@
               :draft="storyboardDraft"
               :generating-storyboards="storyboardGenerating"
               :applying="applyingStoryboards"
+              :repairing="storyboardRepairing"
+              :repair-preview="storyboardRepairPreview"
               :can-generate-storyboards="scripts.length > 0 && Boolean(library?.entities?.length)"
               :has-entities="Boolean(library?.entities?.length)"
               @save="onSaveScript"
               @select-version="onSelectScriptVersion"
               @generate-storyboards="onGenerateStoryboards"
+              @repair-storyboards="onRepairStoryboards"
+              @accept-repairs="onAcceptStoryboardRepairs"
+              @discard-repairs="store.clearStoryboardRepairPreview"
               @apply-storyboards="onApplyStoryboards"
               @discard-draft="store.clearStoryboardDraft"
             />
@@ -186,16 +192,23 @@
             v-else
             :storyboard="currentPaperStoryboard"
             :episode="currentEpisode"
-            :busy="authoring"
+            :busy="authoring || currentStoryboardRepairing"
             :save-state="saveStateByStoryboardId[currentPaperStoryboard?.id] || 'saved'"
             :references="referenceCandidates"
             :reference-ready="currentStoryboardReady && Boolean(selectedProvider?.ready)"
+            :storyboard-complete="currentStoryboardReady"
+            :can-repair="Boolean(latestScript)"
+            :repairing="currentStoryboardRepairing"
+            :repair-preview="currentStoryboardRepairPreview"
             :audio="currentAudio"
             :fps="Number(currentEpisode?.fps || 30)"
             @save="saveStoryboard"
             @draft-change="onDraftChange"
             @duplicate="duplicateStoryboard"
             @delete="deleteStoryboard"
+            @repair="onRepairCurrentStoryboard"
+            @accept-repair="onAcceptCurrentStoryboardRepair"
+            @discard-repair="store.clearCurrentStoryboardRepairPreview"
             @create-storyboard="createStoryboard"
             @create-episode="createEpisode"
             @generate-reference="generateReference"
@@ -214,10 +227,10 @@
         <template v-if="currentRun">
           <section class="inspector-section next-action">
             <div class="inspector-heading"><span>当前生产步骤</span><i>{{ currentRun.progress }}%</i></div>
-            <strong>{{ currentShot?.next_action?.label || currentRun.next_action?.label }}</strong>
+            <strong>{{ currentActionLabel }}</strong>
             <p>{{ nextActionDescription }}</p>
-            <button v-if="canRunCurrentAction" type="button" class="primary-action" :disabled="acting || currentActionType === 'wait_for_render'" @click="runCurrentAction">
-              {{ acting ? '执行中…' : (currentShot?.next_action?.label || currentRun.next_action?.label) }}
+            <button v-if="canRunCurrentAction" type="button" class="primary-action" :disabled="currentActionBusy || currentActionType === 'wait_for_render'" @click="runCurrentAction">
+              {{ currentActionButtonLabel }}
             </button>
             <button v-if="canAdvanceRun" type="button" class="secondary-action" :disabled="acting" @click="advanceRun">
               {{ acting ? '批量执行中…' : batchActionLabel }}
@@ -373,6 +386,11 @@ import {
   paperStudioOnboardingKey,
   savePaperStudioContext,
 } from '@/utils/paperStudioExperience'
+import {
+  isEnvironmentProductionShot,
+  paperProductionActionDescription,
+  paperProductionActionLabel,
+} from '@/utils/paperStudioProduction'
 
 const route = useRoute()
 const router = useRouter()
@@ -384,13 +402,15 @@ const {
   runEvents, draftByStoryboardId, saveStateByStoryboardId, hasUnsavedDrafts,
   referenceCandidates, currentAudio, episodeDelivery, taskCenter, taskCenterLoading,
   scripts, latestScript, library, extractionResult, extracting,
-  identityGenerating, storyboardDraft, storyboardGenerating,
+  identityGenerating, storyboardDraft, storyboardGenerating, storyboardRepairing, storyboardRepairPreview,
+  currentStoryboardRepairing, currentStoryboardRepairPreview,
 } = storeToRefs(store)
 
 const dramaId = computed(() => Number(route.params.id || route.params.dramaId))
 const qualityTier = ref('balanced')
 const imageProviderConfigId = ref(null)
 const motionRevision = ref('')
+const regeneratingSlotId = ref(null)
 const taskDrawerOpen = ref(false)
 const railCollapsed = ref(false)
 const taskSection = ref('attention')
@@ -466,6 +486,34 @@ const productionReadinessMessage = computed(() => {
   return '创建版本只冻结已保存的分镜 revision、风格和预算，不会调用图片 API。'
 })
 const currentActionType = computed(() => currentShot.value?.next_action?.type || currentRun.value?.next_action?.type)
+const currentActionLabel = computed(() => paperProductionActionLabel(
+  currentShot.value,
+  currentShot.value?.next_action?.label || currentRun.value?.next_action?.label || '继续生产',
+))
+const actionStepKeys = {
+  plan_motion: 'plan_motion',
+  revise_motion: 'plan_motion',
+  run_proof: 'render_proof',
+  inspect_evidence: 'render_proof',
+  render_preview: 'render_preview',
+  render_formal: 'render_formal',
+  retry_render: 'render_formal',
+  publish_video: 'publish_video',
+}
+const currentActionStep = computed(() => {
+  const stepKey = actionStepKeys[currentActionType.value]
+  if (!stepKey) return null
+  return (currentShot.value?.steps || []).find((step) => step.step_key === stepKey) || null
+})
+const currentActionQueueState = computed(() => (
+  ['queued', 'running'].includes(currentActionStep.value?.status) ? currentActionStep.value.status : null
+))
+const currentActionBusy = computed(() => Boolean(acting.value || currentActionQueueState.value))
+const currentActionButtonLabel = computed(() => {
+  if (acting.value || currentActionQueueState.value === 'running') return '正在执行…'
+  if (currentActionQueueState.value === 'queued') return '已排队，等待后台执行'
+  return currentActionLabel.value
+})
 const runnableStates = new Set(['draft', 'analyzing', 'plan_review', 'awaiting_generation_authorization', 'assets_generating', 'assets_processing', 'motion_planning', 'proofing', 'preview_ready', 'approved', 'rendering', 'partial', 'failed'])
 const canRunCurrentAction = computed(() => Boolean(currentActionType.value)
   && !['review_source_changes', 'review_assets', 'generate_assets', 'retry_failed_asset'].includes(currentActionType.value)
@@ -477,17 +525,19 @@ const canReviseMotion = computed(() => Boolean(currentShot.value?.motion_plan) &
 const canControlRun = computed(() => Boolean(currentRun.value?.id) && !['delivered', 'cancelled', 'stale'].includes(currentRun.value.status))
 const batchActionLabel = computed(() => {
   const statuses = new Set((currentRun.value?.shots || []).map((shot) => shot.status))
+  const environmentOnly = (currentRun.value?.shots || []).length > 0
+    && (currentRun.value?.shots || []).every(isEnvironmentProductionShot)
   if (statuses.has('pending')) return '批量分析全部分镜'
   if (statuses.has('analyzed')) return '批量确认全部计划'
-  if (statuses.has('plan_confirmed') || statuses.has('asset_failed')) return '批量生成／重试素材'
-  if (statuses.has('asset_ready') || statuses.has('motion_failed')) return '批量规划主体动作'
-  if (statuses.has('motion_ready') || statuses.has('proof_failed')) return '批量执行动态门禁'
+  if (statuses.has('plan_confirmed') || statuses.has('asset_failed')) return environmentOnly ? '批量生成／修复环境底板' : '批量生成／重试素材'
+  if (statuses.has('asset_ready') || statuses.has('motion_failed')) return environmentOnly ? '批量生成／修复环境动态' : '批量规划主体动作'
+  if (statuses.has('motion_ready') || statuses.has('proof_failed')) return environmentOnly ? '批量检查环境动态' : '批量执行动态门禁'
   if (statuses.has('proof_ready')) return '批量渲染预览'
   if (statuses.has('approved') || statuses.has('render_failed')) return '批量渲染正式视频'
   if (statuses.has('rendered')) return '批量发布到纸片分镜'
   return '批量推进本阶段'
 })
-const nextActionDescription = computed(() => ({
+const nextActionDescription = computed(() => paperProductionActionDescription(currentShot.value, ({
   analyze_shot: '提取通用场景边界、主体、状态和动作目标；不调用图片 API。',
   analyze_run: '分析所选纸片分镜的独立层和动作关系；不调用图片 API。',
   confirm_shot_plan: '只冻结素材与动作蓝图，不会调用图片 API。确认后仍需查看费用并单独授权。',
@@ -507,7 +557,7 @@ const nextActionDescription = computed(() => ({
   wait_for_render: '正式渲染已在后台执行；可以离开当前分镜，完成后会自动发布。',
   publish_video: '正式视频只写回独立纸片分镜，可继续参与纸片整集合并。',
   review_source_changes: '这是失效或历史兼容版本，请返回创作区创建新的独立生产版本。',
-}[currentActionType.value] || '按持久化工作流执行当前步骤。'))
+}[currentActionType.value] || '按持久化工作流执行当前步骤。')))
 
 let pollTimer = null
 let autoSaveTimer = null
@@ -1060,7 +1110,84 @@ async function onReviewIdentity(version, decision, entity) {
 async function onGenerateStoryboards(params) {
   try {
     const result = await store.generateStoryboardsDraft(params)
-    ElMessage.success(`已生成 ${result?.shots?.length || 0} 镜草稿，确认后应用`)
+    if (result?.issues?.length) ElMessage.warning(`已生成 ${result.shots.length} 镜草稿，其中 ${result.issues.length} 镜不完整；请先使用 AI 补全`)
+    else ElMessage.success(`已生成 ${result?.shots?.length || 0} 镜草稿，完整性检查已通过`)
+  } catch (cause) {
+    if (cause?.message) ElMessage.error(cause.message)
+  }
+}
+
+function missingStoryboardDrafts() {
+  return (storyboardDraft.value?.shots || []).flatMap((shot, index) => {
+    const missingFields = []
+    if (!String(shot?.description || '').trim()) missingFields.push('画面描述')
+    if (!Boolean(shot?.environment_only) && !String(shot?.action || '').trim()) missingFields.push('主体动作')
+    return missingFields.length ? [{ shot_number: index + 1, title: shot.title, missing_fields: missingFields }] : []
+  })
+}
+
+async function onRepairStoryboards() {
+  const issues = missingStoryboardDrafts()
+  if (!issues.length) {
+    ElMessage.success('当前分镜草稿完整，不需要补全')
+    return
+  }
+  try {
+    if (!(await requestImpact({
+      title: `AI 补全 ${issues.length} 个不完整分镜？`,
+      description: '只补充为空的画面描述或主体动作，不会改写已有内容、对白、时长、实体绑定和镜头顺序。补全结果会先展示差异，确认后才写回草稿。',
+      impact: {
+        preserves: '当前所有非空字段与实体绑定',
+        invalidates: '不会使任何内容失效；可以放弃本次建议',
+        cost: '通常 1 次文本模型请求；语义或网络异常时自动重试，最多 6 次请求；0 次图片 API',
+      },
+      confirmLabel: `开始补全 ${issues.length} 镜`,
+    }))) return
+    const result = await store.repairGeneratedStoryboardsDraft()
+    if (result.issues?.length) ElMessage.warning(`已生成 ${result.patches.length} 项建议，仍有 ${result.issues.length} 镜需要继续补全`)
+    else ElMessage.success(`已生成 ${result.patches.length} 项补全建议，请确认差异`)
+  } catch (cause) {
+    if (cause?.message && cause !== 'cancel') ElMessage.error(cause.message)
+  }
+}
+
+function onAcceptStoryboardRepairs() {
+  if (!store.acceptStoryboardRepairPreview()) return
+  const remaining = missingStoryboardDrafts().length
+  if (remaining) ElMessage.warning(`补全建议已写入草稿，仍有 ${remaining} 镜待补齐`)
+  else ElMessage.success('补全建议已写入草稿，完整性检查已通过')
+}
+
+async function onRepairCurrentStoryboard() {
+  if (!currentPaperStoryboard.value) return
+  if (!latestScript.value) {
+    ElMessage.warning('请先在“剧本与实体”页保存剧本版本，AI 才能按原剧情补全')
+    return
+  }
+  try {
+    if (!(await requestImpact({
+      title: `AI 补全「${currentPaperStoryboard.value.title}」？`,
+      description: '只补充当前镜头为空的画面描述或主体动作，已有内容不会被覆盖。结果会先展示差异，接受后保存为新的分镜版本。',
+      impact: {
+        preserves: '当前非空字段、参考图、实体绑定与历史分镜版本',
+        invalidates: '不会使任何内容失效；可以放弃本次建议',
+        cost: '通常 1 次文本模型请求；语义或网络异常时自动重试，最多 6 次请求；0 次图片 API',
+      },
+      confirmLabel: '开始补全本镜',
+    }))) return
+    if (!(await flushDrafts())) return
+    const result = await store.repairCurrentPaperStoryboard()
+    if (result.stale) ElMessage.warning('当前分镜已切换，本次补全建议未挂载')
+    else ElMessage.success(`已生成 ${result.patches.length} 项建议，请确认差异`)
+  } catch (cause) {
+    if (cause?.message && cause !== 'cancel') ElMessage.error(cause.message)
+  }
+}
+
+async function onAcceptCurrentStoryboardRepair() {
+  try {
+    const saved = await store.acceptCurrentStoryboardRepairPreview()
+    if (saved) ElMessage.success('AI 补全已保存为新的分镜版本')
   } catch (cause) {
     if (cause?.message) ElMessage.error(cause.message)
   }
@@ -1113,6 +1240,14 @@ async function refreshDelivery() {
 
 async function fixDeliveryBlocker({ item, blocker }) {
   if (!item || !blocker) return
+  if (blocker.key === 'audio_duration' && item.latest_run_id && item.latest_shot_id) {
+    await store.openRun(item.latest_run_id, item.latest_shot_id)
+    await store.syncAudioTiming()
+    workspaceMode.value = 'production'
+    syncRoute()
+    ElMessage.success(`已按完整声音延长到 ${Number(item.effective_duration_seconds || item.duration || 0).toFixed(0)} 秒；请继续检查动态与预览。`)
+    return
+  }
   const authoringBlockers = new Set(['script', 'audio'])
   const activeProduction = !['not_started', 'published', 'cancelled', 'stale'].includes(item.production_status)
   if (!authoringBlockers.has(blocker.key) && activeProduction && item.latest_run_id) {
@@ -1126,8 +1261,12 @@ async function fixDeliveryBlocker({ item, blocker }) {
   await nextTick()
   const selector = blocker.key === 'audio' ? '#paper-audio-workbench' : '.script-form'
   document.querySelector(selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  if (['video', 'video_file', 'audio_snapshot'].includes(blocker.key)) {
-    ElMessage.info('当前正式视频不再匹配最新内容，请从右侧创建新的生产版本。历史视频仍会保留。')
+  if (blocker.key === 'production' && item.production_status === 'not_started') {
+    ElMessage.info(item.environment_only ? '已定位纯环境分镜；勾选后从右侧创建生产版本。' : '已定位分镜；勾选后从右侧创建生产版本。')
+  } else if (['video', 'video_file', 'audio_snapshot', 'audio_duration'].includes(blocker.key)) {
+    ElMessage.info(blocker.key === 'audio_duration'
+      ? '当前视频短于完整语音；请从右侧创建新的生产版本，系统会自动延长画面并复用可用素材。'
+      : '当前正式视频不再匹配最新内容，请从右侧创建新的生产版本。历史视频仍会保留。')
   }
 }
 
@@ -1275,8 +1414,13 @@ async function reviseMotionFromEvidence(instruction) {
 }
 async function rejectAsset(version) {
   try {
+    const missingCompositionReference = version.asset_type === 'environment'
+      && version.derivation_kind === 'image_api'
+      && Number(version.quality_report_json?.reference_count || 0) < 1
     const { value } = await ElMessageBox.prompt('只会退回当前素材槽位，其它已接受版本会保留。', `退回 ${version.slot_key}`, {
-      inputValue: version.asset_type === 'environment' ? '背景仍包含应当独立生成的主体' : '透明主体、边缘或姿态不符合当前镜头',
+      inputValue: missingCompositionReference
+        ? '正式素材未携带已选构图参考，与当前分镜画面不一致'
+        : version.asset_type === 'environment' ? '背景仍包含应当独立生成的主体' : '透明主体、边缘或姿态不符合当前镜头',
       confirmButtonText: '退回槽位', cancelButtonText: '取消',
       inputValidator: (text) => String(text || '').trim().length >= 2 || '请填写退回原因',
     })
@@ -1296,19 +1440,23 @@ async function approveAsset(version) {
 }
 
 async function regenerateAsset(slot) {
-  if (!slot?.id || !currentShot.value?.id) return
+  if (!slot?.id || !currentShot.value?.id || regeneratingSlotId.value) return
+  regeneratingSlotId.value = Number(slot.id)
   try {
     const quote = await store.getGenerationQuote({ shotIds: [Number(currentShot.value.id)], slotIds: [Number(slot.id)] })
+    if (!quote) return
     if (!(await requestImpact({
       title: `重新生成 ${slot.slot_key}？`,
       description: `只会调用「${quote.provider} / ${quote.model}」处理当前槽位。`,
-      impact: { preserves: '其它已生成、已批准素材与当前槽位原版本', invalidates: '新结果通过人工审核后才会替换当前采用版本', cost: '1 次图片 API 调用' },
-      confirmLabel: '确认生成 1 张',
+      impact: { preserves: '其它已生成、已批准素材与当前槽位原版本历史', invalidates: '新结果会成为当前待审核版本；通过人工审核后才能继续视频流程', cost: `${quote.estimated_image_count} 次预计图片 API 调用，最多 ${quote.max_authorized_calls} 次授权调用` },
+      confirmLabel: `确认生成 ${quote.estimated_image_count} 张`,
     }))) return
     await store.authorizeAndStartGeneration(quote)
-    ElMessage.success('已授权当前槽位重新生成；原版本会保留到新结果成功返回')
+    ElMessage.success('已带上当前构图参考，重新生成任务已排队')
   } catch (cause) {
     if (cause !== 'cancel' && cause !== 'close' && cause?.message) ElMessage.error(cause.message)
+  } finally {
+    regeneratingSlotId.value = null
   }
 }
 

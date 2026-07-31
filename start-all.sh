@@ -38,8 +38,9 @@ select_node() {
 
   for candidate in \
     "$configured" \
-    "$HOME/.nvm/versions/node/v22.19.0/bin/node" \
-    "$current"; do
+    "$current" \
+    "/opt/homebrew/bin/node" \
+    "/usr/local/bin/node"; do
     [[ -n "$candidate" ]] || continue
     if node_works "$candidate"; then
       printf '%s\n' "$candidate"
@@ -47,7 +48,9 @@ select_node() {
     fi
   done
 
-  for candidate in "$HOME"/.nvm/versions/node/v22*/bin/node; do
+  # Native modules are tied to Node's module ABI. Search every installed NVM
+  # runtime instead of assuming that the dependency was installed with Node 22.
+  for candidate in "$HOME"/.nvm/versions/node/v*/bin/node; do
     [[ -e "$candidate" ]] || continue
     if node_works "$candidate"; then
       printf '%s\n' "$candidate"
@@ -59,7 +62,9 @@ select_node() {
 
 NODE_BIN="$(select_node || true)"
 if [[ -z "$NODE_BIN" ]]; then
-  echo "启动失败：找不到与 better-sqlite3 兼容的 Node.js。请安装 Node 22，或设置 LOCAL_MINI_DRAMA_NODE。" >&2
+  echo "启动失败：已安装的 Node.js 均无法加载 better-sqlite3。" >&2
+  echo "请使用安装后端依赖时的 Node.js，或在 backend-node 目录重新运行 npm install。" >&2
+  echo "也可通过 LOCAL_MINI_DRAMA_NODE 指定 Node.js 可执行文件。" >&2
   exit 1
 fi
 

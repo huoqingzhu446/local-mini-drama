@@ -6,10 +6,14 @@ const storageLayout = require('../storageLayout');
 const schemaService = require('./paperStudioSchemaService');
 const shotService = require('./paperStudioShotService');
 const snapshotService = require('./paperSnapshotService');
+const spatialContractService = require('./paperSpatialContractService');
 const motionGateService = require('./paperMotionGateService');
+const transitionGateService = require('./paperTransitionGateService');
+const { CURRENT_PLANNER_VERSION } = require('./paperStudioPlannerVersion');
 const runAggregateService = require('./paperRunAggregateService');
 const sourceService = require('./paperStudioSourceService');
 const revisionService = require('./paperSourceRevisionService');
+const { ffprobeMediaInfo } = require('../mergedEpisodePostProcess');
 const { safeStorageFile, storageRoot } = require('./paperAssetProductionService');
 const {
   PaperStudioError,
@@ -44,6 +48,44 @@ function outputDirectory(db, cfg, shot, snapshot, mode) {
   const absolute = safeStorageFile(cfg, relative);
   fs.mkdirSync(absolute, { recursive: true });
   return { relative, absolute };
+}
+
+function validateRenderedMedia(snapshotJson, mediaInfo) {
+  const fps = Math.max(1, Number(snapshotJson?.composition?.fps || 30));
+  const expectedVideoSeconds = Number(snapshotJson?.composition?.duration_frames || 0) / fps;
+  const expectedSpeechEndSeconds = (snapshotJson?.audio || []).reduce((max, source) => (
+    Math.max(max, (Number(source.from_frame || 0) + Number(source.duration_frames || 0)) / fps)
+  ), 0);
+  const tolerance = Math.max(0.15, 2 / fps);
+  const failures = [];
+  if (!mediaInfo?.has_video) failures.push({ key: 'video_stream_missing' });
+  if (Number(mediaInfo?.video_duration_seconds || mediaInfo?.format_duration_seconds || 0) + tolerance < expectedVideoSeconds) {
+    failures.push({ key: 'video_truncated', expected_seconds: expectedVideoSeconds, actual_seconds: mediaInfo?.video_duration_seconds || mediaInfo?.format_duration_seconds || 0 });
+  }
+  if (expectedSpeechEndSeconds > 0 && !mediaInfo?.has_audio) failures.push({ key: 'audio_stream_missing' });
+  if (expectedSpeechEndSeconds > 0 && Number(mediaInfo?.audio_duration_seconds || 0) + tolerance < expectedSpeechEndSeconds) {
+    failures.push({ key: 'audio_truncated', expected_seconds: expectedSpeechEndSeconds, actual_seconds: mediaInfo?.audio_duration_seconds || 0 });
+  }
+  return {
+    pass: failures.length === 0,
+    expected_video_seconds: Number(expectedVideoSeconds.toFixed(3)),
+    expected_speech_end_seconds: Number(expectedSpeechEndSeconds.toFixed(3)),
+    media: mediaInfo || null,
+    failures,
+  };
+}
+
+function assertRenderedMedia(snapshotJson, videoPath) {
+  const report = validateRenderedMedia(snapshotJson, ffprobeMediaInfo(videoPath));
+  if (!report.pass) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_RENDER_MEDIA_DURATION_MISMATCH',
+      '渲染结果没有覆盖完整画面或语音，已阻止进入审核和发布',
+      report,
+      422,
+    );
+  }
+  return report;
 }
 
 function runWorker(cfg, log, { snapshotPath, output, mode, scale, crf }) {
@@ -85,18 +127,51 @@ async function pixelDifference(baselinePath, comparisonPath) {
     absolute += delta;
     if (delta >= 12) changed += 1;
   }
-  const stats = await sharp(comparisonPath).stats();
+  const [baselineStats, stats] = await Promise.all([sharp(baselinePath).stats(), sharp(comparisonPath).stats()]);
+  const luminance = (input) => (input.channels || []).slice(0, 3).reduce((sum, channel) => sum + Number(channel.mean || 0), 0) / 3;
+  const baselineLuminance = luminance(baselineStats);
+  const comparisonLuminance = luminance(stats);
   return {
     changed_pixel_ratio: Number((changed / pixels).toFixed(6)),
     mean_absolute_difference: Number((absolute / pixels).toFixed(4)),
     entropy: Number((stats.entropy || 0).toFixed(6)),
+    baseline_luminance: Number(baselineLuminance.toFixed(4)),
+    mean_luminance: Number(comparisonLuminance.toFixed(4)),
+    luminance_delta_ratio: Number((Math.abs(comparisonLuminance - baselineLuminance) / 255).toFixed(6)),
     width: baseline.info.width,
     height: baseline.info.height,
   };
 }
 
 function track(plan, target, property) {
-  return (plan.subject_tracks || []).find((item) => item.target === target && item.property === property);
+  return [
+    ...(plan.subject_tracks || []),
+    ...(plan.camera_tracks || []),
+    ...(plan.scene_tracks || []),
+    ...(plan.transition_tracks || []),
+  ].find((item) => item.target === target && item.property === property);
+}
+
+function assertSnapshotContinuity(snapshot, { requireCurrent = false } = {}) {
+  const plannerVersion = Number(snapshot?.provenance?.planner_version || 0);
+  if (requireCurrent && (plannerVersion !== CURRENT_PLANNER_VERSION || Number(snapshot?.schema_version || 0) < 4)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_PLANNER_VERSION_STALE',
+      '该成片来自旧版场景规划，只能继续查看；正式渲染或发布前请新建当前版本并重新通过预览',
+      { actual_planner_version: plannerVersion, expected_planner_version: CURRENT_PLANNER_VERSION, snapshot_schema_version: Number(snapshot?.schema_version || 0) },
+      409,
+    );
+  }
+  return transitionGateService.assertPlan(snapshot.motion_plan || {}, {
+    planner_version: plannerVersion,
+    visual_scenes: snapshot.visual_scenes || [],
+    transition_contracts: snapshot.transition_contracts || [],
+    root: snapshot.root,
+    source_families: snapshot.source_families || [],
+    spatial_contract: snapshot.spatial_contract || {},
+    visual_beats: snapshot.visual_beats || [],
+    captions: snapshot.captions || [],
+  }, '渲染前场景连续性复检未通过');
 }
 
 function findNode(root, key) {
@@ -174,7 +249,17 @@ function assertionResult(assertion, target, plan, motionReport, root) {
 }
 
 async function evaluateProof(snapshot, manifest) {
-  const motionReport = motionGateService.evaluate(snapshot.motion_plan, { catalog_key: snapshot.provenance?.catalog_key || 'capability-plan-v1' });
+  const motionReport = motionGateService.evaluate(snapshot.motion_plan, {
+    catalog_key: snapshot.provenance?.catalog_key || 'capability-plan-v1',
+    planner_version: Number(snapshot.provenance?.planner_version || 0),
+    spatial_contract: snapshot.spatial_contract || {},
+    visual_scenes: snapshot.visual_scenes || [],
+    transition_contracts: snapshot.transition_contracts || [],
+    root: snapshot.root,
+    families: snapshot.source_families || [],
+    visual_beats: snapshot.visual_beats || [],
+    captions: snapshot.captions || [],
+  });
   const targets = snapshot.proof_targets || [];
   const baselineArtifact = manifest.proofs[targets[0]?.key];
   const evidence = [];
@@ -182,12 +267,43 @@ async function evaluateProof(snapshot, manifest) {
     const target = targets[index];
     const artifact = manifest.proofs[target.key];
     if (!artifact) throw new PaperStudioError('PAPER_STUDIO_PROOF_ARTIFACT_MISSING', '动态证明缺少目标帧', { target_key: target.key }, 500);
-    const metrics = index === 0
+    const transitionTargets = target.transition_key
+      ? targets.filter((item) => item.transition_key === target.transition_key)
+      : [];
+    const transitionIndex = transitionTargets.findIndex((item) => item.key === target.key);
+    const previousTransitionTarget = transitionIndex > 0 ? transitionTargets[transitionIndex - 1] : null;
+    const comparisonArtifact = previousTransitionTarget ? manifest.proofs[previousTransitionTarget.key] : baselineArtifact;
+    const metrics = index === 0 || (target.transition_key && transitionIndex === 0)
       ? { changed_pixel_ratio: 0, mean_absolute_difference: 0, ...(await pixelDifference(artifact.crop_path, artifact.crop_path)) }
-      : await pixelDifference(baselineArtifact.crop_path, artifact.crop_path);
+      : await pixelDifference(comparisonArtifact.crop_path, artifact.crop_path);
+    if (target.transition_key) {
+      metrics.transition_key = target.transition_key;
+      metrics.transition_phase = target.transition_phase;
+      metrics.transition_gate_pass = snapshot.transition_gate?.pass !== false;
+      metrics.spatial_gate_pass = motionReport.spatial?.pass !== false;
+    }
     const enriched = { ...target, metrics };
     const assertions = target.assertions.map((assertion) => assertionResult(assertion, enriched, snapshot.motion_plan, motionReport, snapshot.root));
-    if (index > 0) assertions.push({ type: 'subject_pixel_change', min: 0.01, actual: metrics.changed_pixel_ratio, pass: metrics.changed_pixel_ratio >= 0.01 });
+    if (!target.transition_key && index > 0) assertions.push({ type: 'subject_pixel_change', min: 0.01, actual: metrics.changed_pixel_ratio, pass: metrics.changed_pixel_ratio >= 0.01 });
+    const transitionContract = target.transition_key
+      ? (snapshot.transition_contracts || []).find((item) => item.key === target.transition_key)
+      : null;
+    const hardCut = transitionContract?.kind === 'hard_cut' || transitionContract?.relation === 'explicit_hard_cut';
+    if (target.transition_key && ((!hardCut && ['mid', 'end'].includes(target.transition_phase)) || (hardCut && target.transition_phase === 'start'))) {
+      assertions.push({ type: 'transition_visual_change', min: 0.005, actual: metrics.changed_pixel_ratio, pass: metrics.changed_pixel_ratio >= 0.005 });
+    }
+    if (target.transition_key) {
+      assertions.push({ type: 'transition_luminance_continuity', max: 0.32, actual: metrics.luminance_delta_ratio, pass: metrics.luminance_delta_ratio <= 0.32 });
+      assertions.push({ type: 'transition_plan_gate', expected: true, actual: metrics.transition_gate_pass, pass: metrics.transition_gate_pass === true });
+      if (!hardCut && ['start', 'post'].includes(target.transition_phase)) {
+        assertions.push({ type: 'transition_endpoint_stability', max: 0.2, actual: metrics.changed_pixel_ratio, pass: metrics.changed_pixel_ratio <= 0.2 });
+      }
+      if (target.transition_phase === 'post') {
+        assertions.push({ type: 'transition_spatial_gate', expected: true, actual: metrics.spatial_gate_pass, pass: metrics.spatial_gate_pass === true });
+        assertions.push({ type: 'transition_caption_continuity', expected: 'global_overlay', actual: transitionContract?.caption_policy || null, pass: transitionContract?.caption_policy === 'global_overlay' });
+        assertions.push({ type: 'transition_audio_continuity', expected: 'continuous', actual: transitionContract?.audio_policy || null, pass: transitionContract?.audio_policy === 'continuous' });
+      }
+    }
     evidence.push({ target, artifact, metrics, assertions, pass: assertions.every((assertion) => assertion.pass) && artifact.deterministic === true });
   }
   return { pass: motionReport.pass && evidence.every((item) => item.pass), camera_only: motionReport.camera_only, motion_gate: motionReport, evidence };
@@ -200,6 +316,21 @@ function createProofRun(db, shotId, snapshotId, kind, scale) {
      VALUES (?, ?, ?, ?, 'running', '{}', ?)`,
   ).run(Number(shotId), Number(snapshotId), kind, Number(scale), nowIso());
   return Number(result.lastInsertRowid);
+}
+
+function assertNoActiveProofRun(db, shotId, snapshotId) {
+  const active = db.prepare(
+    `SELECT id, created_at FROM paper_proof_runs
+     WHERE shot_id = ? AND snapshot_id = ? AND run_kind = 'motion_proof' AND status = 'running'
+     ORDER BY id DESC LIMIT 1`,
+  ).get(Number(shotId), Number(snapshotId));
+  if (!active) return;
+  throw new PaperStudioError(
+    'PAPER_STUDIO_PROOF_ALREADY_RUNNING',
+    '当前镜头的环境动态证据已经在检查中，请等待完成',
+    { shot_id: Number(shotId), snapshot_id: Number(snapshotId), proof_run_id: Number(active.id), created_at: active.created_at },
+    409,
+  );
 }
 
 function assertSnapshotManifest(snapshotRow, manifest) {
@@ -215,6 +346,9 @@ async function proof(db, cfg, log, shotId, body = {}) {
   assertExpectedVersion(shot.version, body.expected_version, '纸片动画镜头');
   if (!['motion_ready', 'proof_failed'].includes(shot.status)) throw new PaperStudioError('PAPER_STUDIO_SHOT_STATE_CONFLICT', '当前镜头状态不允许执行动态门禁', { shot_id: shot.id, status: shot.status }, 409);
   const snapshot = snapshotService.get(db, shot.current_snapshot_id);
+  spatialContractService.assertSnapshot(snapshot.snapshot_json);
+  assertSnapshotContinuity(snapshot.snapshot_json);
+  assertNoActiveProofRun(db, shot.id, snapshot.id);
   const scale = Number(cfg?.paper_studio?.preview_scale || 0.5);
   const proofRunId = createProofRun(db, shot.id, snapshot.id, 'motion_proof', scale);
   const output = outputDirectory(db, cfg, shot, snapshot, `proof-${proofRunId}`);
@@ -264,14 +398,16 @@ async function preview(db, cfg, log, shotId, body = {}) {
   assertExpectedVersion(shot.version, body.expected_version, '纸片动画镜头');
   if (shot.status !== 'proof_ready') throw new PaperStudioError('PAPER_STUDIO_SHOT_STATE_CONFLICT', '当前镜头尚未通过动态门禁', { shot_id: shot.id, status: shot.status }, 409);
   const snapshot = snapshotService.get(db, shot.current_snapshot_id);
+  assertSnapshotContinuity(snapshot.snapshot_json);
   const scale = Number(cfg?.paper_studio?.preview_scale || 0.5);
   const runId = createProofRun(db, shot.id, snapshot.id, 'preview', scale);
   const output = outputDirectory(db, cfg, shot, snapshot, `preview-${runId}`);
   try {
     const manifest = await runWorker(cfg, log, { snapshotPath: safeStorageFile(cfg, snapshot.local_path), output: output.absolute, mode: 'preview', scale, crf: cfg?.paper_studio?.render?.crf_preview || 28 });
     assertSnapshotManifest(snapshot, manifest);
+    const mediaDuration = assertRenderedMedia(snapshot.snapshot_json, manifest.video.path);
     const videoPath = toRelative(cfg, manifest.video.path);
-    db.prepare("UPDATE paper_proof_runs SET status = 'completed', preview_local_path = ?, report_json = ?, proof_hash = ?, completed_at = ? WHERE id = ?").run(videoPath, JSON.stringify({ manifest, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }), manifest.video.hash, nowIso(), runId);
+    db.prepare("UPDATE paper_proof_runs SET status = 'completed', preview_local_path = ?, report_json = ?, proof_hash = ?, completed_at = ? WHERE id = ?").run(videoPath, JSON.stringify({ manifest, media_duration: mediaDuration, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }), manifest.video.hash, nowIso(), runId);
     db.prepare("UPDATE paper_studio_shots SET status = 'preview_ready', version = version + 1, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.id));
     db.prepare("UPDATE paper_studio_runs SET status = 'preview_ready', progress = 78, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.run_id));
     db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key = 'render_preview'").run(JSON.stringify({ proof_run_id: runId, preview_local_path: videoPath, artifact_hash: manifest.video.hash, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }), nowIso(), nowIso(), Number(shot.run_id), Number(shot.id));
@@ -292,6 +428,8 @@ function approvePreview(db, cfg, log, shotId, body = {}) {
   const previewRow = db.prepare("SELECT * FROM paper_proof_runs WHERE shot_id = ? AND snapshot_id = ? AND run_kind = 'preview' AND status = 'completed' ORDER BY id DESC LIMIT 1").get(Number(shot.id), Number(shot.current_snapshot_id));
   if (!previewRow?.preview_local_path || !fs.existsSync(safeStorageFile(cfg, previewRow.preview_local_path))) throw new PaperStudioError('PAPER_STUDIO_PREVIEW_MISSING', '预览文件不存在，不能批准', { shot_id: shot.id }, 409);
   const snapshot = snapshotService.get(db, shot.current_snapshot_id);
+  spatialContractService.assertSnapshot(snapshot.snapshot_json);
+  assertSnapshotContinuity(snapshot.snapshot_json);
   const now = nowIso();
   const approve = db.transaction(() => {
     db.prepare("UPDATE paper_render_snapshots SET status = 'approved', approved_at = ? WHERE id = ?").run(now, Number(snapshot.id));
@@ -431,6 +569,8 @@ async function renderFormal(db, cfg, log, shotId, body = {}) {
   const shot = shotService.get(db, shotId);
   if (!shot.approved_snapshot_id) throw new PaperStudioError('PAPER_STUDIO_SHOT_STATE_CONFLICT', '正式渲染前必须批准同一 snapshot 的预览', { shot_id: shot.id, status: shot.status }, 409);
   const snapshot = snapshotService.get(db, shot.approved_snapshot_id);
+  spatialContractService.assertSnapshot(snapshot.snapshot_json);
+  assertSnapshotContinuity(snapshot.snapshot_json, { requireCurrent: true });
   if (Number(snapshot.id) !== Number(shot.current_snapshot_id) || snapshot.status !== 'approved') throw new PaperStudioError('PAPER_STUDIO_SNAPSHOT_APPROVAL_MISMATCH', '当前 snapshot 与已批准 snapshot 不一致', { current_snapshot_id: shot.current_snapshot_id, approved_snapshot_id: shot.approved_snapshot_id }, 409);
   const existing = selectExistingFormalRender(db, shot, snapshot);
   if (existing?.status === 'processing') {
@@ -465,6 +605,7 @@ async function renderFormal(db, cfg, log, shotId, body = {}) {
   try {
     const manifest = await runWorker(cfg, log, { snapshotPath: safeStorageFile(cfg, snapshot.local_path), output: output.absolute, mode: 'formal', scale: 1, crf: cfg?.paper_studio?.render?.crf_formal || 20 });
     assertSnapshotManifest(snapshot, manifest);
+    const mediaDuration = assertRenderedMedia(snapshot.snapshot_json, manifest.video.path);
     const localPath = toRelative(cfg, manifest.video.path);
     const url = `/static/${localPath}`;
     const now = nowIso();
@@ -476,7 +617,7 @@ async function renderFormal(db, cfg, log, shotId, body = {}) {
              version = version + 1, updated_at = ?
          WHERE id = ? AND status != 'published'`,
       ).run(video.id, now, Number(shot.id));
-      db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key = 'render_formal'").run(JSON.stringify({ video_generation_id: video.id, snapshot_id: snapshot.id, render_hash: snapshot.render_hash, artifact_hash: manifest.video.hash, local_path: localPath }), now, now, Number(shot.run_id), Number(shot.id));
+      db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key = 'render_formal'").run(JSON.stringify({ video_generation_id: video.id, snapshot_id: snapshot.id, render_hash: snapshot.render_hash, artifact_hash: manifest.video.hash, local_path: localPath, media_duration: mediaDuration }), now, now, Number(shot.run_id), Number(shot.id));
     });
     finish();
     runAggregateService.sync(db, shot.run_id);
@@ -506,6 +647,8 @@ function publish(db, cfg, log, shotId, body = {}) {
   const video = db.prepare("SELECT * FROM video_generations WHERE id = ? AND paper_studio_shot_id = ? AND paper_snapshot_id = ? AND generation_kind = 'paper_studio' AND status = 'completed' AND deleted_at IS NULL").get(Number(shot.published_video_generation_id), Number(shot.id), Number(shot.approved_snapshot_id));
   if (!video?.local_path || !fs.existsSync(safeStorageFile(cfg, video.local_path))) throw new PaperStudioError('PAPER_STUDIO_FORMAL_ARTIFACT_MISSING', '正式渲染文件不存在，不能发布', { video_generation_id: video?.id }, 409);
   const snapshot = snapshotService.get(db, shot.approved_snapshot_id);
+  spatialContractService.assertSnapshot(snapshot.snapshot_json);
+  assertSnapshotContinuity(snapshot.snapshot_json, { requireCurrent: true });
   if (video.render_hash !== snapshot.render_hash) throw new PaperStudioError('PAPER_STUDIO_FORMAL_HASH_MISMATCH', '正式视频不是来自已批准 snapshot', { video_render_hash: video.render_hash, approved_render_hash: snapshot.render_hash }, 409);
   const now = nowIso();
   const transaction = db.transaction(() => {
@@ -532,9 +675,13 @@ function publish(db, cfg, log, shotId, body = {}) {
 
 module.exports = {
   runWorker,
+  validateRenderedMedia,
+  assertRenderedMedia,
   pixelDifference,
   assertionResult,
   evaluateProof,
+  assertSnapshotContinuity,
+  assertNoActiveProofRun,
   proof,
   preview,
   approvePreview,

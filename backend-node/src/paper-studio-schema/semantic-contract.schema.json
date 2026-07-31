@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["schema_version", "storyboard_id", "environment", "subjects", "action_beats"],
   "properties": {
-    "schema_version": { "const": 3 },
+    "schema_version": { "enum": [3, 4] },
     "storyboard_id": { "type": "integer", "minimum": 1 },
     "environment": {
       "type": "object",
@@ -13,7 +13,8 @@
       "properties": {
         "description": { "type": "string", "minLength": 1 },
         "clean_plate_required": { "const": true },
-        "registered_boundaries": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+        "registered_boundaries": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "placement_regions": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
       }
     },
     "subjects": {
@@ -28,7 +29,8 @@
           "kind": { "enum": ["character", "prop", "vehicle", "effect"] },
           "identity": { "type": "string", "minLength": 1 },
           "support_key": { "type": ["string", "null"] },
-          "required_states": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true }
+          "required_states": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "placement": { "type": ["object", "null"], "additionalProperties": true }
         }
       }
     },
@@ -48,6 +50,9 @@
           "action": { "type": "string", "minLength": 1 }
         }
       }
-    }
+    },
+    "visual_scenes": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "visual_beats": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "transition_contracts": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
   }
 }

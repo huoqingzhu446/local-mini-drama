@@ -13,7 +13,31 @@
         "description": { "type": "string", "minLength": 1 },
         "clean_plate_required": { "const": true },
         "camera_intent": { "type": "string" },
-        "registered_boundaries": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+        "registered_boundaries": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "placement_regions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "kind", "polygon"],
+            "properties": {
+              "key": { "type": "string", "minLength": 1 },
+              "kind": { "enum": ["walkable", "forbidden", "support"] },
+              "polygon": {
+                "type": "array",
+                "minItems": 3,
+                "items": {
+                  "type": "array",
+                  "minItems": 2,
+                  "maxItems": 2,
+                  "items": { "type": "number", "minimum": 0, "maximum": 1 }
+                }
+              },
+              "ground_y": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
       }
     },
     "entities": {
@@ -62,7 +86,7 @@
       "additionalProperties": false,
       "required": ["primary_action", "actor_key", "object_key", "support_key", "direction", "start_state", "end_state", "waypoints", "phases", "contact_events", "occlusion_events"],
       "properties": {
-        "primary_action": { "enum": ["carry_move_sit", "directed_move", "state_transition", "generic_subject_action", "environmental_depth_motion"] },
+        "primary_action": { "enum": ["carry_move_sit", "directed_move", "state_transition", "generic_subject_action", "environmental_depth_motion", "map_route_reveal", "siege_supply_sequence"] },
         "actor_key": { "type": ["string", "null"] },
         "object_key": { "type": ["string", "null"] },
         "support_key": { "type": ["string", "null"] },
@@ -81,7 +105,8 @@
               "key": { "type": "string", "minLength": 1 },
               "label": { "type": "string", "minLength": 1 },
               "x": { "type": "number", "minimum": -1, "maximum": 1 },
-              "y": { "type": "number", "minimum": -1, "maximum": 1 }
+              "y": { "type": "number", "minimum": -1, "maximum": 1 },
+              "region_key": { "type": "string", "minLength": 1 }
             }
           }
         },
@@ -122,6 +147,54 @@
           "required": { "type": "boolean" },
           "source": { "enum": ["image_api", "local_derivation", "existing_asset", "procedural"] }
         }
+      }
+    },
+    "visual_scenes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/visualScene" }
+    },
+    "transition_contracts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transitionContract" }
+    }
+  },
+  "$defs": {
+    "visualScene": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "label", "description", "location", "environment_family_key"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "location": { "type": "string", "minLength": 1 },
+        "time_context": { "type": "string" },
+        "camera_signature": { "type": "string" },
+        "environment_family_key": { "type": "string", "minLength": 1 },
+        "subject_keys": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "source_caption_keys": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "placement_regions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "transitionContract": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["from_scene_key", "to_scene_key"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "from_scene_key": { "type": "string", "minLength": 1 },
+        "to_scene_key": { "type": "string", "minLength": 1 },
+        "relation": { "enum": ["continuous_action", "subject_change", "camera_change", "location_change", "time_jump", "explicit_hard_cut"] },
+        "kind": { "type": "string", "minLength": 1 },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "direction": { "type": "string" },
+        "requires_new_plate": { "type": "boolean" },
+        "hard_cut_allowed": { "type": "boolean" },
+        "hard_cut_reason": { "type": ["string", "null"] },
+        "source_caption_key": { "type": ["string", "null"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     }
   }

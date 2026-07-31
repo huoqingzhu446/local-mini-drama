@@ -319,6 +319,7 @@ function setupRouter(cfg, db, log) {
   r.post('/paper-studio/projects/:project_id/library/identity/generate', paperStudio.generateIdentities);
   r.post('/paper-studio/library/identity-versions/:id/review', paperStudio.reviewIdentityVersion);
   r.post('/paper-studio/episodes/:episode_id/generate-storyboards', paperStudio.generateStoryboardsFromScript);
+  r.post('/paper-studio/episodes/:episode_id/repair-generated-storyboards', paperStudio.repairGeneratedStoryboards);
   r.post('/paper-studio/episodes/:episode_id/apply-generated-storyboards', paperStudio.applyGeneratedStoryboards);
   r.get('/paper-studio/storyboards/:id/entity-links', paperStudio.listStoryboardEntityLinks);
   r.get('/paper-studio/episodes/:id/merges', paperStudio.listEpisodeMerges);
@@ -369,6 +370,7 @@ function setupRouter(cfg, db, log) {
   r.post('/paper-studio/shots/:id/assets/:asset_version_id/mask-patch', paperStudio.patchAssetMask);
   r.post('/paper-studio/shots/:id/review-assets', paperStudio.reviewAssets);
   r.post('/paper-studio/shots/:id/plan-motion', paperStudio.planMotion);
+  r.post('/paper-studio/shots/:id/sync-audio-timing', paperStudio.syncAudioTiming);
   r.post('/paper-studio/shots/:id/revise', paperStudio.reviseMotion);
   r.get('/paper-studio/shots/:id/revisions', paperStudio.listRevisions);
   r.get('/paper-studio/shots/:id/evidence', paperStudio.getEvidence);

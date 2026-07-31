@@ -17,7 +17,7 @@ const TERMINAL_RUN_STATES = new Set(['delivered', 'cancelled', 'stale', 'failed'
 const ACTIONS = Object.freeze({
   generate_layout_master: {
     queue: 'image',
-    states: new Set(['plan_confirmed', 'asset_failed']),
+    states: new Set(['plan_confirmed', 'asset_review', 'asset_failed']),
     failureState: 'asset_failed',
     run: (db, cfg, log, shot, step) => assetService.generateAssets(db, cfg, log, shot.id, {
       request_id: randomUUID(), expected_version: shot.version, authorization_id: Number(step.authorization_id),

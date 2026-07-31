@@ -130,6 +130,54 @@ test('only a matching quote and explicit authorization can release image generat
   const runnable = orchestratorService.runnableSteps(context.db);
   assert.equal(runnable.length, 1);
   assert.equal(Number(runnable[0].authorization_id), authorized.id);
+  assert.throws(
+    () => authorizationService.buildQuote(context.db, run.id, {
+      request_id: randomUUID(), expected_version: executed.run.version,
+    }),
+    (error) => error.code === 'PAPER_STUDIO_ASSET_GENERATION_ALREADY_ACTIVE',
+  );
+  context.db.close();
+});
+
+test('a single-slot regeneration queued from asset review is runnable and cannot be submitted twice', () => {
+  const context = setup();
+  const run = confirmedRun(context);
+  const shot = context.db.prepare('SELECT id FROM paper_studio_shots WHERE run_id = ?').get(run.id);
+  const slot = context.db.prepare(
+    `SELECT pas.id FROM paper_asset_slots pas
+     JOIN paper_source_families psf ON psf.id = pas.family_id
+     WHERE psf.shot_id = ? ORDER BY pas.id LIMIT 1`,
+  ).get(Number(shot.id));
+  const quote = authorizationService.buildQuote(context.db, run.id, {
+    request_id: randomUUID(), expected_version: run.version,
+    shot_ids: [Number(shot.id)], slot_ids: [Number(slot.id)],
+  });
+  const authorization = authorizationService.authorize(context.db, log, run.id, {
+    request_id: randomUUID(), expected_version: run.version,
+    quote_fingerprint: quote.quote_fingerprint, confirmed: true,
+    shot_ids: quote.shot_ids, slot_ids: quote.requested_slot_ids,
+  }).authorization;
+  const forcedScope = authorization.slot_scope_json.map((item) => ({ ...item, force_regeneration: true }));
+  context.db.prepare('UPDATE paper_generation_authorizations SET slot_scope_json = ? WHERE id = ?')
+    .run(JSON.stringify(forcedScope), authorization.id);
+  context.db.prepare("UPDATE paper_studio_shots SET status = 'asset_review' WHERE id = ?").run(Number(shot.id));
+  context.db.prepare("UPDATE paper_job_steps SET status = 'completed' WHERE run_id = ? AND shot_id = ? AND step_key = 'generate_layout_master'")
+    .run(run.id, Number(shot.id));
+
+  const executed = authorizationService.execute(context.db, log, authorization.id, {
+    request_id: randomUUID(), expected_version: authorization.version,
+  });
+  const runnable = orchestratorService.runnableSteps(context.db);
+  assert.equal(runnable.length, 1);
+  assert.equal(Number(runnable[0].authorization_id), authorization.id);
+  assert.equal(runnable[0].shot_status, 'asset_review');
+  assert.throws(
+    () => authorizationService.buildQuote(context.db, run.id, {
+      request_id: randomUUID(), expected_version: executed.run.version,
+      shot_ids: [Number(shot.id)], slot_ids: [Number(slot.id)],
+    }),
+    (error) => error.code === 'PAPER_STUDIO_ASSET_GENERATION_ALREADY_ACTIVE',
+  );
   context.db.close();
 });
 

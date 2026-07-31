@@ -142,6 +142,27 @@ test('startup recovery stops old scene-shaped plans and requires a new generic r
   db.close();
 });
 
+test('generation quote rejects an old planner version before image authorization', () => {
+  const { db, run } = setup();
+  const analyzed = analyzerService.analyzeRun(db, log, run.id, {
+    request_id: randomUUID(), expected_version: run.version,
+  }, { fps: 30 }).run;
+  const confirmed = analyzerService.confirmPlan(db, log, run.id, {
+    request_id: randomUUID(), expected_version: analyzed.version,
+  }).run;
+  const shot = confirmed.shots[0];
+  db.prepare('UPDATE paper_studio_shots SET plan_summary_json = ? WHERE id = ?')
+    .run(JSON.stringify({ ...shot.plan_summary_json, planner_version: CURRENT_PLANNER_VERSION - 1 }), Number(shot.id));
+  assert.throws(
+    () => authorizationService.buildQuote(db, confirmed.id, {
+      request_id: randomUUID(), expected_version: confirmed.version,
+    }),
+    (error) => error.code === 'PAPER_STUDIO_PLAN_VERSION_STALE'
+      && error.details.expected_planner_version === CURRENT_PLANNER_VERSION,
+  );
+  db.close();
+});
+
 test('run report is stable, complete and redacts credentials from nested production evidence', () => {
   const { db, run } = setup();
   const analyzed = analyzerService.analyzeRun(db, log, run.id, {

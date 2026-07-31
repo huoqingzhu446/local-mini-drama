@@ -7,7 +7,7 @@
         <p>对白和旁白分别保存版本，并固定到下一次预览和正式视频。</p>
       </div>
       <strong class="readiness" :class="audio?.ready ? 'ready' : 'attention'">
-        {{ audio?.ready ? (audio?.audio_mode === 'silent' ? '已确认静音' : '声音已就绪') : '等待处理' }}
+        {{ readinessLabel }}
       </strong>
     </header>
 
@@ -30,6 +30,11 @@
     <div v-if="audio?.missing?.length" class="audio-attention" role="status">
       <strong>正式制作前还差：</strong>
       <span v-for="item in audio.missing" :key="`${item.kind}-${item.reason}`">{{ item.reason }}</span>
+    </div>
+
+    <div v-if="audio?.ready && audio?.duration_extended" class="duration-notice" role="status">
+      <strong>画面将按完整语音自动延长</strong>
+      <span>原定 {{ formatSeconds(audio.authored_duration_seconds) }}，语音 {{ formatSeconds(audio.speech_end_seconds) }}，生产时使用 {{ formatSeconds(audio.effective_duration_seconds) }}（含尾帧停留）。</span>
     </div>
 
     <div v-if="audioMode === 'silent'" class="silent-state">
@@ -171,6 +176,12 @@ const policies = [
 ]
 const audioMode = computed(() => props.audio?.audio_mode || props.storyboard?.audio_mode || 'auto')
 const duration = computed(() => Math.max(1, Number(props.storyboard?.duration || 6)))
+const readinessLabel = computed(() => {
+  if (!props.audio?.ready) return '等待处理'
+  if (props.audio?.audio_mode === 'silent') return '已确认静音'
+  if (props.audio?.duration_extended) return `声音已就绪 · 画面 ${formatSeconds(props.audio.effective_duration_seconds)}`
+  return '声音已就绪'
+})
 const fileInputs = {}
 const settings = reactive({ dialogue: emptySettings(), narration: emptySettings() })
 const baseline = reactive({ dialogue: '', narration: '' })
@@ -282,6 +293,11 @@ function formatDuration(milliseconds) {
   return `${(Number(milliseconds) / 1000).toFixed(1)} 秒`
 }
 
+function formatSeconds(seconds) {
+  const value = Number(seconds || 0)
+  return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} 秒`
+}
+
 function formatTime(value) {
   if (!value) return ''
   return new Date(value).toLocaleString()
@@ -310,6 +326,8 @@ function mediaUrl(value) {
 .policy-row strong { font-size: var(--paper-fs-base); }
 .policy-row small { color: var(--paper-dim); font-size: var(--paper-fs-sm); line-height: 1.45; }
 .audio-attention { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 14px; padding: 11px 13px; border-left: 2px solid #b58b43; background: #262219; color: #d6bd8a; font-size: var(--paper-fs-base); }
+.duration-notice { display: grid; gap: 4px; margin-top: 14px; padding: 11px 13px; border-left: 2px solid #658566; background: #1d251d; color: #a9c5a8; font-size: var(--paper-fs-base); line-height: 1.5; }
+.duration-notice strong { color: #c2d8c0; }
 .silent-state { min-height: 132px; display: grid; grid-template-columns: 60px minmax(0, 1fr) auto; align-items: center; gap: 18px; margin-top: 18px; padding: 20px; border: 1px solid var(--paper-line); background: #191a18; }
 .silent-mark { display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--paper-line); border-radius: 50%; color: var(--paper-dim); font-size: var(--paper-fs-display); }
 .silent-state strong { color: var(--paper-text); font-size: var(--paper-fs-lg); }

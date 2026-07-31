@@ -4,6 +4,7 @@ const shotService = require('./paperStudioShotService');
 const providerService = require('./paperProviderCapabilityService');
 const assetService = require('./paperAssetProductionService');
 const eventService = require('./paperStudioEventService');
+const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStudioPlannerVersion');
 const {
   PaperStudioError,
   assertExpectedVersion,
@@ -80,6 +81,35 @@ function slotNeedsImageApi(db, shot, slot, { force = false } = {}) {
   return Boolean(slot.required_for_gate || slot.constraints_json?.fallback !== 'procedural');
 }
 
+function assertNoActiveGenerationSteps(db, runId, shotIds, { ignoreAuthorizationId = null } = {}) {
+  const ids = [...new Set((shotIds || []).map(Number).filter(Number.isFinite))];
+  if (!ids.length) return;
+  const active = db.prepare(
+    `SELECT id, shot_id, status, authorization_id
+     FROM paper_job_steps
+     WHERE run_id = ? AND shot_id IN (${ids.map(() => '?').join(',')})
+       AND step_key = 'generate_layout_master'
+       AND status IN ('queued', 'running')`,
+  ).all(Number(runId), ...ids).filter((step) => (
+    ignoreAuthorizationId == null || Number(step.authorization_id) !== Number(ignoreAuthorizationId)
+  ));
+  if (!active.length) return;
+  throw new PaperStudioError(
+    'PAPER_STUDIO_ASSET_GENERATION_ALREADY_ACTIVE',
+    '当前镜头的素材已经在排队或生成中，请等待完成后再重新生成',
+    {
+      run_id: Number(runId),
+      steps: active.map((step) => ({
+        step_id: Number(step.id),
+        shot_id: Number(step.shot_id),
+        status: step.status,
+        authorization_id: step.authorization_id == null ? null : Number(step.authorization_id),
+      })),
+    },
+    409,
+  );
+}
+
 function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
   if (validateSchema) schemaService.assertValid('apiRunAction', body, '图片生成报价参数无效');
   const run = runService.get(db, runId);
@@ -88,6 +118,22 @@ function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
     throw new PaperStudioError('PAPER_STUDIO_RUN_PAUSED', '生产版本已暂停，请先恢复后再生成报价', { run_id: run.id }, 409);
   }
   const shots = selectedShots(run, body);
+  const stale = shots.filter((shot) => !isCurrentPlannerVersion(shot.plan_summary_json));
+  if (stale.length) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_PLAN_VERSION_STALE',
+      '生产计划版本已经更新，请重新分析后再生成素材',
+      {
+        expected_planner_version: CURRENT_PLANNER_VERSION,
+        shots: stale.map((shot) => ({
+          shot_id: Number(shot.id),
+          actual_planner_version: Number(shot.plan_summary_json?.planner_version || 0),
+        })),
+      },
+      409,
+    );
+  }
+  assertNoActiveGenerationSteps(db, run.id, shots.map((shot) => shot.id));
   const wantedSlotIds = body.slot_ids?.length ? new Set(body.slot_ids.map(Number)) : null;
   const providerConfigId = run.selection_json?.image_provider_config_id || null;
   const provider = providerService.select(db, providerConfigId);
@@ -121,7 +167,10 @@ function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
         asset_type: slot.asset_type,
         generation_purpose: slot.generation_purpose,
         required: Boolean(slot.required_for_gate),
-        force_regeneration: Boolean(wantedSlotIds && slot.current_version_id),
+        // A slot-scoped quote is an explicit request to create a fresh model
+        // result, including when the normal zero-cost path would import an
+        // existing storyboard reference.
+        force_regeneration: Boolean(wantedSlotIds),
       }));
   if (wantedSlotIds && slots.length !== wantedSlotIds.size) {
     const invalid = [...wantedSlotIds].filter((id) => !slots.some((slot) => Number(slot.slot_id) === Number(id)));
@@ -265,6 +314,7 @@ function execute(db, log, authorizationId, body = {}) {
   }
   const now = nowIso();
   const shotIds = authorization.shot_scope_json.map(Number);
+  assertNoActiveGenerationSteps(db, authorization.run_id, shotIds, { ignoreAuthorizationId: authorization.id });
   const forceRegeneration = authorization.slot_scope_json.some((slot) => Boolean(slot.force_regeneration));
   const transaction = db.transaction(() => {
     db.prepare(

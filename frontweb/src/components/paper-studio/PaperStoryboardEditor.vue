@@ -7,6 +7,16 @@
       </div>
       <div class="editor-actions">
         <span class="save-state" :class="saveState">{{ saveStateLabel }}</span>
+        <button
+          v-if="!storyboardComplete"
+          type="button"
+          class="quiet repair"
+          :disabled="busy || repairing || !canRepair"
+          :title="canRepair ? '只补全当前镜头的空字段' : '请先在剧本与实体页保存剧本版本'"
+          @click="$emit('repair')"
+        >
+          {{ repairing ? 'AI 补全中…' : 'AI 补全本镜' }}
+        </button>
         <button type="button" class="quiet" :disabled="busy" @click="$emit('duplicate', storyboard.id)">复制</button>
         <button type="button" class="quiet danger" :disabled="busy" @click="$emit('delete', storyboard.id)">删除</button>
         <button type="button" class="save" :disabled="busy || !dirty || !formReady" @click="save">{{ busy ? '处理中…' : '保存分镜' }}</button>
@@ -14,6 +24,23 @@
     </header>
 
     <div class="editor-body">
+      <section v-if="repairPreview?.patches?.length" class="shot-repair-preview">
+        <header>
+          <div><span>AI REPAIR PREVIEW</span><strong>AI 补全建议 · 确认后保存为新的分镜版本</strong></div>
+          <small>已有非空字段不会被覆盖</small>
+        </header>
+        <article v-for="patch in repairPreview.patches" :key="patch.field">
+          <span>{{ repairFieldLabel(patch.field) }}</span>
+          <del>原内容：未填写</del>
+          <ins>{{ patch.after }}</ins>
+        </article>
+        <footer>
+          <button type="button" class="accept" :disabled="busy || repairing" @click="$emit('accept-repair')">接受并保存</button>
+          <button type="button" class="discard" :disabled="busy || repairing" @click="$emit('discard-repair')">放弃建议</button>
+          <small>文本模型请求 {{ repairPreview.text_model_calls || 1 }} 次 · 图片 API 0 次</small>
+        </footer>
+      </section>
+
       <PaperReferenceManager
         :storyboard="storyboard"
         :references="references"
@@ -110,12 +137,17 @@ const props = defineProps({
   saveState: { type: String, default: 'saved' },
   references: { type: Array, default: () => [] },
   referenceReady: { type: Boolean, default: false },
+  storyboardComplete: { type: Boolean, default: false },
+  canRepair: { type: Boolean, default: false },
+  repairing: { type: Boolean, default: false },
+  repairPreview: { type: Object, default: null },
   audio: { type: Object, default: null },
   fps: { type: Number, default: 30 },
 })
 
 const emit = defineEmits([
   'save', 'draft-change', 'duplicate', 'delete', 'create-storyboard', 'create-episode',
+  'repair', 'accept-repair', 'discard-repair',
   'generate-reference', 'upload-reference', 'select-reference', 'save-reference-constraints',
   'synthesize-audio', 'upload-audio', 'revise-audio', 'set-audio-policy',
 ])
@@ -160,6 +192,10 @@ function save() {
   emit('save', Object.fromEntries(fields.map((key) => [key, key === 'duration' ? Number(form[key]) : form[key]])))
 }
 
+function repairFieldLabel(field) {
+  return { description: '画面描述', action: '主体动作' }[field] || field
+}
+
 function mediaUrl(value) {
   if (!value) return ''
   if (/^(?:https?:)?\/\//.test(value) || value.startsWith('/static/')) return value
@@ -183,9 +219,26 @@ function mediaUrl(value) {
 .editor-actions button:disabled { opacity: .4; cursor: not-allowed; }
 .editor-actions .quiet { background: transparent; color: var(--paper-muted); }
 .editor-actions .quiet:hover:not(:disabled) { background: var(--paper-hover); color: var(--paper-text); }
+.editor-actions .quiet.repair { border: 1px solid #6d5934; color: var(--paper-accent); font-weight: 700; }
 .editor-actions .danger:hover:not(:disabled) { color: #d48676; }
 .editor-actions .save { min-width: 88px; background: var(--paper-accent); color: #211c13; font-weight: 800; }
 .editor-body { width: min(920px, calc(100% - 56px)); margin: 0 auto; padding: 28px 0 72px; }
+.shot-repair-preview { margin-bottom: 20px; border: 1px solid #6d5934; background: #171815; }
+.shot-repair-preview > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--paper-line); }
+.shot-repair-preview > header div { display: flex; flex-direction: column; gap: 5px; }
+.shot-repair-preview > header span { color: var(--paper-accent); font: 700 var(--paper-fs-xs) ui-monospace, monospace; letter-spacing: .12em; }
+.shot-repair-preview > header strong { color: var(--paper-text); font-size: var(--paper-fs-base); }
+.shot-repair-preview > header small { color: var(--paper-dim); font-size: var(--paper-fs-xs); }
+.shot-repair-preview > article { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px 14px; padding: 14px 16px; border-bottom: 1px solid var(--paper-line-soft); }
+.shot-repair-preview > article span { grid-row: 1 / 3; color: var(--paper-accent); font-size: var(--paper-fs-sm); font-weight: 700; }
+.shot-repair-preview > article del { color: #9a6459; font-size: var(--paper-fs-xs); }
+.shot-repair-preview > article ins { color: #a8c095; font-size: var(--paper-fs-sm); line-height: 1.65; text-decoration: none; }
+.shot-repair-preview > footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 14px 16px; }
+.shot-repair-preview > footer button { min-height: var(--paper-control-h); padding: 0 14px; cursor: pointer; }
+.shot-repair-preview > footer button:disabled { opacity: .4; cursor: not-allowed; }
+.shot-repair-preview .accept { border: 0; background: var(--paper-accent); color: #211c13; font-weight: 800; }
+.shot-repair-preview .discard { border: 1px solid var(--paper-line); background: transparent; color: var(--paper-muted); }
+.shot-repair-preview > footer small { color: var(--paper-dim); font-size: var(--paper-fs-xs); }
 .published-video { width: 100%; margin-top: 16px; background: #10110f; }
 .script-form { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 22px; margin-top: 28px; }
 .field { display: flex; flex-direction: column; gap: 8px; }
@@ -212,6 +265,6 @@ function mediaUrl(value) {
   .editor-body { width: calc(100% - 32px); }
   .script-form { grid-template-columns: 1fr; }
   .title-field, .duration-field, .field.wide { grid-column: 1; }
-  .editor-actions .quiet, .save-state { display: none; }
+  .editor-actions .quiet:not(.repair), .save-state { display: none; }
 }
 </style>

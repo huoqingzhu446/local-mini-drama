@@ -1,6 +1,7 @@
 import React from 'react';
 import { staticFile } from 'remotion';
 import { clamp } from './motion/trackResolver.cjs';
+import { SceneTransitionLayer } from './SceneTransitionLayer';
 
 const boundaryBackground = (frame, amount, foreground, appearance) => {
   const phase = Math.round(frame * 0.8) % 120;
@@ -105,6 +106,26 @@ const RouteReveal = ({ node, progress, amount, theme }) => {
   );
 };
 
+const MapTitleCard = ({ node, theme }) => {
+  const appearance = node.relation?.appearance || 'commander';
+  const parts = String(node.relation?.text || '').split(/[｜|]/).map((item) => item.trim()).filter(Boolean);
+  const ink = safeColor(theme?.palette?.ink, '#241C16');
+  const paper = safeColor(theme?.palette?.paper, '#D8C9A7');
+  if (appearance === 'place') {
+    return (
+      <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center', color: ink, background: withAlpha(paper, 0.9), border: `1.5px solid ${withAlpha(ink, 0.68)}`, borderRadius: 999, boxShadow: `0 2px 8px ${withAlpha(ink, 0.18)}`, fontFamily: 'serif', fontWeight: 800, fontSize: 22, letterSpacing: '0.16em', whiteSpace: 'nowrap', mixBlendMode: 'multiply' }}>
+        {parts[0] || ''}
+      </div>
+    );
+  }
+  return (
+    <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '8px 14px', color: ink, background: `linear-gradient(90deg, ${withAlpha(paper, 0.96)}, ${withAlpha(paper, 0.82)})`, borderTop: `2px solid ${withAlpha(ink, 0.62)}`, borderBottom: `2px solid ${withAlpha(ink, 0.62)}`, boxShadow: `0 4px 14px ${withAlpha(ink, 0.18)}`, fontFamily: 'serif', whiteSpace: 'nowrap', overflow: 'hidden', mixBlendMode: 'multiply' }}>
+      <strong style={{ fontSize: 24, letterSpacing: '0.12em', flexShrink: 0 }}>{parts[0] || ''}</strong>
+      {parts.slice(1).length ? <span style={{ fontSize: 15, opacity: 0.78, textOverflow: 'ellipsis', overflow: 'hidden' }}>{parts.slice(1).join(' · ')}</span> : null}
+    </div>
+  );
+};
+
 const EmberField = ({ amount, frame }) => {
   const strength = clamp(Number(amount || 0));
   return (
@@ -120,11 +141,37 @@ const EmberField = ({ amount, frame }) => {
   );
 };
 
+const ArmyFormation = ({ amount, theme }) => {
+  const strength = clamp(Number(amount || 0));
+  const ink = safeColor(theme?.palette?.ink, '#241C16');
+  return (
+    <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', opacity: 0.16 + strength * 0.7, transform: `translateY(${(1 - strength) * 14}%) scale(${0.92 + strength * 0.08})`, transformOrigin: '50% 100%' }}>
+      {Array.from({ length: 24 }, (_, index) => {
+        const row = Math.floor(index / 8);
+        const column = index % 8;
+        const left = 9 + column * 11.5 + (row % 2) * 3;
+        const bottom = 9 + row * 22;
+        const scale = 0.72 + row * 0.13;
+        return (
+          <span key={index} style={{ position: 'absolute', left: `${left}%`, bottom: `${bottom}%`, width: 18 * scale, height: 40 * scale, transform: `translateX(${(0.5 - strength) * (column - 3.5) * 2}px)`, filter: 'drop-shadow(0 2px 1px rgba(0,0,0,.3))' }}>
+            <i style={{ position: 'absolute', left: '46%', top: '-38%', width: 2, height: '130%', background: withAlpha(ink, 0.8), transform: 'rotate(-3deg)', transformOrigin: 'bottom' }} />
+            <i style={{ position: 'absolute', left: '30%', top: '2%', width: '40%', aspectRatio: '1', borderRadius: '50%', background: withAlpha(ink, 0.88) }} />
+            <i style={{ position: 'absolute', left: '18%', top: '26%', width: '64%', height: '58%', borderRadius: '45% 45% 18% 18%', background: withAlpha(ink, 0.9) }} />
+          </span>
+        );
+      })}
+    </div>
+  );
+};
+
 export const ProceduralLayer = ({ node, motion, frame, style, theme, assetMap, snapshot, debug }) => {
   const kind = node.relation?.procedural_kind || '';
   const appearance = node.relation?.appearance || 'neutral';
   const amount = clamp(Number(motion.procedural_amount || 0));
   const progress = clamp(Number(motion.clip_progress || 0));
+  if (kind === 'scene-transition-dust') {
+    return <div style={style}><SceneTransitionLayer node={node} amount={amount} frame={frame} theme={theme} /></div>;
+  }
   if (kind === 'transition-effect') {
     return <div data-paper-node={node.key} data-paper-kind="procedural-transition-effect" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,235,235,.5)' : 'none' }}><TransitionParticles amount={amount} frame={frame} appearance={appearance} /></div>;
   }
@@ -137,8 +184,14 @@ export const ProceduralLayer = ({ node, motion, frame, style, theme, assetMap, s
   if (kind === 'route-reveal') {
     return <div data-paper-node={node.key} data-paper-kind="procedural-route-reveal" data-proof-progress={progress.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><RouteReveal node={node} progress={progress} amount={amount} theme={theme} /></div>;
   }
+  if (kind === 'map-title-card') {
+    return <div data-paper-node={node.key} data-paper-kind="procedural-map-title-card" style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><MapTitleCard node={node} theme={theme} /></div>;
+  }
   if (kind === 'ember-field') {
     return <div data-paper-node={node.key} data-paper-kind="procedural-ember-field" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(222,104,61,.55)' : 'none' }}><EmberField amount={amount} frame={frame} /></div>;
+  }
+  if (kind === 'army-formation') {
+    return <div data-paper-node={node.key} data-paper-kind="procedural-army-formation" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><ArmyFormation amount={amount} theme={theme} /></div>;
   }
   const foreground = kind === 'boundary-front' || kind === 'foreground-layer';
   const boundary = registeredBoundary(node, snapshot);

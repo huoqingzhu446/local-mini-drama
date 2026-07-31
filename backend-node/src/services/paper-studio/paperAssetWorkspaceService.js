@@ -7,6 +7,7 @@ const shotService = require('./paperStudioShotService');
 const runAggregateService = require('./paperRunAggregateService');
 const storageLayout = require('../storageLayout');
 const assetProductionService = require('./paperAssetProductionService');
+const spatialContractService = require('./paperSpatialContractService');
 const {
   PaperStudioError,
   assertExpectedVersion,
@@ -209,6 +210,125 @@ function allRequiredSlotsReadyAfter(db, shotId, replacingSlotId, versionId) {
   return !missing;
 }
 
+function assertReusableSourceCompatibility(targetShot, targetSlot, source) {
+  if (Number(targetShot.drama_id) !== Number(source.drama_id)) {
+    throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_PROJECT_MISMATCH', '只能复用同一剧集项目中的已批准素材', null, 409);
+  }
+  if (String(targetSlot.asset_type) !== String(source.asset_type)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_ASSET_REUSE_TYPE_MISMATCH',
+      '源素材类型与目标槽位不一致',
+      { source_asset_type: source.asset_type, target_asset_type: targetSlot.asset_type },
+      409,
+    );
+  }
+  if (source.status !== 'accepted' || Number(source.approved_review_count || 0) < 1) {
+    throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_NOT_APPROVED', '只能复用已通过人工审核的正式素材版本', { source_asset_version_id: Number(source.id) }, 409);
+  }
+  if (targetShot.paper_storyboard_id != null || source.paper_storyboard_id != null) {
+    const sameStoryboard = Number(targetShot.paper_storyboard_id) === Number(source.paper_storyboard_id);
+    const sameRevision = Number(targetShot.paper_storyboard_revision_id) === Number(source.paper_storyboard_revision_id);
+    if (!sameStoryboard || !sameRevision) {
+      throw new PaperStudioError(
+        'PAPER_STUDIO_ASSET_REUSE_SOURCE_REVISION_MISMATCH',
+        '跨生产版本复用必须来自同一纸片分镜修订',
+        {
+          source_paper_storyboard_id: source.paper_storyboard_id == null ? null : Number(source.paper_storyboard_id),
+          source_paper_storyboard_revision_id: source.paper_storyboard_revision_id == null ? null : Number(source.paper_storyboard_revision_id),
+          target_paper_storyboard_id: targetShot.paper_storyboard_id == null ? null : Number(targetShot.paper_storyboard_id),
+          target_paper_storyboard_revision_id: targetShot.paper_storyboard_revision_id == null ? null : Number(targetShot.paper_storyboard_revision_id),
+        },
+        409,
+      );
+    }
+  }
+  const targetIdentity = String(targetSlot.constraints_json?.identity || '').trim();
+  const sourceIdentity = String(parseJson(source.constraints_json, {}).identity || '').trim();
+  if (targetIdentity && sourceIdentity && targetIdentity !== sourceIdentity) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_ASSET_REUSE_IDENTITY_MISMATCH',
+      '源素材主体与目标槽位要求的主体不一致',
+      { source_identity: sourceIdentity, target_identity: targetIdentity },
+      409,
+    );
+  }
+  if (targetSlot.asset_type === 'environment' && parseJson(source.quality_report_json, {}).reference_gate_passed === false) {
+    throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_REFERENCE_GATE_FAILED', '源环境素材未通过构图参考门禁，不能复用', { source_asset_version_id: Number(source.id) }, 409);
+  }
+}
+
+function reuseAcceptedVersion(db, cfg, log, shotId, slotId, sourceVersionId, body = {}) {
+  const shot = shotService.get(db, shotId);
+  assertExpectedVersion(shot.version, body.expected_version, '纸片动画镜头');
+  if (!EDITABLE_STATES.has(shot.status)) {
+    throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_STATE_CONFLICT', '当前镜头状态不允许复用正式素材', { shot_id: shot.id, status: shot.status }, 409);
+  }
+  const slot = slotContext(db, shot.id, slotId);
+  const source = db.prepare(
+    `SELECT pav.*, pas.asset_type, pas.constraints_json, psf.shot_id AS source_shot_id,
+            ps.drama_id, ps.paper_storyboard_id, ps.paper_storyboard_revision_id,
+            (SELECT COUNT(*) FROM paper_asset_review_decisions
+             WHERE asset_version_id = pav.id AND decision = 'approved') AS approved_review_count
+     FROM paper_asset_versions pav
+     JOIN paper_asset_slots pas ON pas.id = pav.slot_id
+     JOIN paper_source_families psf ON psf.id = pas.family_id
+     JOIN paper_studio_shots ps ON ps.id = psf.shot_id
+     WHERE pav.id = ? AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL AND ps.deleted_at IS NULL`,
+  ).get(Number(sourceVersionId));
+  if (!source) {
+    throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_SOURCE_NOT_FOUND', '要复用的正式素材版本不存在', { source_asset_version_id: Number(sourceVersionId) }, 404);
+  }
+  assertReusableSourceCompatibility(shot, slot, source);
+  const sourceRelative = source.alpha_local_path || source.source_local_path;
+  const expectedHash = source.alpha_hash || source.source_hash;
+  if (!sourceRelative || !expectedHash) {
+    throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_HASH_MISMATCH', '源正式素材没有可验证的文件或哈希，不能复用', { source_asset_version_id: Number(source.id) }, 409);
+  }
+  const sourceAbsolute = assetProductionService.safeStorageFile(cfg, sourceRelative);
+  if (!fs.existsSync(sourceAbsolute) || sha256(fs.readFileSync(sourceAbsolute)) !== expectedHash) {
+    throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_HASH_MISMATCH', '源正式素材文件缺失或哈希不一致，不能复用', { source_asset_version_id: Number(source.id) }, 409);
+  }
+  const provenance = {
+    request_id: body.request_id,
+    source_asset_version_id: Number(source.id),
+    source_shot_id: Number(source.source_shot_id),
+    reuse_kind: 'same_storyboard_revision',
+  };
+  const versionId = nextVersion(db, slot, 'imported_source', provenance);
+  const target = versionPath(db, cfg, shot, versionId, slot.slot_key);
+  try {
+    fs.copyFileSync(sourceAbsolute, target.absolute);
+    const copiedHash = sha256(fs.readFileSync(target.absolute));
+    const requireAlpha = slot.asset_type !== 'environment';
+    const sourceQuality = parseJson(source.quality_report_json, {});
+    const registration = spatialContractService.rawRegistration({
+      ...source,
+      constraints_json: slot.constraints_json,
+    }) || parseJson(source.registration_json, {});
+    db.prepare(
+      `UPDATE paper_asset_versions
+       SET source_local_path = ?, alpha_local_path = ?, source_hash = ?, alpha_hash = ?,
+           processing_json = ?, registration_json = ?, provenance_json = ?, quality_report_json = ?,
+           status = 'accepted', accepted_at = ?
+       WHERE id = ?`,
+    ).run(
+      target.relative, requireAlpha ? target.relative : null, copiedHash, requireAlpha ? copiedHash : null,
+      JSON.stringify({ ...parseJson(source.processing_json, {}), source: 'accepted_version_reuse' }),
+      JSON.stringify(registration || {}), JSON.stringify(provenance),
+      JSON.stringify({ ...sourceQuality, semantic_review: { status: 'inherited_pending_confirmation', source_asset_version_id: Number(source.id) } }),
+      nowIso(), Number(versionId),
+    );
+  } catch (error) {
+    try { if (fs.existsSync(target.absolute)) fs.unlinkSync(target.absolute); } catch (_) { /* best effort cleanup */ }
+    db.prepare('DELETE FROM paper_asset_versions WHERE id = ? AND status = ?').run(Number(versionId), 'candidate');
+    throw error;
+  }
+  activateVersion(db, shot, slot, versionId, body.request_id, `复用已批准正式素材 v${source.id}`);
+  runAggregateService.sync(db, shot.run_id);
+  if (log) log.info('Paper studio approved asset reused', { shot_id: shot.id, slot_id: slot.id, source_asset_version_id: Number(source.id), asset_version_id: versionId });
+  return { shot: shotService.get(db, shot.id), asset_version_id: versionId, source_asset_version_id: Number(source.id), slot_id: slot.id };
+}
+
 async function uploadReplacement(db, cfg, log, shotId, slotId, body = {}, file = null) {
   const input = normalizeMultipartBody(body);
   schemaService.assertValid('apiAssetUpload', input, '上传替换素材的参数无效');
@@ -369,6 +489,8 @@ module.exports = {
   slotContext,
   inspectRgba,
   applyBrushPoint,
+  assertReusableSourceCompatibility,
+  reuseAcceptedVersion,
   uploadReplacement,
   patchMask,
 };

@@ -201,6 +201,21 @@ test('paper episode merge refuses incomplete published videos', () => {
   db.close();
 });
 
+test('delivery board presents the real next step for an unstarted environment shot', () => {
+  const { db, project } = setup();
+  const episode = episodeService.create(db, log, project.id, { request_id: randomUUID(), title: '环境镜头分集' }).episode;
+  const storyboard = storyboardService.create(db, log, episode.id, {
+    request_id: randomUUID(), title: '漳河寒雾', description: '漳河两岸被寒雾覆盖',
+    action: '', environment_only: true, duration: 10,
+  }).storyboard;
+  db.prepare("UPDATE paper_storyboards SET audio_mode = 'silent', audio_status = 'ready' WHERE id = ?").run(storyboard.id);
+  const board = episodeMergeService.deliveryBoard(db, {}, episode.id);
+  assert.equal(board.items[0].production_status, 'not_started');
+  assert.equal(board.items[0].environment_only, true);
+  assert.deepEqual(board.items[0].blockers, [{ key: 'production', label: '开始制作环境视频' }]);
+  db.close();
+});
+
 test('editing a published paper storyboard invalidates its current video and episode merge only when the frozen revision changes', () => {
   const { db, project } = setup();
   const now = '2026-07-26T01:00:00.000Z';

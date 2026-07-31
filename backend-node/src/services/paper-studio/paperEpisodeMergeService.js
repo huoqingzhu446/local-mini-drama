@@ -37,6 +37,56 @@ function localVideoReady(cfg, video) {
   }
 }
 
+function productionBlocker(storyboard, latestShot) {
+  const environmentOnly = Boolean(storyboard.environment_only);
+  if (!latestShot) {
+    return {
+      key: 'production',
+      label: environmentOnly ? '开始制作环境视频' : '创建生产版本',
+    };
+  }
+  const environmentLabels = {
+    pending: '分析环境镜头',
+    analyzed: '确认环境制作计划',
+    plan_confirmed: '授权生成环境底板',
+    asset_pending: '等待环境底板生成',
+    asset_review: '审核环境底板',
+    asset_failed: '修复环境底板',
+    asset_ready: '生成环境动态',
+    motion_failed: '自动修复环境动态',
+    motion_ready: '检查环境动态',
+    proof_failed: '修复环境动态证据',
+    proof_ready: '渲染环境预览',
+    preview_ready: '批准环境预览',
+    approved: '渲染正式视频',
+    rendering: '等待正式渲染',
+    render_failed: '重试正式渲染',
+    rendered: '发布正式视频',
+  };
+  const standardLabels = {
+    pending: '分析镜头',
+    analyzed: '确认制作计划',
+    plan_confirmed: '授权生成素材',
+    asset_pending: '等待素材生成',
+    asset_review: '审核正式素材',
+    asset_failed: '修复失败素材',
+    asset_ready: '规划主体动作',
+    motion_failed: '修订动作计划',
+    motion_ready: '执行动态检查',
+    proof_failed: '修复动态证据',
+    proof_ready: '渲染预览',
+    preview_ready: '批准预览',
+    approved: '渲染正式视频',
+    rendering: '等待正式渲染',
+    render_failed: '重试正式渲染',
+    rendered: '发布正式视频',
+  };
+  return {
+    key: 'production',
+    label: (environmentOnly ? environmentLabels : standardLabels)[latestShot.status] || '继续制作正式视频',
+  };
+}
+
 function deliveryBoard(db, cfg, episodeId) {
   const episode = episodeService.get(db, episodeId);
   const storyboards = storyboardService.list(db, episodeId);
@@ -53,25 +103,43 @@ function deliveryBoard(db, cfg, episodeId) {
     const embeddedAudioIds = (snapshotJson.audio || []).map((entry) => Number(entry.version_id)).filter(Boolean);
     const expectedAudioIds = [audio.dialogue?.id, audio.narration?.id].filter(Boolean).map(Number);
     const videoFileReady = localVideoReady(cfg, video);
-    const audioEmbedded = Boolean(videoFileReady && audio.ready && sameIds(embeddedAudioIds, expectedAudioIds));
+    const snapshotDurationFrames = Number(snapshotJson.composition?.duration_frames || 0);
+    const embeddedByVersion = new Map((snapshotJson.audio || []).map((entry) => [Number(entry.version_id), entry]));
+    const audioTimingCovered = Boolean(
+      audio.ready
+      && (snapshotDurationFrames === 0 || snapshotDurationFrames >= Number(audio.effective_duration_frames || 0))
+      && (audio.timing_tracks || []).every((track) => {
+        const embedded = embeddedByVersion.get(Number(track.version_id));
+        return Boolean(embedded) && (embedded.duration_frames == null || Number(embedded.duration_frames) >= Number(track.duration_frames || 0));
+      }),
+    );
+    const audioEmbedded = Boolean(videoFileReady && audioTimingCovered && sameIds(embeddedAudioIds, expectedAudioIds));
     const latestShot = db.prepare(
       `SELECT pss.id, pss.status, pss.run_id
        FROM paper_studio_shots pss
        JOIN paper_studio_runs psr ON psr.id = pss.run_id AND psr.deleted_at IS NULL
        WHERE pss.paper_storyboard_id = ? AND pss.deleted_at IS NULL
-       ORDER BY psr.id DESC, pss.id DESC LIMIT 1`,
+       ORDER BY CASE WHEN pss.status IN ('cancelled','stale') THEN 1 ELSE 0 END,
+                psr.id DESC, pss.id DESC LIMIT 1`,
     ).get(Number(storyboard.id));
     const blockers = [];
     if (!storyboard.description || (!storyboard.environment_only && !storyboard.action)) blockers.push({ key: 'script', label: '补齐画面与动作' });
     if (!audio.ready) blockers.push({ key: 'audio', label: audio.missing.map((entry) => entry.kind === 'dialogue' ? '补对白音频' : entry.kind === 'narration' ? '补旁白音频' : '确认声音策略').join('、') });
-    if (!video || video.status !== 'completed') blockers.push({ key: 'video', label: '发布正式视频' });
+    if (!video || video.status !== 'completed') blockers.push(productionBlocker(storyboard, latestShot));
     else if (!videoFileReady) blockers.push({ key: 'video_file', label: '正式视频文件缺失，请重新渲染' });
+    else if (audio.ready && !audioTimingCovered) blockers.push({ key: 'audio_duration', label: `按完整音频延长至 ${Number(audio.effective_duration_seconds || storyboard.duration || 0).toFixed(0)} 秒并重新渲染` });
     else if (!audioEmbedded) blockers.push({ key: 'audio_snapshot', label: '用当前声音重新渲染' });
     return {
       paper_storyboard_id: Number(storyboard.id),
       shot_number: Number(storyboard.shot_number),
       title: storyboard.title,
-      duration: Number(storyboard.duration || 0),
+      duration: Number(audio.effective_duration_seconds || storyboard.duration || 0),
+      authored_duration: Number(storyboard.duration || 0),
+      speech_end_seconds: Number(audio.speech_end_seconds || 0),
+      effective_duration_seconds: Number(audio.effective_duration_seconds || storyboard.duration || 0),
+      audio_duration_extended: Boolean(audio.duration_extended),
+      audio_timing_covered: audioTimingCovered,
+      environment_only: Boolean(storyboard.environment_only),
       script_ready: !blockers.some((entry) => entry.key === 'script'),
       reference_ready: Boolean(storyboard.reference_local_path || storyboard.reference_image_url),
       latest_run_id: latestShot?.run_id == null ? null : Number(latestShot.run_id),
@@ -83,7 +151,7 @@ function deliveryBoard(db, cfg, episodeId) {
       subtitle_ready: audio.audio_mode === 'silent' || Boolean(
         audio.ready
         && expectedAudioIds.length > 0
-        && [audio.dialogue, audio.narration].filter(Boolean).every((version) => version.captions_json.length > 0 || !version.text_content)
+        && [audio.dialogue, audio.narration].filter(Boolean).every((version) => audioService.captionsForVersion(version, Number(episode.fps || 30)).length > 0 || !version.text_content)
       ),
       video_ready: videoFileReady,
       audio_embedded: audioEmbedded,
@@ -124,7 +192,7 @@ function writeEpisodeSubtitles(db, cfg, episode, project, board, deliveryHash) {
   for (const item of board.items) {
     const audio = audioService.workspace(db, cfg, item.paper_storyboard_id);
     for (const version of [audio.dialogue, audio.narration].filter(Boolean)) {
-      for (const caption of version.captions_json || []) {
+      for (const caption of audioService.captionsForVersion(version, fps)) {
         captions.push({
           text: caption.text,
           start_frame: offsetFrames + Number(caption.start_frame || 0),

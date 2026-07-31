@@ -22,7 +22,7 @@ function derive(plan) {
     if (relation.contact_zone || relation.contactZone) primitives.add('contact_zone');
     if (relation.state_slots) primitives.add('state_atlas');
     if (['atmosphere-drift', 'ambient-flow'].includes(relation.procedural_kind)) primitives.add('environmental_motion');
-    if (relation.procedural_kind === 'route-reveal') primitives.add('information_reveal');
+    if (['route-reveal', 'map-title-card'].includes(relation.procedural_kind)) primitives.add('information_reveal');
     if (['ember-field', 'transition-effect'].includes(relation.procedural_kind)) primitives.add('procedural_effect');
   });
   return [...primitives];

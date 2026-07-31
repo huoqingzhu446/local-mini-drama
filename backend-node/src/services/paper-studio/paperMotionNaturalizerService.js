@@ -45,6 +45,7 @@ function trackDelta(track) {
 const isSubjectPositionTrack = (track) => ['x', 'y'].includes(track.property);
 const isPropTarget = (target) => /^prop/.test(String(target || ''));
 const isActorTarget = (target) => /^(actor|subject|primary_subject|supported_group)/.test(String(target || ''));
+const NATURALIZED_EASING_PROPERTIES = new Set(['x', 'y', 'rotation', 'scale']);
 
 // §3.2 缓动升级：到达段用五次缓出 + 轻微过冲；中段补 ease-in-out。
 function upgradeEasing(track) {
@@ -174,7 +175,11 @@ function naturalize(motionPlan, quality, resolveValue) {
   const subjectTargets = [...new Set(plan.subject_tracks.map((track) => track.target))];
 
   for (const track of plan.subject_tracks) {
-    if (typeof (track.keyframes || [])[0]?.value === 'number') upgradeEasing(track);
+    // Opacity and procedural intensity have explicit frame-level continuity
+    // contracts. Replacing their authored linear ramps with nonlinear easing
+    // can increase the peak per-frame slope and make a previously valid fade
+    // fail only after snapshot naturalization.
+    if (typeof (track.keyframes || [])[0]?.value === 'number' && NATURALIZED_EASING_PROPERTIES.has(track.property)) upgradeEasing(track);
     if (quality.timing?.anticipation) injectAnticipation(track, durationFrames);
   }
   for (const target of subjectTargets) {

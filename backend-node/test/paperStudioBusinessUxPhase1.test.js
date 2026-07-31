@@ -11,6 +11,7 @@ const runService = require('../src/services/paper-studio/paperStudioRunService')
 const shotService = require('../src/services/paper-studio/paperStudioShotService');
 const analyzerService = require('../src/services/paper-studio/paperStudioAnalyzerService');
 const authorizationService = require('../src/services/paper-studio/paperGenerationAuthorizationService');
+const assetService = require('../src/services/paper-studio/paperAssetProductionService');
 const motionGateService = require('../src/services/paper-studio/paperMotionGateService');
 const doctorService = require('../src/services/paper-studio/paperStudioDoctorService');
 
@@ -100,6 +101,114 @@ test('independent paper text compiles person, luggage and support into a real co
   assert.equal(motionGateService.evaluate(shot.motion_plan.plan_json, shot.plan_summary_json).pass, true);
   assert.equal(shot.blueprint.blueprint_json.generation_slots.filter((slot) => slot.source === 'image_api').length, 5);
   assert.equal(shot.blueprint.blueprint_json.generation_slots.some((slot) => slot.slot_key === 'support_front_mask' && slot.source === 'local_derivation'), true);
+  db.close();
+});
+
+test('independent environment-only blueprint reuses its composition reference and uses local procedural motion', () => {
+  const { db, run } = setup({
+    title: '漳河寒雾',
+    description: '漳河两岸被寒雾覆盖，远处城池若隐若现',
+    action: '',
+    environment_only: true,
+    duration: 10,
+    reference_local_path: 'references/zhanghe-cold-mist.png',
+  });
+  const analyzed = analyzerService.analyzeRun(db, log, run.id, {
+    request_id: randomUUID(), expected_version: run.version,
+  }, { fps: 30 });
+  const shot = shotService.get(db, analyzed.run.shots[0].id);
+  assert.equal(shot.plan_summary_json.environment_only, true);
+  assert.equal(shot.plan_summary_json.catalog_key, 'blueprint-environmental-depth-motion-v2');
+  assert.deepEqual(shot.families.map((family) => family.family_key), ['clean_environment']);
+  assert.deepEqual(shot.families[0].slots.map((slot) => slot.slot_key), ['clean_plate']);
+  assert.ok(shot.composition_nodes.some((node) => node.node_key === 'atmosphere_1' && node.node_kind === 'procedural'));
+  assert.ok(shot.composition_nodes.some((node) => node.node_key === 'ambient_flow' && node.node_kind === 'procedural'));
+  assert.equal(motionGateService.evaluate(shot.motion_plan.plan_json, shot.plan_summary_json).pass, true);
+  assert.deepEqual(shot.blueprint.blueprint_json.generation_slots, [{
+    family_key: 'clean_environment',
+    slot_key: 'clean_plate',
+    asset_type: 'environment',
+      reason: '漳河寒雾 · 环境底图',
+    required: true,
+    source: 'existing_asset',
+  }]);
+  const confirmed = analyzerService.confirmPlan(db, log, run.id, {
+    request_id: randomUUID(), expected_version: analyzed.run.version,
+  }).run;
+  const quote = authorizationService.buildQuote(db, run.id, {
+    request_id: randomUUID(), expected_version: confirmed.version,
+  });
+  assert.equal(quote.estimated_image_count, 0);
+  assert.deepEqual(quote.slots, []);
+  db.close();
+});
+
+test('independent strategic-map shot generates a clean map plus named commander markers and keeps overlays procedural', () => {
+  const { db, project, storyboard, run } = setup({
+    title: '秦军的绞索',
+    description: '俯拍战役地图，定陶、黄河、邯郸、巨鹿等地名依次亮起，黑色箭头最终将巨鹿团团包围。',
+    action: '王离题签“王离｜秦军围城主将｜王翦之孙”浮现；随后章邯题签“章邯｜秦军野战主帅”浮现。',
+    duration: 12,
+    reference_local_path: 'references/qin-route-map.png',
+  });
+  const now = '2026-07-26T00:01:00.000Z';
+  const insertEntity = db.prepare(`INSERT INTO paper_library_entities
+    (project_id,entity_type,name,description,status,created_at,updated_at)
+    VALUES (?,?,?,?,'approved',?,?)`);
+  const sceneId = Number(insertEntity.run(project.id, 'scene', '巨鹿南面', '错误的漳水两岸战场场景', now, now).lastInsertRowid);
+  const wangLiId = Number(insertEntity.run(project.id, 'character', '王离', '秦军将领', now, now).lastInsertRowid);
+  const zhangHanId = Number(insertEntity.run(project.id, 'character', '章邯', '秦军将领', now, now).lastInsertRowid);
+  const mapPropId = Number(insertEntity.run(project.id, 'prop', '战役地图', '旧绢地图', now, now).lastInsertRowid);
+  const sceneIdentityId = Number(db.prepare(`INSERT INTO paper_library_identity_versions
+    (entity_id,version_number,source_local_path,derivation_kind,status,created_at,accepted_at)
+    VALUES (?,1,'scenes/wrong-battlefield.png','image_api','approved',?,?)`).run(sceneId, now, now).lastInsertRowid);
+  db.prepare('UPDATE paper_library_entities SET current_identity_version_id = ? WHERE id = ?').run(sceneIdentityId, sceneId);
+  const insertLink = db.prepare(`INSERT INTO paper_storyboard_entity_links
+    (paper_storyboard_id,entity_id,role,sort_order,created_at,updated_at) VALUES (?,?,?,?,?,?)`);
+  insertLink.run(storyboard.id, sceneId, 'scene', 0, now, now);
+  insertLink.run(storyboard.id, wangLiId, 'subject', 0, now, now);
+  insertLink.run(storyboard.id, zhangHanId, 'subject', 1, now, now);
+  insertLink.run(storyboard.id, mapPropId, 'static_prop', 0, now, now);
+
+  const analyzed = analyzerService.analyzeRun(db, log, run.id, {
+    request_id: randomUUID(), expected_version: run.version,
+  }, { fps: 30 });
+  const shot = shotService.get(db, analyzed.run.shots[0].id);
+  assert.equal(shot.plan_summary_json.catalog_key, 'blueprint-map-route-reveal-v2');
+  assert.equal(shot.plan_summary_json.primary_action, 'map_route_reveal');
+  assert.deepEqual(shot.plan_summary_json.map_character_names, ['王离', '章邯']);
+  assert.deepEqual(shot.plan_summary_json.map_place_names, ['定陶', '黄河', '邯郸', '巨鹿']);
+  assert.equal(shot.plan_summary_json.required_asset_count, 3);
+  assert.deepEqual(
+    shot.families.flatMap((family) => family.slots).map((slot) => [slot.slot_key, slot.asset_type, slot.constraints_json.label]),
+    [
+      ['clean_plate', 'environment', '干净战役地图底图'],
+      ['map_character_1_cutout', 'character-cutout', '王离 · 地图人物剪影'],
+      ['map_character_2_cutout', 'character-cutout', '章邯 · 地图人物剪影'],
+    ],
+  );
+  const cleanSlot = shot.families[0].slots[0];
+  assert.equal(cleanSlot.constraints_json.allow_source_import, false);
+  assert.equal(assetService.sourceForSlot(db, shot, cleanSlot), null);
+  assert.equal(shot.families.flatMap((family) => family.slots).some((slot) => slot.asset_type === 'prop-cutout'), false);
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'route_reveal' && item.node_kind === 'procedural'));
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'encirclement' && item.node_kind === 'procedural'));
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'map_character_1_title' && item.relation_json.text.includes('秦军围城主将')));
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'map_character_2_title' && item.relation_json.text.includes('秦军野战主帅')));
+  assert.equal(motionGateService.evaluate(shot.motion_plan.plan_json, shot.plan_summary_json).pass, true);
+  const prompt = assetService.promptForSlot(db, shot, cleanSlot);
+  assert.match(prompt, /clean unannotated strategic-map base/);
+  assert.match(prompt, /Remove every route arrow/);
+  assert.doesNotMatch(prompt, /错误的漳水两岸战场场景/);
+
+  const confirmed = analyzerService.confirmPlan(db, log, run.id, {
+    request_id: randomUUID(), expected_version: analyzed.run.version,
+  }).run;
+  const quote = authorizationService.buildQuote(db, run.id, {
+    request_id: randomUUID(), expected_version: confirmed.version,
+  });
+  assert.equal(quote.estimated_image_count, 3);
+  assert.deepEqual(quote.slots.map((slot) => slot.slot_key), ['clean_plate', 'map_character_1_cutout', 'map_character_2_cutout']);
   db.close();
 });
 

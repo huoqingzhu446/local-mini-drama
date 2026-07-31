@@ -1,5 +1,5 @@
 const aggregateService = require('./paperRunAggregateService');
-const { CURRENT_PLANNER_VERSION } = require('./paperStudioPlannerVersion');
+const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStudioPlannerVersion');
 const { nowIso, parseJson } = require('./paperStudioUtils');
 
 const RESTART_MESSAGE = '服务重启时纸片任务仍在执行；为避免重复计费，已停止自动重试';
@@ -150,7 +150,7 @@ function recoverOnStartup(db, log) {
   ).all();
   for (const shot of plannedShots) {
     const summary = parseJson(shot.plan_summary_json, {});
-    if (Number(summary.planner_version || 0) === CURRENT_PLANNER_VERSION) continue;
+    if (isCurrentPlannerVersion(summary)) continue;
     const error = {
       code: 'PAPER_STUDIO_PLAN_VERSION_STALE',
       message: '该生产版本使用旧的场景化计划，已停止继续执行；请新建生产版本以使用通用能力链路',

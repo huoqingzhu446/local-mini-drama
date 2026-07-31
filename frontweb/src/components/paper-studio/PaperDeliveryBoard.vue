@@ -195,6 +195,7 @@ function productionLabel(status) {
 
 function audioLabel(item) {
   if (item.audio_mode === 'silent' && item.audio_ready) return '明确静音'
+  if (item.audio_ready && item.audio_duration_extended) return `音频完整 · 画面 ${Number(item.effective_duration_seconds || item.duration || 0).toFixed(0)}s`
   return item.audio_ready ? '音频完整' : '音频待补'
 }
 
@@ -206,6 +207,7 @@ function subtitleLabel(item) {
 
 function videoLabel(item) {
   if (!item.video_ready) return item.blockers?.some((entry) => entry.key === 'video_file') ? '文件缺失' : '未发布'
+  if (item.blockers?.some((entry) => entry.key === 'audio_duration')) return '视频短于完整声音'
   if (!item.audio_embedded) return '声音版本已变化'
   return '当前有声版本'
 }

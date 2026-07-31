@@ -102,6 +102,26 @@ test('naturalize：道具轨道被闭式滞后展开', () => {
   assert.ok(Math.abs(end - 0.2) < 0.02, '结尾追平');
 });
 
+test('naturalize：保留透明度和程序强度的显式线性连续性合同', () => {
+  const plan = {
+    duration_frames: 360,
+    subject_tracks: [
+      { target: 'siege_line', property: 'opacity', keyframes: [{ frame: 229, value: 0 }, { frame: 238, value: 1, easing: 'linear' }] },
+      { target: 'siege_line', property: 'procedural_amount', keyframes: [{ frame: 229, value: 0 }, { frame: 359, value: 1, easing: 'linear' }] },
+    ],
+    camera_tracks: [],
+  };
+  const out = naturalizer.naturalize(plan, naturalizer.DEFAULT_MOTION_QUALITY, resolver.resolveTrackValue);
+  const opacity = out.subject_tracks.find((track) => track.property === 'opacity');
+  const amount = out.subject_tracks.find((track) => track.property === 'procedural_amount');
+  assert.equal(opacity.keyframes[1].easing, 'linear');
+  assert.equal(amount.keyframes[1].easing, 'linear');
+  const maxOpacityStep = Math.max(...Array.from({ length: 9 }, (_, index) => (
+    Math.abs(resolver.resolveTrackValue(opacity, 230 + index) - resolver.resolveTrackValue(opacity, 229 + index))
+  )));
+  assert.ok(maxOpacityStep <= 0.12, `透明度单帧变化 ${maxOpacityStep} 不应超过门禁`);
+});
+
 test('velocityFor：中心差分速度正确', () => {
   const plan = { duration_frames: 60, subject_tracks: [{ target: 'a', property: 'x', keyframes: [{ frame: 0, value: 0 }, { frame: 59, value: 0.59 }] }], camera_tracks: [] };
   const v = resolver.velocityFor(plan, 'a', 30);

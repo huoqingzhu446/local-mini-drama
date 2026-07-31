@@ -16,12 +16,12 @@ const roleForNode = (node) => {
   return 'other';
 };
 
-export const nodeStyle = (node, motion, secondary = null) => {
+export const nodeStyle = (node, motion, secondary = null, contactAnchor = null) => {
   const transform = node.transform || {};
   const x = Number(transform.x == null ? 0.5 : transform.x) + Number(motion.x || 0) + Number(secondary?.x || 0);
   const y = Number(transform.y == null ? 0.5 : transform.y) + Number(motion.y || 0) + Number(secondary?.y || 0);
-  const anchorX = Number(transform.anchor_x == null ? 0.5 : transform.anchor_x);
-  const anchorY = Number(transform.anchor_y == null ? 0.5 : transform.anchor_y);
+  const anchorX = Number(contactAnchor?.x == null ? (transform.anchor_x == null ? 0.5 : transform.anchor_x) : contactAnchor.x);
+  const anchorY = Number(contactAnchor?.y == null ? (transform.anchor_y == null ? 0.5 : transform.anchor_y) : contactAnchor.y);
   const baseScale = Number(transform.scale || 1) * Number(motion.scale || 1);
   const scaleY = baseScale * (1 + Number(secondary?.scaleY || 0));
   const rotation = Number(transform.rotation || 0) + Number(motion.rotation || 0) + Number(secondary?.rotation || 0);
@@ -33,6 +33,7 @@ export const nodeStyle = (node, motion, secondary = null) => {
     width: percent(transform.width == null ? 1 : transform.width, 1),
     height: percent(transform.height == null ? 1 : transform.height, 1),
     opacity: Number(transform.opacity == null ? 1 : transform.opacity) * Number(motion.opacity == null ? 1 : motion.opacity),
+    filter: Number(motion.blur || 0) > 0 ? `blur(${Number(motion.blur).toFixed(3)}px)` : 'none',
     zIndex: Number(node.local_z || 0),
     transformOrigin: `${anchorX * 100}% ${anchorY * 100}%`,
     transform: `translate(${-anchorX * 100}%, ${-anchorY * 100}%) scale(${baseScale}, ${scaleY}) rotate(${rotation}deg)${skew ? ` skewX(${skew}deg)` : ''}`,
@@ -70,8 +71,12 @@ export const RecursiveNode = ({ node, snapshot, assetMap, frame, canvas, debug }
       relativeHeight: Number(node.relation?.relative_height || 1),
       tall,
     });
+    if (node.relation?.placement?.contact_lock) secondary = { ...secondary, y: 0 };
   }
-  const style = nodeStyle(node, motion, secondary);
+  const contactAnchor = node.relation?.state_contact_anchors?.[motion.state]
+    || node.relation?.contact_anchor
+    || null;
+  const style = nodeStyle(node, motion, secondary, contactAnchor);
   if (node.kind === 'asset') {
     const fade = quality && Number(quality.state_crossfade_frames || 0) > 0
       ? stateTransition(snapshot.motion_plan, node.key, frame, Number(quality.state_crossfade_frames))

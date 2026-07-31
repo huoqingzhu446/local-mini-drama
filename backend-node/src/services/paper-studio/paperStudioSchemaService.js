@@ -25,6 +25,7 @@ const schemas = {
   apiPaperIdentityReview: require('../../paper-studio-schema/api-paper-identity-review.schema.json'),
   apiPaperStoryboardGenerate: require('../../paper-studio-schema/api-paper-storyboard-generate.schema.json'),
   apiPaperStoryboardsApply: require('../../paper-studio-schema/api-paper-storyboards-apply.schema.json'),
+  apiPaperStoryboardsRepair: require('../../paper-studio-schema/api-paper-storyboards-repair.schema.json'),
   apiPaperStoryboardCreate: require('../../paper-studio-schema/api-paper-storyboard-create.schema.json'),
   apiPaperStoryboardUpdate: require('../../paper-studio-schema/api-paper-storyboard-update.schema.json'),
   apiPaperStoryboardReorder: require('../../paper-studio-schema/api-paper-storyboard-reorder.schema.json'),

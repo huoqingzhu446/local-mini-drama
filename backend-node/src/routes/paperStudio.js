@@ -24,6 +24,7 @@ const libraryService = require('../services/paper-studio/paperLibraryService');
 const identityProductionService = require('../services/paper-studio/paperIdentityProductionService');
 const storyboardGenerationService = require('../services/paper-studio/paperStoryboardGenerationService');
 const storyboardAudioService = require('../services/paper-studio/paperStoryboardAudioService');
+const audioTimingRecoveryService = require('../services/paper-studio/paperAudioTimingRecoveryService');
 const referenceService = require('../services/paper-studio/paperStoryboardReferenceService');
 const episodeMergeService = require('../services/paper-studio/paperEpisodeMergeService');
 const legacySyncService = require('../services/paper-studio/paperLegacySyncService');
@@ -170,6 +171,9 @@ module.exports = function paperStudioRoutes(db, cfg, log) {
     generateStoryboardsFromScript: handle('paper storyboards generate', async (req, res) => {
       response.success(res, await storyboardGenerationService.generate(db, cfg, log, req.params.episode_id, req.body || {}));
     }),
+    repairGeneratedStoryboards: handle('paper storyboards repair', async (req, res) => {
+      response.success(res, await storyboardGenerationService.repair(db, cfg, log, req.params.episode_id, req.body || {}));
+    }),
     applyGeneratedStoryboards: handle('paper storyboards apply', (req, res) => {
       response.success(res, storyboardGenerationService.apply(db, log, req.params.episode_id, req.body || {}));
     }),
@@ -307,6 +311,9 @@ module.exports = function paperStudioRoutes(db, cfg, log) {
     }),
     planMotion: handle('paper studio motion plan', (req, res) => {
       response.success(res, motionGateService.planMotion(db, cfg, log, req.params.id, req.body || {}));
+    }),
+    syncAudioTiming: handle('paper studio audio timing sync', (req, res) => {
+      response.success(res, audioTimingRecoveryService.reopen(db, cfg, log, req.params.id, req.body || {}));
     }),
     reviseMotion: handle('paper studio motion revise', (req, res) => {
       response.success(res, motionRevisionService.revise(db, cfg, log, req.params.id, req.body || {}));

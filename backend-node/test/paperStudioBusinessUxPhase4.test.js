@@ -112,6 +112,36 @@ test('uploaded dialogue and narration become immutable current versions with cue
   }
 });
 
+test('speech longer than the authored shot extends the production timeline instead of truncating audio or captions', async () => {
+  const { db, storage, cfg, storyboard } = setup();
+  try {
+    const dialogue = await audioService.upload(db, cfg, log, storyboard.id, {
+      request_id: randomUUID(), expected_version: storyboard.version, audio_kind: 'dialogue',
+      start_seconds: '0', captions_enabled: 'true',
+    }, audioFile(silentWav(0.35)));
+    const narration = await audioService.upload(db, cfg, log, storyboard.id, {
+      request_id: randomUUID(), expected_version: dialogue.storyboard.version, audio_kind: 'narration',
+      start_seconds: '0', captions_enabled: 'true',
+    }, audioFile(silentWav(5.2)));
+    assert.equal(narration.audio_version.end_frame, 156);
+    assert.equal(narration.audio.duration_extended, true);
+    assert.equal(narration.audio.authored_duration_seconds, 4);
+    assert.equal(narration.audio.speech_end_seconds, 5.2);
+    assert.equal(narration.audio.effective_duration_seconds, 6);
+    const bundle = audioService.snapshotBundle(db, cfg, {
+      paper_storyboard_id: storyboard.id,
+      storyboard: { dialogue: storyboard.dialogue, narration: storyboard.narration, duration: 4 },
+    });
+    const narrationSource = bundle.sources.find((item) => item.kind === 'narration');
+    assert.equal(narrationSource.duration_frames, 156);
+    assert.equal(bundle.captions.at(-1).end_frame, 156);
+    assert.equal(bundle.readiness.effective_duration_frames, 180);
+  } finally {
+    db.close();
+    fs.rmSync(storage, { recursive: true, force: true });
+  }
+});
+
 test('audio cue and subtitle edits create a new version without mutating the accepted file', async () => {
   const { db, storage, cfg, storyboard } = setup();
   try {
@@ -155,6 +185,29 @@ test('changing saved dialogue invalidates only its audio while preserving narrat
     assert.equal(db.prepare('SELECT status FROM paper_storyboard_audio_versions WHERE id = ?').get(narration.audio_version.id).status, 'ready');
     const workspace = audioService.workspace(db, cfg, storyboard.id);
     assert.deepEqual(workspace.missing.map((item) => item.kind), ['dialogue']);
+  } finally {
+    db.close();
+    fs.rmSync(storage, { recursive: true, force: true });
+  }
+});
+
+test('changing only the authored visual duration preserves current audio versions', async () => {
+  const { db, storage, cfg, storyboard } = setup();
+  try {
+    const dialogue = await audioService.upload(db, cfg, log, storyboard.id, {
+      request_id: randomUUID(), expected_version: storyboard.version, audio_kind: 'dialogue',
+    }, audioFile());
+    const narration = await audioService.upload(db, cfg, log, storyboard.id, {
+      request_id: randomUUID(), expected_version: dialogue.storyboard.version, audio_kind: 'narration',
+    }, audioFile());
+    const updated = storyboardService.update(db, log, storyboard.id, {
+      request_id: randomUUID(), expected_version: narration.storyboard.version, duration: 8,
+    });
+    assert.equal(updated.current_dialogue_audio_version_id, dialogue.audio_version.id);
+    assert.equal(updated.current_narration_audio_version_id, narration.audio_version.id);
+    assert.equal(db.prepare('SELECT status FROM paper_storyboard_audio_versions WHERE id = ?').get(dialogue.audio_version.id).status, 'ready');
+    assert.equal(db.prepare('SELECT status FROM paper_storyboard_audio_versions WHERE id = ?').get(narration.audio_version.id).status, 'ready');
+    assert.equal(audioService.workspace(db, cfg, storyboard.id).ready, true);
   } finally {
     db.close();
     fs.rmSync(storage, { recursive: true, force: true });

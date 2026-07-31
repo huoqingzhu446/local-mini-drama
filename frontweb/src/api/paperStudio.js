@@ -105,6 +105,9 @@ export const paperStudioAPI = {
   generateStoryboardsFromScript(episodeId, body) {
     return request.post(`/paper-studio/episodes/${episodeId}/generate-storyboards`, body, { timeout: 300000 })
   },
+  repairGeneratedStoryboards(episodeId, body) {
+    return request.post(`/paper-studio/episodes/${episodeId}/repair-generated-storyboards`, body, { timeout: 300000 })
+  },
   applyGeneratedStoryboards(episodeId, body) {
     return request.post(`/paper-studio/episodes/${episodeId}/apply-generated-storyboards`, body)
   },
@@ -234,6 +237,9 @@ export const paperStudioAPI = {
   },
   planMotion(shotId, body) {
     return request.post(`/paper-studio/shots/${shotId}/plan-motion`, body)
+  },
+  syncAudioTiming(shotId, body) {
+    return request.post(`/paper-studio/shots/${shotId}/sync-audio-timing`, body)
   },
   reviseMotion(shotId, body) {
     return request.post(`/paper-studio/shots/${shotId}/revise`, body)

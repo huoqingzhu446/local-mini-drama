@@ -47,6 +47,7 @@
       v-if="shot?.blueprint"
       :shot="shot"
       :busy="acting"
+      :regenerating-slot-id="regeneratingSlotId"
       @save="$emit('save-blueprint', $event)"
       @confirm="$emit('confirm-blueprint')"
     />
@@ -83,8 +84,8 @@
           <div v-if="shot?.plan_summary_json?.semantic_primitives?.length"><dt>能力组合</dt><dd>{{ primitiveSummary }}</dd></div>
           <div v-if="shot?.families?.length"><dt>素材族</dt><dd>{{ shot.families.length }} 组 / {{ slotCount }} 槽位</dd></div>
           <div v-if="shot?.continuity?.length"><dt>跨镜连续性</dt><dd>{{ continuitySummary }}</dd></div>
-          <div v-if="shot?.motion_revisions?.length"><dt>动作修订</dt><dd>{{ shot.motion_revisions.length }} 次</dd></div>
-          <div v-if="shot?.plan_summary_json?.camera_only === false"><dt>动态约束</dt><dd class="pass">主体动作已规划</dd></div>
+          <div v-if="shot?.motion_revisions?.length"><dt>{{ environmentOnly ? '环境动态修订' : '动作修订' }}</dt><dd>{{ shot.motion_revisions.length }} 次</dd></div>
+          <div v-if="shot?.plan_summary_json?.camera_only === false"><dt>动态约束</dt><dd class="pass">{{ environmentOnly ? '环境动态已规划' : '主体动作已规划' }}</dd></div>
         </dl>
         <div v-if="shot?.families?.length" class="family-list">
           <div v-for="family in shot.families" :key="family.id" class="family-row">
@@ -129,6 +130,7 @@ const props = defineProps({
   run: { type: Object, default: null },
   shot: { type: Object, default: null },
   acting: { type: Boolean, default: false },
+  regeneratingSlotId: { type: Number, default: null },
 })
 defineEmits([
   'approve-asset', 'rematte-asset', 'reject-asset', 'regenerate-asset',
@@ -136,15 +138,16 @@ defineEmits([
   'revise-motion', 'edit-audio',
 ])
 
-const steps = [
-  { key: 'plan', label: '镜头分析', detail: '关系与素材预算' },
-  { key: 'assets', label: '素材生产', detail: '母版、成员与 Alpha' },
-  { key: 'motion', label: '动作规划', detail: '主体动作与 cue' },
-  { key: 'proof', label: '动态门禁', detail: '像素与关系证据' },
+const environmentOnly = computed(() => Boolean(props.shot?.storyboard?.environment_only || props.shot?.plan_summary_json?.environment_only))
+const steps = computed(() => [
+  { key: 'plan', label: '镜头分析', detail: environmentOnly.value ? '环境层与动态意图' : '关系与素材预算' },
+  { key: 'assets', label: environmentOnly.value ? '环境底板' : '素材生产', detail: environmentOnly.value ? '一张底板 · 本地动态' : '母版、成员与 Alpha' },
+  { key: 'motion', label: environmentOnly.value ? '环境动态' : '动作规划', detail: environmentOnly.value ? '雾气、空气与运镜' : '主体动作与 cue' },
+  { key: 'proof', label: '动态检查', detail: '像素变化与关系证据' },
   { key: 'sound', label: '声音字幕', detail: '音轨版本与 cue' },
   { key: 'preview', label: '预览批准', detail: '同 snapshot 复核' },
   { key: 'publish', label: '正式发布', detail: '渲染与分镜合并' },
-]
+])
 
 const statusStep = {
   draft: 0, analyzing: 0, plan_review: 0, awaiting_generation_authorization: 1,
@@ -186,7 +189,10 @@ const continuitySummary = computed(() => {
   return failed ? `${failed} 项失败` : `${satisfied}/${items.length} 已锁定`
 })
 const phaseNote = computed(() => {
-  if (props.shot?.families?.length) return `系统已从当前分镜组合 ${primitiveSummary.value || '独立素材与主体动作'}；具体场景不是模式，所有镜头统一进入同一纸片动画生产链。`
+  if (props.shot?.families?.length) {
+    if (environmentOnly.value) return '系统只保留一张需要你审核的环境底板；雾气漂移、空气流动与轻微运镜由本地程序动画完成，不会额外调用图片 API。'
+    return `系统已从当前分镜组合 ${primitiveSummary.value || '独立素材与主体动作'}；具体场景不是模式，所有镜头统一进入同一纸片动画生产链。`
+  }
   return '生产版本已冻结；先执行镜头分析，生成干净背景、独立主体与动态证明计划。'
 })
 const audioGateTitle = computed(() => {
@@ -231,6 +237,14 @@ function tierLabel(tier) {
 function shortHash(hash) { return hash ? `${hash.slice(0, 15)}…${hash.slice(-6)}` : '未冻结' }
 function readySlots(family) { return (family?.slots || []).filter((slot) => slot.status === 'ready').length }
 function shotStatusLabel(status) {
+  if (environmentOnly.value) {
+    const environmentStatus = {
+      plan_confirmed: '环境计划已确认，等待生成授权', asset_pending: '环境底板生成中',
+      asset_review: '环境底板待审核', asset_ready: '环境底板已批准', motion_ready: '环境动态已就绪',
+      proof_ready: '环境动态检查通过', motion_failed: '环境动态需要自动修复', proof_failed: '环境动态证据未通过',
+    }[status]
+    if (environmentStatus) return environmentStatus
+  }
   return {
     pending: '待分析', analyzed: '已分析', plan_confirmed: '计划已确认，等待生成授权', asset_pending: '素材生产中',
     asset_review: '素材待人工审核',

@@ -134,6 +134,7 @@ function get(db, shotId) {
           parent_version_id: version.parent_version_id == null ? null : Number(version.parent_version_id),
           quality_report_json: parseJson(version.quality_report_json, {}),
           processing_json: parseJson(version.processing_json, {}),
+          registration_json: parseJson(version.registration_json, {}),
           provenance_json: parseJson(version.provenance_json, {}),
           latest_review_decision: decision ? { ...decision, id: Number(decision.id) } : null,
           preview_url: localPath ? `/static/${String(localPath).replace(/^\/+/, '')}` : null,
@@ -141,13 +142,14 @@ function get(db, shotId) {
       };
       const current = slot.current_version_id == null ? null : db.prepare(
         `SELECT id, parent_version_id, attempt_index, derivation_kind, source_local_path, alpha_local_path,
-                mask_local_path, source_hash, alpha_hash, processing_json, provenance_json, quality_report_json, status,
+                mask_local_path, source_hash, alpha_hash, processing_json, registration_json,
+                provenance_json, quality_report_json, status,
                 created_at, accepted_at, rejected_at
          FROM paper_asset_versions WHERE id = ? AND slot_id = ?`,
       ).get(Number(slot.current_version_id), Number(slot.id));
       const versions = db.prepare(
         `SELECT id, parent_version_id, attempt_index, derivation_kind, source_local_path, alpha_local_path,
-                mask_local_path, source_hash, alpha_hash, processing_json, provenance_json,
+                mask_local_path, source_hash, alpha_hash, processing_json, registration_json, provenance_json,
                 quality_report_json, status, created_at, accepted_at, rejected_at
          FROM paper_asset_versions WHERE slot_id = ? ORDER BY id DESC LIMIT 20`,
       ).all(Number(slot.id)).map(hydrateVersion);
@@ -191,15 +193,26 @@ function get(db, shotId) {
   } : null;
   const steps = db.prepare(
     `SELECT id, step_key, depends_on_json, status, attempt, max_attempts,
-            result_json, error_json, started_at, completed_at, updated_at
+            result_json, error_json, started_at, completed_at, updated_at,
+            authorization_id, user_visible_status
      FROM paper_job_steps WHERE shot_id = ? ORDER BY id`,
-  ).all(Number(shotId)).map((step) => ({
-    ...step,
-    id: Number(step.id),
-    depends_on_json: parseJson(step.depends_on_json, []),
-    result_json: parseJson(step.result_json, {}),
-    error_json: parseJson(step.error_json, {}),
-  }));
+  ).all(Number(shotId)).map((step) => {
+    const authorization = step.authorization_id == null ? null : db.prepare(
+      'SELECT slot_scope_json FROM paper_generation_authorizations WHERE id = ? AND deleted_at IS NULL',
+    ).get(Number(step.authorization_id));
+    const authorizedSlotIds = parseJson(authorization?.slot_scope_json, [])
+      .filter((item) => Number(item.shot_id) === Number(shotId))
+      .map((item) => Number(item.slot_id));
+    return {
+      ...step,
+      id: Number(step.id),
+      authorization_id: step.authorization_id == null ? null : Number(step.authorization_id),
+      authorized_slot_ids: authorizedSlotIds,
+      depends_on_json: parseJson(step.depends_on_json, []),
+      result_json: parseJson(step.result_json, {}),
+      error_json: parseJson(step.error_json, {}),
+    };
+  });
   const snapshotRow = shot.current_snapshot_id == null ? null : db.prepare(
     `SELECT id, schema_version, renderer_version, snapshot_hash, render_hash,
             local_path, status, approved_at, created_at

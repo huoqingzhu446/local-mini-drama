@@ -28,6 +28,10 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
   const identityGenerating = ref(false)
   const storyboardDraft = ref(null)
   const storyboardGenerating = ref(false)
+  const storyboardRepairing = ref(false)
+  const storyboardRepairPreview = ref(null)
+  const currentStoryboardRepairing = ref(false)
+  const currentStoryboardRepairPreview = ref(null)
   const episodeDelivery = ref(null)
   const taskCenter = ref(null)
   const taskCenterLoading = ref(false)
@@ -62,6 +66,9 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     if (!id) return
     draftByStoryboardId.value = { ...draftByStoryboardId.value, [id]: payload }
     draftDirtyByStoryboardId.value = { ...draftDirtyByStoryboardId.value, [id]: Boolean(dirty) }
+    if (dirty && Number(currentStoryboardRepairPreview.value?.paper_storyboard_id) === id) {
+      currentStoryboardRepairPreview.value = null
+    }
     if (dirty && saveStateByStoryboardId.value[id] !== 'saving') {
       saveStateByStoryboardId.value = { ...saveStateByStoryboardId.value, [id]: 'unsaved' }
     } else if (!dirty && saveStateByStoryboardId.value[id] !== 'saving') {
@@ -393,6 +400,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
   async function selectPaperStoryboard(storyboardId) {
     currentRun.value = null
     currentShot.value = null
+    currentStoryboardRepairPreview.value = null
     currentPaperStoryboard.value = paperStoryboards.value.find((item) => Number(item.id) === Number(storyboardId)) || null
     await Promise.all([
       loadReferenceCandidates(currentPaperStoryboard.value?.id),
@@ -418,6 +426,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
       const saved = paperStoryboards.value.find((item) => Number(item.id) === Number(response.storyboard.id)) || response.storyboard
       if (Number(currentPaperStoryboard.value?.id) === Number(saved.id)) currentPaperStoryboard.value = saved
       if (Number(currentPaperStoryboard.value?.id) === Number(saved.id)) await loadStoryboardAudio(saved.id)
+      draftByStoryboardId.value = { ...draftByStoryboardId.value, [source.id]: saved }
       draftDirtyByStoryboardId.value = { ...draftDirtyByStoryboardId.value, [source.id]: false }
       saveStateByStoryboardId.value = { ...saveStateByStoryboardId.value, [source.id]: 'saved' }
       return saved
@@ -603,6 +612,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
   async function generateStoryboardsDraft(params = {}) {
     if (!selectedEpisodeId.value) throw new Error('请先选择纸片分集')
     storyboardGenerating.value = true
+    storyboardRepairPreview.value = null
     try {
       const response = await paperStudioAPI.generateStoryboardsFromScript(selectedEpisodeId.value, {
         request_id: requestId(),
@@ -618,6 +628,95 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
 
   function clearStoryboardDraft() {
     storyboardDraft.value = null
+    storyboardRepairPreview.value = null
+  }
+
+  async function repairGeneratedStoryboardsDraft() {
+    if (!selectedEpisodeId.value || !storyboardDraft.value?.shots?.length) throw new Error('没有可补全的分镜草稿')
+    storyboardRepairing.value = true
+    storyboardRepairPreview.value = null
+    try {
+      const response = await paperStudioAPI.repairGeneratedStoryboards(selectedEpisodeId.value, {
+        request_id: requestId(),
+        ...(storyboardDraft.value.script?.id ? { script_version_id: Number(storyboardDraft.value.script.id) } : {}),
+        shots: storyboardDraft.value.shots,
+      })
+      storyboardRepairPreview.value = response
+      return response
+    } finally {
+      storyboardRepairing.value = false
+    }
+  }
+
+  function acceptStoryboardRepairPreview() {
+    if (!storyboardDraft.value || !storyboardRepairPreview.value?.shots?.length) return false
+    storyboardDraft.value = {
+      ...storyboardDraft.value,
+      shots: storyboardRepairPreview.value.shots,
+      issues: storyboardRepairPreview.value.issues || [],
+    }
+    storyboardRepairPreview.value = null
+    return true
+  }
+
+  function clearStoryboardRepairPreview() {
+    storyboardRepairPreview.value = null
+  }
+
+  async function repairCurrentPaperStoryboard() {
+    const source = currentPaperStoryboard.value
+    if (!selectedEpisodeId.value || !source) throw new Error('没有可补全的当前分镜')
+    currentStoryboardRepairing.value = true
+    currentStoryboardRepairPreview.value = null
+    try {
+      const response = await paperStudioAPI.repairGeneratedStoryboards(selectedEpisodeId.value, {
+        request_id: requestId(),
+        ...(latestScript.value?.id ? { script_version_id: Number(latestScript.value.id) } : {}),
+        shots: [{
+          title: source.title || '',
+          description: source.description || '',
+          action: source.action || '',
+          dialogue: source.dialogue || '',
+          narration: source.narration || '',
+          duration: Number(source.duration || currentEpisode.value?.default_duration || 6),
+          shot_type: source.shot_type || null,
+          camera_motion: source.camera_motion || null,
+          environment_only: Boolean(source.environment_only),
+        }],
+      })
+      if (Number(currentPaperStoryboard.value?.id) !== Number(source.id)) return { ...response, stale: true }
+      currentStoryboardRepairPreview.value = {
+        ...response,
+        paper_storyboard_id: Number(source.id),
+        source_version: Number(source.version),
+        patches: (response.patches || []).map((patch) => ({
+          ...patch,
+          shot_number: Number(source.shot_number),
+          title: source.title,
+        })),
+      }
+      return currentStoryboardRepairPreview.value
+    } finally {
+      currentStoryboardRepairing.value = false
+    }
+  }
+
+  async function acceptCurrentStoryboardRepairPreview() {
+    const preview = currentStoryboardRepairPreview.value
+    const source = currentPaperStoryboard.value
+    if (!preview?.patches?.length || Number(preview.paper_storyboard_id) !== Number(source?.id)) return null
+    if (Number(preview.source_version) !== Number(source.version)) {
+      currentStoryboardRepairPreview.value = null
+      throw new Error('分镜内容已更新，AI 补全建议已失效，请重新生成')
+    }
+    const payload = Object.fromEntries(preview.patches.map((patch) => [patch.field, patch.after]))
+    const saved = await savePaperStoryboard(payload, source.id)
+    currentStoryboardRepairPreview.value = null
+    return saved
+  }
+
+  function clearCurrentStoryboardRepairPreview() {
+    currentStoryboardRepairPreview.value = null
   }
 
   async function applyGeneratedStoryboards(mode = 'append') {
@@ -628,6 +727,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
       shots: storyboardDraft.value.shots,
     })
     storyboardDraft.value = null
+    storyboardRepairPreview.value = null
     paperStoryboards.value = response.storyboards || []
     currentPaperStoryboard.value = paperStoryboards.value[0] || null
     selectedStoryboardIds.value = paperStoryboards.value.map((item) => Number(item.id))
@@ -1228,6 +1328,30 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     }
   }
 
+  async function syncAudioTiming() {
+    if (!currentShot.value?.id || acting.value) return null
+    acting.value = true
+    error.value = null
+    const shotId = Number(currentShot.value.id)
+    const runId = Number(currentRun.value.id)
+    try {
+      const response = await paperStudioAPI.syncAudioTiming(shotId, {
+        request_id: requestId(),
+        expected_version: Number(currentShot.value.version),
+      })
+      await openRun(runId)
+      await openShot(shotId)
+      await Promise.all([loadRuns(), loadEpisodeDelivery()])
+      return response
+    } catch (cause) {
+      error.value = cause.message || '按完整声音重排镜头失败'
+      try { await openShot(shotId) } catch (_) {}
+      throw cause
+    } finally {
+      acting.value = false
+    }
+  }
+
   async function reviewAssets(action, assetVersionIds = [], reason = '') {
     if (!currentShot.value?.id || acting.value) return null
     acting.value = true
@@ -1441,10 +1565,20 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     identityGenerating,
     storyboardDraft,
     storyboardGenerating,
+    storyboardRepairing,
+    storyboardRepairPreview,
+    currentStoryboardRepairing,
+    currentStoryboardRepairPreview,
     generateIdentities,
     reviewIdentityVersion,
     generateStoryboardsDraft,
     clearStoryboardDraft,
+    repairGeneratedStoryboardsDraft,
+    acceptStoryboardRepairPreview,
+    clearStoryboardRepairPreview,
+    repairCurrentPaperStoryboard,
+    acceptCurrentStoryboardRepairPreview,
+    clearCurrentStoryboardRepairPreview,
     applyGeneratedStoryboards,
     generateReference,
     uploadReference,
@@ -1468,6 +1602,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     confirmBlueprint,
     runNextAction,
     advanceRun,
+    syncAudioTiming,
     reviseMotion,
     reviewAssets,
     uploadAssetReplacement,

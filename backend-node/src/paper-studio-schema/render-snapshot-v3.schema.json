@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["schema_version", "renderer_version", "composition", "source_revision_hash", "assets", "root", "motion_plan", "proof_targets", "provenance"],
   "properties": {
-    "schema_version": { "const": 3 },
+    "schema_version": { "enum": [3, 4] },
     "renderer_version": { "type": "string", "minLength": 1 },
     "source_revision_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "composition": {
@@ -41,6 +41,12 @@
         "lighting": { "type": "string" }
       }
     },
+    "motion_quality": { "type": "object", "additionalProperties": true },
+    "spatial_contract": { "type": "object", "additionalProperties": true },
+    "visual_scenes": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "visual_beats": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "transition_contracts": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "transition_gate": { "type": "object", "additionalProperties": true },
     "source_families": { "type": "array", "items": { "$ref": "https://localminidrama.local/schemas/paper-studio/source-family-v3.json" } },
     "assets": { "type": "array", "items": { "type": "object", "required": ["version_id", "local_path", "hash"], "properties": { "version_id": { "type": "integer", "minimum": 1 }, "local_path": { "type": "string", "minLength": 1 }, "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" } }, "additionalProperties": true } },
     "root": { "$ref": "https://localminidrama.local/schemas/paper-studio/composition-node-v3.json" },

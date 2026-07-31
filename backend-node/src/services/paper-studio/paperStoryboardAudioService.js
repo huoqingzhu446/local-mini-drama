@@ -6,6 +6,7 @@ const storyboardService = require('./paperStoryboardService');
 const storageLayout = require('../storageLayout');
 const ttsService = require('../ttsService');
 const runAggregateService = require('./paperRunAggregateService');
+const speechDurationService = require('./paperSpeechDurationService');
 const { ffprobeDurationSec } = require('../mergedEpisodePostProcess');
 const { safeStorageFile } = require('./paperAssetProductionService');
 const {
@@ -118,17 +119,45 @@ function splitCaptionText(text) {
 function buildCaptions(text, kind, startFrame, endFrame) {
   const chunks = splitCaptionText(text);
   if (!chunks.length) return [];
-  const span = Math.max(chunks.length, Number(endFrame) - Number(startFrame));
+  const start = Math.max(0, Math.round(Number(startFrame || 0)));
+  const end = Math.max(start + chunks.length, Math.round(Number(endFrame || start + chunks.length)));
+  const span = end - start;
+  const weights = chunks.map((caption) => {
+    const spoken = String(caption).replace(/[\s，。！？!?；;、：“”‘’（）()《》]/g, '').length;
+    const pause = (String(caption).match(/[，、]/g) || []).length * 0.35
+      + (String(caption).match(/[。！？!?；;]/g) || []).length * 0.8;
+    return Math.max(1, spoken + pause);
+  });
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+  let consumedWeight = 0;
   return chunks.map((caption, index) => ({
     key: `${kind}_${index + 1}`,
     kind,
     text: caption,
-    start_frame: Math.round(Number(startFrame) + ((span * index) / chunks.length)),
-    end_frame: Math.max(
-      Math.round(Number(startFrame) + ((span * (index + 1)) / chunks.length)),
-      Math.round(Number(startFrame) + ((span * index) / chunks.length)) + 1,
-    ),
+    start_frame: index === 0 ? start : Math.round(start + ((span * consumedWeight) / totalWeight)),
+    end_frame: (() => {
+      consumedWeight += weights[index];
+      return index === chunks.length - 1
+        ? end
+        : Math.max(start + index + 1, Math.round(start + ((span * consumedWeight) / totalWeight)));
+    })(),
+    timing_source: 'speech-weighted-estimate',
+  })).map((caption, index, all) => ({
+    ...caption,
+    start_frame: index === 0 ? start : all[index - 1].end_frame,
+    end_frame: Math.max(index === 0 ? start + 1 : all[index - 1].end_frame + 1, caption.end_frame),
   }));
+}
+
+function captionsForVersion(version, fps) {
+  const saved = Array.isArray(version?.captions_json) ? version.captions_json : [];
+  if (!saved.length) return [];
+  const startFrame = Math.max(0, Math.round(Number(version.start_frame || 0)));
+  const endFrame = speechDurationService.audioEndFrame(version, fps);
+  const savedStart = Number(saved[0]?.start_frame || 0);
+  const savedEnd = Number(saved.at(-1)?.end_frame || 0);
+  if (savedStart === startFrame && savedEnd === endFrame) return saved;
+  return buildCaptions(version.text_content, version.audio_kind, startFrame, endFrame);
 }
 
 function srtTimestamp(milliseconds) {
@@ -215,9 +244,11 @@ function nextVersionNumber(db, storyboardId, kind) {
 
 function readiness(db, cfg, storyboard, source = storyboard) {
   const mode = storyboard.audio_mode || 'auto';
-  const durationFrames = Math.max(2, Math.round(Number(source.duration || storyboard.duration || 6) * episodeFps(db, storyboard.id)));
+  const fps = episodeFps(db, storyboard.id);
+  const authoredDurationSeconds = Number(source.duration || storyboard.duration || 6);
   if (mode === 'silent') {
-    return { ready: true, mode, explicit_silence: true, required_kinds: [], missing: [], items: [], duration_frames: durationFrames };
+    const profile = speechDurationService.durationProfile({ authoredDurationSeconds, fps, versions: [] });
+    return { ready: true, mode, explicit_silence: true, required_kinds: [], missing: [], items: [], duration_frames: profile.effective_duration_frames, ...profile };
   }
   const requiredKinds = AUDIO_KINDS.filter((kind) => textForKind(source, kind));
   const missing = [];
@@ -245,6 +276,7 @@ function readiness(db, cfg, storyboard, source = storyboard) {
     if (!fileReady) missing.push({ kind, reason: version ? '音频与当前文本不一致或文件损坏' : '尚未生成或上传音频' });
     else items.push(version);
   }
+  const profile = speechDurationService.durationProfile({ authoredDurationSeconds, fps, versions: items });
   return {
     ready: missing.length === 0,
     mode,
@@ -252,7 +284,8 @@ function readiness(db, cfg, storyboard, source = storyboard) {
     required_kinds: requiredKinds,
     missing,
     items,
-    duration_frames: durationFrames,
+    duration_frames: profile.effective_duration_frames,
+    ...profile,
   };
 }
 
@@ -272,9 +305,44 @@ function workspace(db, cfg, storyboardId, source = null) {
     explicit_silence: result.explicit_silence,
     required_kinds: result.required_kinds,
     missing: result.missing,
+    fps: result.fps,
+    authored_duration_frames: result.authored_duration_frames,
+    authored_duration_seconds: result.authored_duration_seconds,
+    speech_end_frame: result.speech_end_frame,
+    speech_end_seconds: result.speech_end_seconds,
+    effective_duration_frames: result.effective_duration_frames,
+    effective_duration_seconds: result.effective_duration_seconds,
+    tail_padding_seconds: result.tail_padding_seconds,
+    overflow_frames: result.overflow_frames,
+    overflow_seconds: result.overflow_seconds,
+    duration_extended: result.duration_extended,
+    authored_fits_speech: result.authored_fits_speech,
+    timing_tracks: result.tracks,
     dialogue: currentVersion(db, storyboard, 'dialogue'),
     narration: currentVersion(db, storyboard, 'narration'),
     history,
+  };
+}
+
+function applyTimingToContext(db, context, fps = 30) {
+  if (!context?.storyboard?.paper_storyboard_id && context?.source_kind !== 'paper') return context;
+  const storyboardId = Number(context.storyboard.paper_storyboard_id || context.storyboard.id);
+  const liveStoryboard = storyboardService.get(db, storyboardId);
+  const result = readiness(db, null, liveStoryboard, context.storyboard);
+  const captions = result.items.flatMap((version) => captionsForVersion(version, fps).map((caption) => ({
+    ...caption,
+    audio_version_id: Number(version.id),
+  })));
+  return {
+    ...context,
+    audio_timing: result,
+    storyboard: {
+      ...context.storyboard,
+      authored_duration: Number(context.storyboard.duration || 0),
+      duration: Number(result.effective_duration_seconds || context.storyboard.duration || 6),
+      audio_captions: captions,
+      audio_duration_extended: Boolean(result.duration_extended),
+    },
   };
 }
 
@@ -340,8 +408,7 @@ async function synthesize(db, cfg, log, storyboardId, body = {}) {
   const text = textForKind(storyboard, kind);
   if (!text) throw new PaperStudioError('PAPER_AUDIO_TEXT_EMPTY', kind === 'dialogue' ? '请先保存对白文本' : '请先保存旁白文本', { audio_kind: kind }, 409);
   const fps = episodeFps(db, storyboard.id);
-  const durationFrames = Math.max(2, Math.round(Number(storyboard.duration || 6) * fps));
-  const startFrame = Math.min(durationFrames - 1, Math.max(0, Math.round(Number(body.start_seconds || 0) * fps)));
+  const startFrame = Math.max(0, Math.round(Number(body.start_seconds || 0) * fps));
   const outputSubdir = audioDirectory(db, storyboard);
   const generated = await ttsService.synthesize(db, log, {
     text,
@@ -358,7 +425,7 @@ async function synthesize(db, cfg, log, storyboardId, body = {}) {
     try { fs.unlinkSync(absolute); } catch (_) {}
     throw new PaperStudioError('PAPER_AUDIO_FILE_INVALID', 'TTS 返回的音频无法读取', null, 422);
   }
-  const endFrame = Math.min(durationFrames, Math.max(startFrame + 1, startFrame + Math.ceil(durationSeconds * fps)));
+  const endFrame = Math.max(startFrame + 1, startFrame + Math.ceil(durationSeconds * fps));
   const captionText = body.caption_text == null ? text : String(body.caption_text).trim();
   const captions = body.captions_enabled === false ? [] : buildCaptions(captionText, kind, startFrame, endFrame);
   return insertAndActivate(db, cfg, storyboard, {
@@ -413,9 +480,8 @@ async function upload(db, cfg, log, storyboardId, body = {}, file = null) {
     throw new PaperStudioError('PAPER_AUDIO_FILE_INVALID', '上传文件不是可读取的音频', { mime_type: file.mimetype || null }, 422);
   }
   const fps = episodeFps(db, storyboard.id);
-  const durationFrames = Math.max(2, Math.round(Number(storyboard.duration || 6) * fps));
-  const startFrame = Math.min(durationFrames - 1, Math.max(0, Math.round(input.start_seconds * fps)));
-  const endFrame = Math.min(durationFrames, Math.max(startFrame + 1, startFrame + Math.ceil(durationSeconds * fps)));
+  const startFrame = Math.max(0, Math.round(input.start_seconds * fps));
+  const endFrame = Math.max(startFrame + 1, startFrame + Math.ceil(durationSeconds * fps));
   const captionText = input.caption_text == null ? text : String(input.caption_text).trim();
   const captions = input.captions_enabled ? buildCaptions(captionText, kind, startFrame, endFrame) : [];
   const result = insertAndActivate(db, cfg, storyboard, {
@@ -447,10 +513,9 @@ function revise(db, cfg, log, storyboardId, versionId, body = {}) {
   if (Number(source.paper_storyboard_id) !== Number(storyboard.id)) throw new PaperStudioError('PAPER_AUDIO_OWNERSHIP_MISMATCH', '音频版本不属于当前纸片分镜', null, 409);
   if (Number(storyboard[POINTER_COLUMN[source.audio_kind]] || 0) !== Number(source.id)) throw new PaperStudioError('PAPER_AUDIO_NOT_CURRENT', '只能修订当前使用中的音频版本', { audio_version_id: source.id }, 409);
   const fps = episodeFps(db, storyboard.id);
-  const durationFrames = Math.max(2, Math.round(Number(storyboard.duration || 6) * fps));
-  const startFrame = body.start_seconds == null ? source.start_frame : Math.min(durationFrames - 1, Math.max(0, Math.round(Number(body.start_seconds) * fps)));
+  const startFrame = body.start_seconds == null ? source.start_frame : Math.max(0, Math.round(Number(body.start_seconds) * fps));
   const audioFrames = Math.max(1, Math.ceil((Number(source.duration_ms || 0) / 1000) * fps));
-  const endFrame = Math.min(durationFrames, startFrame + audioFrames);
+  const endFrame = startFrame + audioFrames;
   const captionsEnabled = body.captions_enabled == null ? source.captions_json.length > 0 : body.captions_enabled;
   const captionText = body.caption_text == null ? source.text_content : String(body.caption_text).trim();
   const captions = captionsEnabled ? buildCaptions(captionText, source.audio_kind, startFrame, endFrame) : [];
@@ -501,8 +566,11 @@ function setPolicy(db, cfg, log, storyboardId, body = {}) {
 
 function invalidateChangedText(db, storyboardId, previous, current, now = nowIso()) {
   const changedKinds = AUDIO_KINDS.filter((kind) => textForKind(previous, kind) !== textForKind(current, kind));
-  if (!changedKinds.length && Number(previous?.duration || 0) === Number(current?.duration || 0)) return { changed_kinds: [], invalidated_audio_version_ids: [] };
-  const kinds = changedKinds.length ? changedKinds : AUDIO_KINDS;
+  // Duration-only edits change the visual timeline, not the spoken file or its
+  // text identity. Keep the approved audio and let the motion/snapshot chain
+  // reflow it instead of forcing another TTS call.
+  if (!changedKinds.length) return { changed_kinds: [], invalidated_audio_version_ids: [] };
+  const kinds = changedKinds;
   const invalidated = [];
   for (const kind of kinds) {
     const pointer = POINTER_COLUMN[kind];
@@ -537,10 +605,10 @@ function snapshotBundle(db, cfg, detail) {
     text_hash: version.text_hash,
     captions_hash: version.captions_hash,
     from_frame: Number(version.start_frame || 0),
-    duration_frames: Math.max(1, Number(version.end_frame || result.duration_frames) - Number(version.start_frame || 0)),
+    duration_frames: Math.max(1, speechDurationService.audioEndFrame(version, result.fps) - Number(version.start_frame || 0)),
     volume: Number(version.volume == null ? 1 : version.volume),
   }));
-  const captions = result.items.flatMap((version) => version.captions_json.map((caption) => ({
+  const captions = result.items.flatMap((version) => captionsForVersion(version, result.fps).map((caption) => ({
     ...caption,
     audio_version_id: Number(version.id),
   })));
@@ -551,6 +619,8 @@ module.exports = {
   AUDIO_KINDS,
   POINTER_COLUMN,
   buildCaptions,
+  captionsForVersion,
+  applyTimingToContext,
   getVersion,
   readiness,
   workspace,

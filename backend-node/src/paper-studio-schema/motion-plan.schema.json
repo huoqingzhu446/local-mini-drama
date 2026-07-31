@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": ["schema_version", "fps", "duration_frames", "primary_action", "camera_only", "subject_tracks", "camera_tracks"],
   "properties": {
-    "schema_version": { "const": 1 },
+    "schema_version": { "enum": [1, 2] },
     "fps": { "type": "integer", "minimum": 12, "maximum": 60 },
     "duration_frames": { "type": "integer", "minimum": 2 },
     "primary_action": { "type": "string", "minLength": 1 },
@@ -18,6 +18,18 @@
       "type": "array",
       "items": { "$ref": "#/$defs/track" }
     },
+    "scene_tracks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/track" }
+    },
+    "transition_tracks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/track" }
+    },
+    "visual_beats": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "transition_contracts": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+    "motion_profile": { "enum": ["gentle", "normal", "impact", "hard_cut"] },
+    "exceptions": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
     "cues": {
       "type": "array",
       "items": {
@@ -39,14 +51,15 @@
           "key": { "type": "string", "minLength": 1 },
           "metric": { "enum": ["numeric_range", "distinct_states", "initial_value", "final_value", "cue_value", "cue_exists"] },
           "target": { "type": "string", "minLength": 1 },
-          "property": { "enum": ["x", "y", "rotation", "scale", "opacity", "state", "clip_progress", "procedural_amount"] },
+          "property": { "enum": ["x", "y", "rotation", "scale", "opacity", "blur", "state", "clip_progress", "procedural_amount"] },
           "cue": { "type": "string", "minLength": 1 },
           "min": { "type": "number" },
           "max": { "type": "number" }
         },
         "additionalProperties": false
       }
-    }
+    },
+    "naturalized": { "type": "object", "additionalProperties": true }
   },
   "$defs": {
     "track": {
@@ -55,7 +68,8 @@
       "required": ["target", "property", "keyframes"],
       "properties": {
         "target": { "type": "string", "minLength": 1 },
-        "property": { "enum": ["x", "y", "rotation", "scale", "opacity", "state", "clip_progress", "procedural_amount"] },
+        "property": { "enum": ["x", "y", "rotation", "scale", "opacity", "blur", "state", "clip_progress", "procedural_amount"] },
+        "lagged": { "type": "boolean" },
         "keyframes": {
           "type": "array",
           "minItems": 2,
@@ -65,7 +79,11 @@
             "properties": {
               "frame": { "type": "integer", "minimum": 0 },
               "value": {},
-              "easing": { "type": "string" }
+              "easing": { "type": "string" },
+              "easing_params": { "type": "object", "additionalProperties": true },
+              "anticipation": { "type": "boolean" },
+              "arc": { "type": "boolean" },
+              "hold": { "type": "boolean" }
             },
             "additionalProperties": false
           }

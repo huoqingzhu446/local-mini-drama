@@ -8,6 +8,8 @@ const revisionService = require('./paperSourceRevisionService');
 const storyboardAudioService = require('./paperStoryboardAudioService');
 const shotService = require('./paperStudioShotService');
 const sourceService = require('./paperStudioSourceService');
+const spatialContractService = require('./paperSpatialContractService');
+const transitionGateService = require('./paperTransitionGateService');
 const { safeStorageFile } = require('./paperAssetProductionService');
 const {
   PaperStudioError,
@@ -52,7 +54,7 @@ function visualStyleForSnapshot(db, dramaId) {
 
 function acceptedAssets(db, shotId) {
   return db.prepare(
-    `SELECT pav.*, pas.slot_key, pas.asset_type, pas.generation_purpose,
+    `SELECT pav.*, pas.slot_key, pas.asset_type, pas.generation_purpose, pas.constraints_json,
             pas.required_for_gate, psf.family_key, psf.pattern
      FROM paper_asset_slots pas
      JOIN paper_source_families psf ON psf.id = pas.family_id
@@ -169,7 +171,7 @@ function compile(db, cfg, shotId) {
   }
   assertSourceCurrent(db, detail, run);
   const versions = assertAssetVersions(cfg, acceptedAssets(db, detail.id));
-  const root = compositionTree(detail, versions);
+  const root = spatialContractService.enrichComposition(compositionTree(detail, versions), versions);
   // M1/M5 运动自然化：仅作用于 snapshot 拷贝；配置关闭或历史 snapshot 保持旧行为
   const motionQuality = motionNaturalizer.motionQualityFromConfig(cfg);
   const motionPlan = motionNaturalizer.naturalize(detail.motion_plan.plan_json, motionQuality, resolveTrackValue);
@@ -179,8 +181,37 @@ function compile(db, cfg, shotId) {
   const audioBundle = detail.paper_storyboard_id
     ? storyboardAudioService.snapshotBundle(db, cfg, detail)
     : { sources: audioSources(db, cfg, detail), captions: [] };
+  const requiredAudioFrames = Number(audioBundle.readiness?.effective_duration_frames || 0);
+  if (requiredAudioFrames > Number(motionPlan.duration_frames || 0)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_AUDIO_DURATION_OVERFLOW',
+      '完整语音长于当前动作时间轴，请先按声音自动延长画面',
+      {
+        shot_id: Number(detail.id),
+        motion_duration_frames: Number(motionPlan.duration_frames || 0),
+        required_duration_frames: requiredAudioFrames,
+        authored_duration_seconds: audioBundle.readiness.authored_duration_seconds,
+        speech_end_seconds: audioBundle.readiness.speech_end_seconds,
+        effective_duration_seconds: audioBundle.readiness.effective_duration_seconds,
+      },
+      409,
+    );
+  }
+  const plannerVersion = Number(detail.plan_summary_json?.planner_version || 0);
+  const snapshotVersion = plannerVersion >= 9 && Number(motionPlan.schema_version || 1) >= 2 ? 4 : 3;
+  const transitionGate = transitionGateService.assertPlan(motionPlan, {
+    planner_version: plannerVersion,
+    visual_scenes: detail.plan_summary_json?.visual_scenes || detail.semantic_contract_json?.visual_scenes || [],
+    transition_contracts: detail.plan_summary_json?.transition_contracts || motionPlan.transition_contracts || [],
+    semantic_contract: detail.semantic_contract_json,
+    root,
+    source_families: sourceFamilies,
+    spatial_contract: detail.plan_summary_json?.spatial_contract || {},
+    visual_beats: detail.plan_summary_json?.visual_beats || motionPlan.visual_beats || [],
+    captions: audioBundle.captions || [],
+  }, '自然化后的冻结时间轴未通过场景连续性门禁');
   const snapshot = {
-    schema_version: 3,
+    schema_version: snapshotVersion,
     renderer_version: cfg?.paper_studio?.renderer_version || RENDERER_VERSION,
     source_revision_hash: detail.source_revision_hash,
     composition: { width: 1920, height: 1080, fps: Number(motionPlan.fps), duration_frames: Number(motionPlan.duration_frames) },
@@ -194,9 +225,19 @@ function compile(db, cfg, shotId) {
       local_path: version.resolved_local_path,
       hash: version.resolved_hash,
       derivation_kind: version.derivation_kind,
+      registration: spatialContractService.rawRegistration(version),
+      width: Number(parseJson(version.quality_report_json, {}).width || 0),
+      height: Number(parseJson(version.quality_report_json, {}).height || 0),
     })),
     root,
     motion_plan: motionPlan,
+    spatial_contract: detail.plan_summary_json?.spatial_contract || { placement_regions: [], nodes: [] },
+    ...(snapshotVersion >= 4 ? {
+      visual_scenes: detail.plan_summary_json?.visual_scenes || detail.semantic_contract_json?.visual_scenes || [],
+      visual_beats: detail.plan_summary_json?.visual_beats || motionPlan.visual_beats || [],
+      transition_contracts: detail.plan_summary_json?.transition_contracts || motionPlan.transition_contracts || [],
+      transition_gate: transitionGate,
+    } : {}),
     ...(motionQuality ? { motion_quality: motionQuality } : {}),
     audio: audioBundle.sources,
     captions: audioBundle.captions,
@@ -206,11 +247,13 @@ function compile(db, cfg, shotId) {
       paper_storyboard_id: detail.paper_storyboard_id == null ? null : Number(detail.paper_storyboard_id),
       paper_storyboard_revision_id: detail.paper_storyboard_revision_id == null ? null : Number(detail.paper_storyboard_revision_id),
       catalog_key: detail.plan_summary_json?.catalog_key || null,
+      planner_version: Number(detail.plan_summary_json?.planner_version || 0),
       renderer_version: cfg?.paper_studio?.renderer_version || RENDERER_VERSION,
       proof_rule_version: cfg?.paper_studio?.proof_rule_version || 'paper-proof-v3',
     },
     limits: { seed: 1701, deterministic: true, max_nodes: 80, max_proof_targets: 20 },
   };
+  spatialContractService.assertSnapshot(snapshot);
   const contentHash = sha256(canonicalJson(snapshot));
   snapshot.provenance.snapshot_hash = contentHash;
   const renderHash = sha256(canonicalJson({
@@ -223,7 +266,7 @@ function compile(db, cfg, shotId) {
     proof_rule_version: snapshot.provenance.proof_rule_version,
   }));
   snapshot.provenance.render_hash = renderHash;
-  schemaService.assertValid('renderSnapshotV3', snapshot, '冻结渲染快照不符合 v3 Schema');
+  schemaService.assertValid('renderSnapshotV3', snapshot, `冻结渲染快照不符合 v${snapshotVersion} Schema`);
   const bytes = Buffer.byteLength(JSON.stringify(snapshot));
   const maxBytes = Number(cfg?.paper_studio?.max_snapshot_bytes || 5 * 1024 * 1024);
   if (bytes > maxBytes) throw new PaperStudioError('PAPER_STUDIO_SNAPSHOT_TOO_LARGE', '渲染快照超过大小限制', { bytes, max_bytes: maxBytes }, 422);
@@ -239,8 +282,8 @@ function compile(db, cfg, shotId) {
     `INSERT INTO paper_render_snapshots
       (shot_id, schema_version, renderer_version, source_revision_hash, timing_hash,
        snapshot_json, snapshot_hash, render_hash, local_path, status, created_at)
-     VALUES (?, 3, ?, ?, ?, ?, ?, ?, ?, 'compiled', ?)`,
-  ).run(Number(detail.id), snapshot.renderer_version, detail.source_revision_hash, timingHash, JSON.stringify(snapshot), contentHash, renderHash, relative, nowIso());
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'compiled', ?)`,
+  ).run(Number(detail.id), snapshotVersion, snapshot.renderer_version, detail.source_revision_hash, timingHash, JSON.stringify(snapshot), contentHash, renderHash, relative, nowIso());
   return { snapshot_id: Number(result.lastInsertRowid), snapshot, snapshot_hash: contentHash, render_hash: renderHash, reused: false, local_path: relative };
 }
 

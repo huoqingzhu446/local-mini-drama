@@ -1,6 +1,8 @@
 const schemaService = require('./paperStudioSchemaService');
 const shotService = require('./paperStudioShotService');
 const runAggregateService = require('./paperRunAggregateService');
+const sourceService = require('./paperStudioSourceService');
+const spatialContractService = require('./paperSpatialContractService');
 const {
   PaperStudioError,
   assertExpectedVersion,
@@ -10,7 +12,7 @@ const {
 
 function currentVersions(db, shotId) {
   return db.prepare(
-    `SELECT pav.*, pas.id AS slot_id, pas.slot_key, pas.required_for_gate,
+    `SELECT pav.*, pas.id AS slot_id, pas.slot_key, pas.asset_type, pas.required_for_gate, pas.constraints_json,
             psf.id AS family_id, psf.family_key
      FROM paper_asset_slots pas
      JOIN paper_source_families psf ON psf.id = pas.family_id
@@ -72,14 +74,59 @@ function approve(db, shot, body, rows) {
   const selected = rows.filter((row) => wanted.has(Number(row.id)));
   if (selected.length !== 1) throw new PaperStudioError('PAPER_STUDIO_ASSET_VERSION_NOT_CURRENT', '一次只能批准当前正在使用的一张素材', { asset_version_ids: [...wanted] }, 409);
   if (selected[0].status !== 'accepted') throw new PaperStudioError('PAPER_STUDIO_ASSET_TECHNICAL_GATE_REQUIRED', '该素材尚未通过尺寸或透明通道技术门禁', { asset_version_id: Number(selected[0].id) }, 409);
+  const selectedQuality = parseJson(selected[0].quality_report_json, {});
+  const selectedConstraints = parseJson(selected[0].constraints_json, {});
+  const selectedReference = sourceService.isPaperShot(shot) ? sourceService.referenceMedia(db, shot) : null;
+  if (selected[0].asset_type === 'environment'
+    && selected[0].derivation_kind === 'image_api'
+    && selectedReference
+    && selectedConstraints.use_storyboard_composition_reference !== false
+    && (Number(selectedQuality.reference_count || 0) < 1 || selectedQuality.reference_gate_passed === false)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_COMPOSITION_REFERENCE_GATE_REQUIRED',
+      '这版正式环境素材没有携带已选构图参考，不能批准；请只重新生成这一张',
+      { asset_version_id: Number(selected[0].id), selected_reference: selectedReference },
+      409,
+    );
+  }
+  if (selected[0].asset_type === 'environment'
+    && Number(shot.plan_summary_json?.planner_version || 0) >= 9
+    && Array.isArray(shot.plan_summary_json?.visual_scenes)
+    && shot.plan_summary_json.visual_scenes.length > 0
+    && (!selectedConstraints.scene_key || !selectedConstraints.environment_description)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_SCENE_ASSET_CONTRACT_MISSING',
+      '环境素材没有标明所属场景或场景内容，不能批准进入转场渲染',
+      { asset_version_id: Number(selected[0].id), family_key: selected[0].family_key },
+      409,
+    );
+  }
+  if (selected[0].asset_type === 'environment'
+    && selectedConstraints.reference_role === 'style_only'
+    && (Number(selectedQuality.reference_count || 0) < 1 || selectedQuality.reference_gate_passed === false)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_STYLE_REFERENCE_GATE_REQUIRED',
+      '第二场景正式环境素材缺少风格连续性参考，不能批准；请只重新生成这一张',
+      { asset_version_id: Number(selected[0].id), scene_key: selectedConstraints.scene_key || null },
+      409,
+    );
+  }
   const now = nowIso();
-  const review = { status: 'approved', request_id: body.request_id, reviewed_at: now, asset_version_id: Number(selected[0].id) };
+  const review = {
+    status: 'approved', request_id: body.request_id, reviewed_at: now, asset_version_id: Number(selected[0].id),
+    scene_key: selectedConstraints.scene_key || null,
+    environment_description: selectedConstraints.environment_description || null,
+    reference_role: selectedConstraints.reference_role || null,
+  };
+  const registration = selected[0].asset_type === 'environment'
+    ? parseJson(selected[0].registration_json, {})
+    : spatialContractService.rawRegistration(selected[0]);
   let progress;
   let decision;
   const transaction = db.transaction(() => {
     decision = insertDecision(db, shot, selected[0], body, 'approved');
-    db.prepare('UPDATE paper_asset_versions SET quality_report_json = ? WHERE id = ?')
-      .run(reviewedQuality(selected[0], review), Number(selected[0].id));
+    db.prepare('UPDATE paper_asset_versions SET quality_report_json = ?, registration_json = ? WHERE id = ?')
+      .run(reviewedQuality(selected[0], review), JSON.stringify(registration || {}), Number(selected[0].id));
     progress = reviewProgress(currentVersions(db, shot.id));
     if (progress.complete) {
       db.prepare("UPDATE paper_source_families SET status = 'ready', version = version + 1, updated_at = ? WHERE shot_id = ? AND deleted_at IS NULL").run(now, Number(shot.id));
@@ -97,7 +144,7 @@ function approve(db, shot, body, rows) {
 }
 
 function reject(db, shot, body, rows) {
-  if (!['asset_review', 'asset_ready', 'motion_ready', 'proof_ready', 'preview_ready', 'asset_failed'].includes(shot.status)) {
+  if (!['asset_review', 'asset_ready', 'motion_failed', 'motion_ready', 'proof_ready', 'preview_ready', 'asset_failed'].includes(shot.status)) {
     throw new PaperStudioError('PAPER_STUDIO_ASSET_REVIEW_STATE_CONFLICT', '当前镜头状态不允许退回素材', { shot_id: shot.id, status: shot.status }, 409);
   }
   const wanted = new Set(body.asset_version_ids.map(Number));

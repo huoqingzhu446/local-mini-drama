@@ -48,3 +48,9 @@ test('paper-tokens.css 存在且定义了完整字阶', () => {
     assert.ok(css.includes(token), `缺少令牌 ${token}`)
   }
 })
+
+test('纸片分镜列表使用独立类名，避免继承旧工作台亮色卡片样式', () => {
+  const source = readFileSync(join(root, 'components', 'paper-studio', 'PaperStoryboardRail.vue'), 'utf8')
+  assert.match(source, /class="paper-storyboard-row"/)
+  assert.doesNotMatch(source, /class="storyboard-row"/)
+})
