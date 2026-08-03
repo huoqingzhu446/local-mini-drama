@@ -5,6 +5,7 @@ const blueprintService = require('./paperBlueprintService');
 
 function rowToShot(row) {
   if (!row) return null;
+  const lastError = parseJson(row.last_error_json, {});
   const paperContent = parseJson(row.paper_revision_content_json, null);
   const paperSource = row.source_kind === 'paper' || row.paper_storyboard_revision_id != null;
   const storyboard = paperSource ? {
@@ -46,13 +47,14 @@ function rowToShot(row) {
     legacy_storyboard_id: row.legacy_storyboard_id == null ? null : Number(row.legacy_storyboard_id),
     blueprint_revision_id: row.blueprint_revision_id == null ? null : Number(row.blueprint_revision_id),
     action_contract_id: row.action_contract_id == null ? null : Number(row.action_contract_id),
+    current_plan_revision_id: row.current_plan_revision_id == null ? null : Number(row.current_plan_revision_id),
     shot_index: Number(row.shot_index),
     semantic_contract_json: parseJson(row.semantic_contract_json, {}),
     plan_summary_json: parseJson(row.plan_summary_json, {}),
-    last_error_json: parseJson(row.last_error_json, {}),
+    last_error_json: lastError,
     version: Number(row.version || 1),
     attention_required: row.attention_required || 'none',
-    next_action: nextActionForShot(row.status),
+    next_action: nextActionForShot(row.status, lastError),
     storyboard,
   };
 }
@@ -98,16 +100,17 @@ function get(db, shotId) {
     );
   }
   const shot = rowToShot(row);
+  const currentPlanRevisionId = Number(shot.current_plan_revision_id || 0);
   const familySummary = db.prepare(
     `SELECT status, COUNT(*) AS count
-     FROM paper_source_families WHERE shot_id = ? AND deleted_at IS NULL
+     FROM paper_source_families WHERE shot_id = ? AND plan_revision_id = ? AND deleted_at IS NULL
      GROUP BY status`,
-  ).all(Number(shotId));
+  ).all(Number(shotId), currentPlanRevisionId);
   const families = db.prepare(
     `SELECT * FROM paper_source_families
-     WHERE shot_id = ? AND deleted_at IS NULL
+     WHERE shot_id = ? AND plan_revision_id = ? AND deleted_at IS NULL
      ORDER BY id`,
-  ).all(Number(shotId)).map((family) => ({
+  ).all(Number(shotId), currentPlanRevisionId).map((family) => ({
     ...family,
     id: Number(family.id),
     shot_id: Number(family.shot_id),
@@ -167,9 +170,9 @@ function get(db, shotId) {
   }));
   const nodes = db.prepare(
     `SELECT * FROM paper_composition_nodes
-     WHERE shot_id = ? AND deleted_at IS NULL
+     WHERE shot_id = ? AND plan_revision_id = ? AND deleted_at IS NULL
      ORDER BY parent_node_id, local_z, id`,
-  ).all(Number(shotId)).map((node) => ({
+  ).all(Number(shotId), currentPlanRevisionId).map((node) => ({
     ...node,
     id: Number(node.id),
     shot_id: Number(node.shot_id),
@@ -181,8 +184,8 @@ function get(db, shotId) {
     version: Number(node.version || 1),
   }));
   const motionRow = db.prepare(
-    'SELECT * FROM paper_motion_plans WHERE shot_id = ?',
-  ).get(Number(shotId));
+    'SELECT * FROM paper_motion_plans WHERE shot_id = ? AND plan_revision_id = ?',
+  ).get(Number(shotId), currentPlanRevisionId);
   const motionPlan = motionRow ? {
     ...motionRow,
     id: Number(motionRow.id),
@@ -192,11 +195,11 @@ function get(db, shotId) {
     version: Number(motionRow.version || 1),
   } : null;
   const steps = db.prepare(
-    `SELECT id, step_key, depends_on_json, status, attempt, max_attempts,
+    `SELECT id, plan_revision_id, step_key, depends_on_json, status, attempt, max_attempts,
             result_json, error_json, started_at, completed_at, updated_at,
             authorization_id, user_visible_status
-     FROM paper_job_steps WHERE shot_id = ? ORDER BY id`,
-  ).all(Number(shotId)).map((step) => {
+     FROM paper_job_steps WHERE shot_id = ? AND plan_revision_id = ? ORDER BY id`,
+  ).all(Number(shotId), currentPlanRevisionId).map((step) => {
     const authorization = step.authorization_id == null ? null : db.prepare(
       'SELECT slot_scope_json FROM paper_generation_authorizations WHERE id = ? AND deleted_at IS NULL',
     ).get(Number(step.authorization_id));

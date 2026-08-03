@@ -86,7 +86,7 @@
       "additionalProperties": false,
       "required": ["primary_action", "actor_key", "object_key", "support_key", "direction", "start_state", "end_state", "waypoints", "phases", "contact_events", "occlusion_events"],
       "properties": {
-        "primary_action": { "enum": ["carry_move_sit", "directed_move", "state_transition", "generic_subject_action", "environmental_depth_motion", "map_route_reveal", "siege_supply_sequence"] },
+        "primary_action": { "enum": ["carry_move_sit", "directed_move", "transport_move", "state_transition", "generic_subject_action", "environmental_depth_motion", "path_reveal", "multi_beat_grounded_sequence", "map_route_reveal", "siege_supply_sequence"] },
         "actor_key": { "type": ["string", "null"] },
         "object_key": { "type": ["string", "null"] },
         "support_key": { "type": ["string", "null"] },

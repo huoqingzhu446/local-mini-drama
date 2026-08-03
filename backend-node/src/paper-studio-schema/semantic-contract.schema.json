@@ -51,6 +51,22 @@
         }
       }
     },
+    "mobility_contracts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["schema_version", "subject_key", "propulsion_mode", "allow_self_motion", "required_movers", "unit_count"],
+        "properties": {
+          "schema_version": { "const": 1 },
+          "subject_key": { "type": "string", "minLength": 1 },
+          "propulsion_mode": { "enum": ["self_powered", "human_push", "human_pull", "animal_drawn", "human_ridden", "crew_operated"] },
+          "allow_self_motion": { "type": "boolean" },
+          "required_movers": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+          "unit_count": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
     "visual_scenes": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
     "visual_beats": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
     "transition_contracts": { "type": "array", "items": { "type": "object", "additionalProperties": true } }

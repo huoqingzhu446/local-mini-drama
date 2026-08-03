@@ -55,6 +55,8 @@ paper_studio:
   max_image_concurrency: 2
   max_matte_concurrency: 1
   max_render_concurrency: 1
+  render_concurrency: 0
+  proof_browser_targets_per_session: 5
   max_auto_retries_per_slot: 2
   max_asset_pixels: 25000000
   max_snapshot_bytes: 5242880

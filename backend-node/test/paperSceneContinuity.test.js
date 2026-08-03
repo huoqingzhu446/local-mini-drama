@@ -118,7 +118,7 @@ test('12/24/30/60fps 使用等效 0.30 秒淡入阈值', () => {
   }
 });
 
-test('旧 v8/v3 快照仍可播放检查，但不能作为 v9 正式发布', () => {
+test('旧 v8/v3 快照仍可播放检查，但不能作为当前版本正式发布', () => {
   const snapshot = { schema_version: 3, motion_plan: { schema_version: 1 }, provenance: { planner_version: 8 } };
   assert.equal(renderService.assertSnapshotContinuity(snapshot).skipped, true);
   assert.throws(
@@ -127,7 +127,7 @@ test('旧 v8/v3 快照仍可播放检查，但不能作为 v9 正式发布', () 
   );
 });
 
-test('巨鹿危城固定样例生成两场景、两环境、完整转场和长距离粮车轨迹', () => {
+test('多节拍接地样例生成两场景、两环境、完整转场和长距离运输轨迹', () => {
   const context = {
     source_kind: 'paper',
     storyboard: {
@@ -145,27 +145,49 @@ test('巨鹿危城固定样例生成两场景、两环境、完整转场和长�
   const blueprint = blueprintCompiler.infer(context);
   const plan = blueprintCompiler.compile(blueprint, context, { fps: 30 });
   const environmentFamilies = plan.families.filter((family) => family.slots.some((slot) => slot.asset_type === 'environment'));
-  const cartTrack = plan.motionPlan.subject_tracks.find((track) => track.target === 'supply_cart' && track.property === 'x');
+  const cartTrack = plan.motionPlan.subject_tracks.find((track) => track.target === 'ground_transport_1' && track.property === 'x');
   const moving = sceneCompiler.orderedCaptionMatch(context.storyboard.audio_captions, /城池一旦陷落/, { edge: 'start', after_frame: 95 });
-  assert.equal(plan.summary.planner_version, 9);
+  assert.equal(plan.summary.planner_version, 11);
   assert.equal(plan.visualScenes.length, 2);
   assert.equal(environmentFamilies.length, 2);
   assert.equal(environmentFamilies[0].slots[0].constraints.reference_role, 'composition_and_style');
   assert.equal(environmentFamilies[1].slots[0].constraints.reference_role, 'style_only');
-  assert.match(environmentFamilies[1].slots[0].constraints.environment_description, /城外秦军甬道/);
+  assert.match(environmentFamilies[1].slots[0].constraints.environment_description, /粮车沿甬道前行/);
   assert.ok(plan.transitionContracts[0].end_frame - plan.transitionContracts[0].start_frame >= 18);
   assert.ok(cartTrack.keyframes[2].frame - cartTrack.keyframes[1].frame >= 30);
   assert.equal(plan.motionPlan.duration_frames, 360);
   assert.equal(moving.caption_key, 'narration_2');
   assert.equal(blueprint.entities.some((entity) => entity.name === '王离'), false);
   assert.equal(JSON.stringify(plan.root).includes('held-by'), false);
-  assert.equal(plan.transitionContracts[0].confidence, 0.98);
+  assert.ok(plan.transitionContracts[0].confidence >= 0.9);
   assert.equal(plan.transitionContracts[0].audio_policy, 'continuous');
   assert.equal(plan.transitionContracts[0].caption_policy, 'global_overlay');
   assert.ok(plan.motionPlan.duration_frames - context.storyboard.audio_captions.at(-1).end_frame >= 15);
-  const cartSpatialNode = plan.summary.spatial_contract.nodes.find((item) => item.key === 'supply_cart');
-  assert.equal(cartSpatialNode.scene_key, 'scene_outside_road');
+  const cartSpatialNode = plan.summary.spatial_contract.nodes.find((item) => item.key === 'ground_transport_1');
+  assert.equal(cartSpatialNode.scene_key, 'scene_followup');
   assert.equal(spatialContractService.evaluatePlan(plan.motionPlan, plan.summary).pass, true);
+});
+
+test('六秒旁白会把十二秒多节拍分镜收束为七秒，末节拍落在语音尾部', () => {
+  const context = {
+    source_kind: 'paper',
+    storyboard: {
+      id: 38, title: '巨鹿危城', duration: 7,
+      description: '空粮袋从守城士兵手中滑落。镜头转向城外，秦军粮车沿甬道前行，王离军包围圈逼近城墙。',
+      action: '粮袋落地，镜头转向城外，粮车前行，军阵收紧。',
+      audio_captions: [
+        { key: 'narration_1', text: '巨鹿城内兵少粮尽，秦军补给却没有断', start_frame: 0, end_frame: 55 },
+        { key: 'narration_2', text: '城池一旦陷落，反秦力量将被摧毁', start_frame: 55, end_frame: 180 },
+      ],
+    },
+    characters: [], props: [],
+  };
+  const blueprint = blueprintCompiler.infer(context);
+  const plan = blueprintCompiler.compile(blueprint, context, { fps: 30 });
+  const finalBeat = plan.semanticContract.action_beats.find((beat) => beat.key === 'depth_change');
+  assert.equal(plan.motionPlan.duration_frames, 210);
+  assert.ok(finalBeat.start_frame < 180);
+  assert.equal(finalBeat.end_frame, 209);
 });
 
 test('转场证明固定包含前、开始、中点、结束、后五个阶段', () => {

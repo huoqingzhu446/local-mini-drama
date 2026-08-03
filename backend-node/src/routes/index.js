@@ -326,6 +326,13 @@ function setupRouter(cfg, db, log) {
   r.get('/paper-studio/episodes/:id/delivery', paperStudio.getEpisodeDelivery);
   r.post('/paper-studio/episodes/:id/merge', paperStudio.mergeEpisode);
   r.get('/paper-studio/storyboards/:id', paperStudio.getStoryboard);
+  r.get('/paper-studio/storyboards/:id/history', paperStudio.getStoryboardHistory);
+  r.get('/paper-studio/storyboards/:id/history/revisions/:revision_id', paperStudio.getStoryboardHistoryRevision);
+  r.post('/paper-studio/storyboards/:id/history/fork-preview', paperStudio.previewStoryboardHistoryFork);
+  r.post('/paper-studio/storyboards/:id/history/fork-draft', paperStudio.forkStoryboardHistoryDraft);
+  r.post('/paper-studio/storyboards/:id/history/fork-run', paperStudio.forkStoryboardHistoryRun);
+  r.get('/paper-studio/storyboards/:id/history/runs/:run_id', paperStudio.getStoryboardHistoryRun);
+  r.get('/paper-studio/storyboards/:id/history/assets/:asset_version_id', paperStudio.getStoryboardHistoryAsset);
   r.put('/paper-studio/storyboards/:id', paperStudio.updateStoryboard);
   r.get('/paper-studio/storyboards/:id/audio', paperStudio.getStoryboardAudio);
   r.post('/paper-studio/storyboards/:id/audio/tts', paperStudio.synthesizeStoryboardAudio);
@@ -348,6 +355,8 @@ function setupRouter(cfg, db, log) {
   r.post('/paper-studio/runs/:id/analyze', paperStudio.analyzeRun);
   r.post('/paper-studio/runs/:id/confirm-plan', paperStudio.confirmPlan);
   r.post('/paper-studio/runs/:id/generation-quote', paperStudio.generationQuote);
+  r.post('/paper-studio/runs/:id/reuse-preview', paperStudio.reusePreview);
+  r.post('/paper-studio/runs/:id/apply-reuse', paperStudio.applyReuse);
   r.post('/paper-studio/runs/:id/generation-authorizations', paperStudio.authorizeGeneration);
   r.post('/paper-studio/generation-authorizations/:id/execute', paperStudio.executeGenerationAuthorization);
   r.post('/paper-studio/generation-authorizations/:id/cancel', paperStudio.cancelGenerationAuthorization);
@@ -371,6 +380,8 @@ function setupRouter(cfg, db, log) {
   r.post('/paper-studio/shots/:id/review-assets', paperStudio.reviewAssets);
   r.post('/paper-studio/shots/:id/plan-motion', paperStudio.planMotion);
   r.post('/paper-studio/shots/:id/sync-audio-timing', paperStudio.syncAudioTiming);
+  r.post('/paper-studio/shots/:id/continuity-repair-preview', paperStudio.continuityRepairPreview);
+  r.post('/paper-studio/shots/:id/continuity-repair', paperStudio.continuityRepair);
   r.post('/paper-studio/shots/:id/revise', paperStudio.reviseMotion);
   r.get('/paper-studio/shots/:id/revisions', paperStudio.listRevisions);
   r.get('/paper-studio/shots/:id/evidence', paperStudio.getEvidence);

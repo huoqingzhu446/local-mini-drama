@@ -7,7 +7,7 @@ const STATE_LABELS = Object.freeze({
   seated: '坐下姿态',
   moving: '移动姿态',
   arrived: '到达姿态',
-  map_marker: '地图人物剪影',
+  map_marker: '平面标记剪影',
   stable: '静态素材',
 })
 
@@ -23,8 +23,8 @@ const TYPE_LABELS = Object.freeze({
 
 const PURPOSE_LABELS = Object.freeze({
   clean_background: '生成无可动主体的干净背景',
-  map_clean_background: '生成无箭头、人物和文字的干净战役地图',
-  map_character_marker: '生成在战役地图上显现的人物剪影',
+  map_clean_background: '生成无路径标记、人物和文字的干净平面底图',
+  map_character_marker: '生成在平面底图上显现的主体标记',
   independent_action_object: '生成需要独立运动的道具层',
   independent_secondary_entity: '生成独立次要主体层',
 })

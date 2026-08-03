@@ -74,7 +74,7 @@ test('a supported subject crossing a registered boundary uses generic primitives
     track.target === 'supported_group' && track.property === 'rotation'
       && Math.max(...track.keyframes.map((keyframe) => keyframe.value)) >= 8
   )));
-  assert.equal(detail.steps.length, 15);
+  assert.equal(detail.steps.length, 16);
   assert.deepEqual(detail.steps.slice(0, 2).map((step) => step.status), ['completed', 'completed']);
   assert.ok(detail.steps.some((step) => step.step_key === 'dynamic_gate'));
   db.close();

@@ -8,6 +8,7 @@ const runAggregateService = require('./paperRunAggregateService');
 const storageLayout = require('../storageLayout');
 const assetProductionService = require('./paperAssetProductionService');
 const spatialContractService = require('./paperSpatialContractService');
+const matteThresholds = require('./paperMatteThresholds');
 const {
   PaperStudioError,
   assertExpectedVersion,
@@ -33,10 +34,12 @@ function normalizeMultipartBody(body = {}) {
 
 function slotContext(db, shotId, slotId) {
   const row = db.prepare(
-    `SELECT pas.*, psf.shot_id, psf.family_key
+    `SELECT pas.*, psf.shot_id, psf.family_key, psf.plan_revision_id
      FROM paper_asset_slots pas
      JOIN paper_source_families psf ON psf.id = pas.family_id
+     JOIN paper_studio_shots ps ON ps.id = psf.shot_id
      WHERE pas.id = ? AND psf.shot_id = ?
+       AND psf.plan_revision_id = ps.current_plan_revision_id
        AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL`,
   ).get(Number(slotId), Number(shotId));
   if (!row) {
@@ -65,12 +68,13 @@ function nextVersion(db, slot, derivationKind, provenance = {}) {
   const result = db.prepare(
     `INSERT INTO paper_asset_versions
       (slot_id, source_family_id, parent_version_id, attempt_index, derivation_kind,
-       processing_json, registration_json, provenance_json, quality_report_json,
+       reuse_fingerprint, processing_json, registration_json, provenance_json, quality_report_json,
        status, created_at)
-     VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, '{}', 'candidate', ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, '{}', '{}', ?, '{}', 'candidate', ?)`,
   ).run(
     Number(slot.id), Number(slot.family_id), slot.current_version_id,
-    Number(attempt.next_attempt), derivationKind, JSON.stringify(provenance), nowIso(),
+    Number(attempt.next_attempt), derivationKind, slot.reuse_fingerprint || null,
+    JSON.stringify(provenance), nowIso(),
   );
   return Number(result.lastInsertRowid);
 }
@@ -115,7 +119,7 @@ function inspectRgba(data, info, requireAlpha) {
     height: (maxY - minY + 1) / info.height,
   } : {};
   return {
-    pass: !requireAlpha || (transparentRatio >= 0.01 && visibleRatio >= 0.005 && visibleRatio <= 0.98),
+    pass: !requireAlpha || matteThresholds.alphaGate({ transparentRatio, visibleRatio }),
     width: Number(info.width),
     height: Number(info.height),
     transparent_ratio: Number(transparentRatio.toFixed(6)),
@@ -148,16 +152,17 @@ function invalidateDownstream(db, shot, now) {
     .run(Number(shot.id));
   db.prepare("UPDATE paper_proof_runs SET status = 'superseded' WHERE shot_id = ? AND status IN ('pending','running','passed','completed')")
     .run(Number(shot.id));
-  db.prepare("UPDATE paper_motion_plans SET status = 'draft', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ?")
-    .run(now, Number(shot.id));
+  db.prepare("UPDATE paper_motion_plans SET status = 'draft', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ? AND plan_revision_id = ?")
+    .run(now, Number(shot.id), Number(shot.current_plan_revision_id));
   db.prepare(
     `UPDATE paper_job_steps
      SET status = 'queued', result_json = '{}', error_json = '{}', lease_owner = NULL,
          lease_expires_at = NULL, started_at = NULL, completed_at = NULL, updated_at = ?
      WHERE run_id = ? AND shot_id = ? AND step_key IN
        ('asset_gate','plan_motion','compile_snapshot','render_proof','dynamic_gate',
-        'render_preview','wait_preview_approval','render_formal','publish_video')`,
-  ).run(now, Number(shot.run_id), Number(shot.id));
+        'render_preview','wait_preview_approval','render_formal','publish_video')
+       AND plan_revision_id = ?`,
+  ).run(now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id));
 }
 
 function allRequiredSlotsReady(db, shotId) {
@@ -166,9 +171,10 @@ function allRequiredSlotsReady(db, shotId) {
      FROM paper_asset_slots pas
      JOIN paper_source_families psf ON psf.id = pas.family_id
      WHERE psf.shot_id = ? AND pas.required_for_gate = 1
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
        AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL
        AND (pas.current_version_id IS NULL OR pas.status != 'ready')`,
-  ).get(Number(shotId))?.count || 0) === 0;
+  ).get(Number(shotId), Number(shotId))?.count || 0) === 0;
 }
 
 function activateVersion(db, shot, slot, versionId, requestId, reason) {
@@ -203,10 +209,11 @@ function allRequiredSlotsReadyAfter(db, shotId, replacingSlotId, versionId) {
      FROM paper_asset_slots pas
      JOIN paper_source_families psf ON psf.id = pas.family_id
      WHERE psf.shot_id = ? AND pas.required_for_gate = 1
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
        AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL
        AND pas.id != ? AND (pas.current_version_id IS NULL OR pas.status != 'ready')
      LIMIT 1`,
-  ).get(Number(shotId), Number(replacingSlotId));
+  ).get(Number(shotId), Number(shotId), Number(replacingSlotId));
   return !missing;
 }
 
@@ -222,16 +229,28 @@ function assertReusableSourceCompatibility(targetShot, targetSlot, source) {
       409,
     );
   }
-  if (source.status !== 'accepted' || Number(source.approved_review_count || 0) < 1) {
+  const sourceApproved = source.latest_review_decision == null
+    ? Number(source.approved_review_count || 0) > 0
+    : source.latest_review_decision === 'approved';
+  if (source.status !== 'accepted' || !sourceApproved) {
     throw new PaperStudioError('PAPER_STUDIO_ASSET_REUSE_NOT_APPROVED', '只能复用已通过人工审核的正式素材版本', { source_asset_version_id: Number(source.id) }, 409);
+  }
+  const archiveImport = parseJson(source.provenance_json, {})?.archive_import || null;
+  if (archiveImport?.import_trust_state === 'review_required'
+      && Number(source.review_decision_count || 0) <= Number(archiveImport.imported_review_decision_count || 0)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_ASSET_REUSE_IMPORT_TRUST_REQUIRED',
+      '导入素材需要在当前设备重新审核确认后才能复用',
+      { source_asset_version_id: Number(source.id), import_trust_state: 'review_required' },
+      409,
+    );
   }
   if (targetShot.paper_storyboard_id != null || source.paper_storyboard_id != null) {
     const sameStoryboard = Number(targetShot.paper_storyboard_id) === Number(source.paper_storyboard_id);
-    const sameRevision = Number(targetShot.paper_storyboard_revision_id) === Number(source.paper_storyboard_revision_id);
-    if (!sameStoryboard || !sameRevision) {
+    if (!sameStoryboard) {
       throw new PaperStudioError(
-        'PAPER_STUDIO_ASSET_REUSE_SOURCE_REVISION_MISMATCH',
-        '跨生产版本复用必须来自同一纸片分镜修订',
+        'PAPER_STUDIO_ASSET_REUSE_STORYBOARD_MISMATCH',
+        '历史素材必须来自同一个纸片分镜',
         {
           source_paper_storyboard_id: source.paper_storyboard_id == null ? null : Number(source.paper_storyboard_id),
           source_paper_storyboard_revision_id: source.paper_storyboard_revision_id == null ? null : Number(source.paper_storyboard_revision_id),
@@ -241,6 +260,17 @@ function assertReusableSourceCompatibility(targetShot, targetSlot, source) {
         409,
       );
     }
+  }
+  if (!targetSlot.reuse_fingerprint || targetSlot.reuse_fingerprint !== source.reuse_fingerprint) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_ASSET_REUSE_VISUAL_CONTRACT_MISMATCH',
+      '源素材与目标槽位的静态视觉合同不一致，只能作为人工比较候选',
+      {
+        source_reuse_fingerprint: source.reuse_fingerprint || null,
+        target_reuse_fingerprint: targetSlot.reuse_fingerprint || null,
+      },
+      409,
+    );
   }
   const targetIdentity = String(targetSlot.constraints_json?.identity || '').trim();
   const sourceIdentity = String(parseJson(source.constraints_json, {}).identity || '').trim();
@@ -267,8 +297,10 @@ function reuseAcceptedVersion(db, cfg, log, shotId, slotId, sourceVersionId, bod
   const source = db.prepare(
     `SELECT pav.*, pas.asset_type, pas.constraints_json, psf.shot_id AS source_shot_id,
             ps.drama_id, ps.paper_storyboard_id, ps.paper_storyboard_revision_id,
+            (SELECT decision FROM paper_asset_review_decisions
+             WHERE asset_version_id = pav.id ORDER BY id DESC LIMIT 1) AS latest_review_decision,
             (SELECT COUNT(*) FROM paper_asset_review_decisions
-             WHERE asset_version_id = pav.id AND decision = 'approved') AS approved_review_count
+             WHERE asset_version_id = pav.id) AS review_decision_count
      FROM paper_asset_versions pav
      JOIN paper_asset_slots pas ON pas.id = pav.slot_id
      JOIN paper_source_families psf ON psf.id = pas.family_id
@@ -294,7 +326,7 @@ function reuseAcceptedVersion(db, cfg, log, shotId, slotId, sourceVersionId, bod
     source_shot_id: Number(source.source_shot_id),
     reuse_kind: 'same_storyboard_revision',
   };
-  const versionId = nextVersion(db, slot, 'imported_source', provenance);
+  const versionId = nextVersion(db, slot, 'historical_reuse', provenance);
   const target = versionPath(db, cfg, shot, versionId, slot.slot_key);
   try {
     fs.copyFileSync(sourceAbsolute, target.absolute);
@@ -324,6 +356,16 @@ function reuseAcceptedVersion(db, cfg, log, shotId, slotId, sourceVersionId, bod
     throw error;
   }
   activateVersion(db, shot, slot, versionId, body.request_id, `复用已批准正式素材 v${source.id}`);
+  db.prepare(
+    `INSERT INTO paper_asset_reuse_links
+      (source_asset_version_id, target_asset_version_id, target_shot_id, target_slot_id,
+       match_kind, compatibility_report_json, source_file_hash, request_id, created_at)
+     VALUES (?, ?, ?, ?, 'exact', ?, ?, ?, ?)`,
+  ).run(
+    Number(source.id), versionId, Number(shot.id), Number(slot.id),
+    JSON.stringify({ reuse_fingerprint: slot.reuse_fingerprint, file_verified: true }),
+    expectedHash, body.request_id || null, nowIso(),
+  );
   runAggregateService.sync(db, shot.run_id);
   if (log) log.info('Paper studio approved asset reused', { shot_id: shot.id, slot_id: slot.id, source_asset_version_id: Number(source.id), asset_version_id: versionId });
   return { shot: shotService.get(db, shot.id), asset_version_id: versionId, source_asset_version_id: Number(source.id), slot_id: slot.id };
@@ -348,7 +390,7 @@ async function uploadReplacement(db, cfg, log, shotId, slotId, body = {}, file =
   if (!report.pass) {
     throw new PaperStudioError(
       'PAPER_STUDIO_ASSET_UPLOAD_ALPHA_REQUIRED',
-      '角色和道具替换图必须包含真实透明背景；请上传透明 PNG，或在当前素材上使用 Mask 修正',
+      '角色和道具替换图必须包含真实透明背景（透明区域至少占画面 5%）；请上传透明 PNG，或在当前素材上使用 Mask 修正',
       { slot_id: slot.id, report },
       422,
     );

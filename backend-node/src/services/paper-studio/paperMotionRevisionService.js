@@ -384,7 +384,7 @@ function revise(db, cfg, log, shotId, body = {}) {
     patch.changes = trackChangeSummary(beforePlan, plan, patch.changed_tracks);
     schemaService.assertValid('motionPlan', plan, '修订后的动作计划不符合受限 Motion DSL');
     gate = motionGateService.evaluate(plan, summary);
-    const afterRelations = db.prepare('SELECT node_key, local_z, relation_json FROM paper_composition_nodes WHERE shot_id = ? AND deleted_at IS NULL ORDER BY id').all(Number(shot.id)).map((node) => ({ key: node.node_key, local_z: Number(node.local_z), relation: parseJson(node.relation_json, {}) }));
+    const afterRelations = db.prepare('SELECT node_key, local_z, relation_json FROM paper_composition_nodes WHERE shot_id = ? AND plan_revision_id = ? AND deleted_at IS NULL ORDER BY id').all(Number(shot.id), Number(shot.current_plan_revision_id)).map((node) => ({ key: node.node_key, local_z: Number(node.local_z), relation: parseJson(node.relation_json, {}) }));
     afterHash = sha256(canonicalJson({ plan, relations: afterRelations }));
     if (afterHash === beforeHash) throw new PaperStudioError('PAPER_STUDIO_REVISION_NO_EFFECT', '这条修订没有产生可见动作或关系变化', { intent }, 422);
     const now = nowIso();
@@ -399,7 +399,7 @@ function revise(db, cfg, log, shotId, body = {}) {
     ).run(JSON.stringify(updatedSummary), nextShotStatus(shot.status), now, Number(shot.id));
     db.prepare("UPDATE paper_render_snapshots SET status = 'superseded' WHERE shot_id = ? AND status IN ('compiled','approved')").run(Number(shot.id));
     db.prepare("UPDATE paper_proof_runs SET status = 'superseded' WHERE shot_id = ? AND status IN ('pending','running','passed','completed')").run(Number(shot.id));
-    const steps = db.prepare('SELECT id, step_key FROM paper_job_steps WHERE shot_id = ?').all(Number(shot.id));
+    const steps = db.prepare('SELECT id, step_key FROM paper_job_steps WHERE shot_id = ? AND plan_revision_id = ?').all(Number(shot.id), Number(shot.current_plan_revision_id));
     for (const step of steps) {
       if (!DOWNSTREAM_STEPS.has(step.step_key)) continue;
       db.prepare("UPDATE paper_job_steps SET input_hash = ?, status = 'queued', attempt = 1, result_json = '{}', error_json = '{}', started_at = NULL, completed_at = NULL, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?").run(sha256(canonicalJson({ revision_hash: afterHash, step_key: step.step_key })), now, Number(step.id));

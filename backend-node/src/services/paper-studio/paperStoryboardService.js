@@ -63,6 +63,9 @@ function rowToStoryboard(row) {
     shot_number: Number(row.shot_number),
     duration: Number(row.duration || 6),
     current_revision_id: row.current_revision_id == null ? null : Number(row.current_revision_id),
+    working_copy_base_revision_id: row.working_copy_base_revision_id == null ? null : Number(row.working_copy_base_revision_id),
+    working_copy_base_revision_number: row.working_copy_base_revision_number == null ? null : Number(row.working_copy_base_revision_number),
+    working_copy_fork_audit_id: row.working_copy_fork_audit_id == null ? null : Number(row.working_copy_fork_audit_id),
     current_reference_version_id: row.current_reference_version_id == null ? null : Number(row.current_reference_version_id),
     current_dialogue_audio_version_id: row.current_dialogue_audio_version_id == null ? null : Number(row.current_dialogue_audio_version_id),
     current_narration_audio_version_id: row.current_narration_audio_version_id == null ? null : Number(row.current_narration_audio_version_id),
@@ -88,6 +91,11 @@ function get(db, storyboardId, { includeDeleted = false } = {}) {
      WHERE ps.id = ? ${includeDeleted ? '' : 'AND ps.deleted_at IS NULL'} AND pe.deleted_at IS NULL`,
   ).get(Number(storyboardId));
   if (!row) throw new PaperStudioError('PAPER_STORYBOARD_NOT_FOUND', '纸片分镜不存在', { paper_storyboard_id: Number(storyboardId) }, 404);
+  if (row && row.working_copy_base_revision_id != null) {
+    row.working_copy_base_revision_number = db.prepare(
+      'SELECT revision_number FROM paper_storyboard_revisions WHERE id = ? AND paper_storyboard_id = ?',
+    ).get(Number(row.working_copy_base_revision_id), Number(row.id))?.revision_number || null;
+  }
   return rowToStoryboard(row);
 }
 
@@ -99,7 +107,14 @@ function list(db, episodeId) {
      LEFT JOIN video_generations vg ON vg.id = ps.published_video_generation_id AND vg.deleted_at IS NULL
      WHERE ps.paper_episode_id = ? AND ps.deleted_at IS NULL
      ORDER BY ps.shot_number, ps.id`,
-  ).all(Number(episodeId)).map(rowToStoryboard);
+  ).all(Number(episodeId)).map((row) => {
+    if (row.working_copy_base_revision_id != null) {
+      row.working_copy_base_revision_number = db.prepare(
+        'SELECT revision_number FROM paper_storyboard_revisions WHERE id = ? AND paper_storyboard_id = ?',
+      ).get(Number(row.working_copy_base_revision_id), Number(row.id))?.revision_number || null;
+    }
+    return rowToStoryboard(row);
+  });
 }
 
 function revisionContent(storyboard) {
@@ -223,7 +238,18 @@ function update(db, log, storyboardId, body = {}) {
   const transaction = db.transaction(() => {
     const result = db.prepare(`UPDATE paper_storyboards SET ${fields.join(', ')} WHERE id = ? AND version = ? AND deleted_at IS NULL`).run(...values);
     if (!result.changes) throw new PaperStudioError('PAPER_STUDIO_VERSION_CONFLICT', '纸片分镜已被更新，请刷新后重试', { paper_storyboard_id: Number(storyboardId) }, 409);
-    const revision = ensureRevision(db, storyboardId, 'manual');
+    const pendingForkAudit = current.working_copy_fork_audit_id == null ? null : db.prepare(
+      `SELECT id FROM paper_history_fork_audits
+       WHERE id = ? AND paper_storyboard_id = ? AND target_storyboard_revision_id IS NULL`,
+    ).get(Number(current.working_copy_fork_audit_id), Number(storyboardId));
+    const revision = ensureRevision(db, storyboardId, pendingForkAudit ? 'history_fork_edit' : 'manual');
+    if (pendingForkAudit && Number(revision.id) !== Number(current.current_revision_id || 0)) {
+      db.prepare(
+        `UPDATE paper_history_fork_audits
+         SET target_storyboard_revision_id = ?, completed_at = COALESCE(completed_at, ?)
+         WHERE id = ? AND target_storyboard_revision_id IS NULL`,
+      ).run(Number(revision.id), now, Number(pendingForkAudit.id));
+    }
     const changedContent = get(db, storyboardId);
     require('./paperStoryboardAudioService').invalidateChangedText(db, storyboardId, current, changedContent, now);
     if (Number(revision.id) !== Number(current.current_revision_id || 0)) {

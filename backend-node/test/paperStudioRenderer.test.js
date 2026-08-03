@@ -6,6 +6,8 @@ const Database = require('better-sqlite3');
 
 const tracks = require('../src/paper-studio-renderer/motion/trackResolver.cjs');
 const renderService = require('../src/services/paper-studio/paperStudioRenderService');
+const stateService = require('../src/services/paper-studio/paperStudioStateService');
+const orchestratorService = require('../src/services/paper-studio/paperOrchestratorService');
 
 const motionPlan = {
   subject_tracks: [
@@ -59,6 +61,17 @@ test('render media duration gate requires both video and audio streams to cover 
   });
   assert.equal(truncated.pass, false);
   assert.deepEqual(truncated.failures.map((item) => item.key), ['video_truncated', 'audio_truncated']);
+  const excessivePostroll = renderService.validateRenderedMedia({
+    composition: { fps: 30, duration_frames: 360 },
+    audio: [{ from_frame: 0, duration_frames: 180 }],
+  }, {
+    has_video: true, has_audio: true,
+    video_duration_seconds: 12,
+    audio_duration_seconds: 6,
+    format_duration_seconds: 12,
+  });
+  assert.equal(excessivePostroll.pass, false);
+  assert.deepEqual(excessivePostroll.failures.map((item) => item.key), ['excessive_silent_postroll']);
 });
 
 test('v3 renderer is isolated and uses Img/staticFile, recursive nodes and registered foreground z-order', () => {
@@ -79,12 +92,16 @@ test('v3 renderer is isolated and uses Img/staticFile, recursive nodes and regis
   assert.doesNotMatch(procedural, /amount \* 42/);
   assert.match(recursive, /assetMap=\{assetMap\} snapshot=\{snapshot\}/);
   assert.match(procedural, /procedural-atmosphere/);
-  assert.match(procedural, /procedural-route-reveal/);
-  assert.match(procedural, /procedural-map-title-card/);
-  assert.match(procedural, /const MapTitleCard/);
-  assert.match(procedural, /procedural-army-formation/);
-  assert.match(procedural, /const ArmyFormation/);
-  assert.match(procedural, /procedural-ember-field/);
+  assert.match(procedural, /procedural-path-reveal/);
+  assert.match(procedural, /procedural-label-card/);
+  assert.match(procedural, /const LabelCard/);
+  assert.match(procedural, /procedural-crowd-formation/);
+  assert.match(procedural, /const CrowdFormation/);
+  assert.match(procedural, /procedural-ember-drift/);
+  assert.match(procedural, /'route-reveal': 'path-reveal'/);
+  assert.match(procedural, /'map-title-card': 'label-card'/);
+  assert.match(procedural, /'army-formation': 'crowd-formation'/);
+  assert.match(procedural, /'ember-field': 'ember-drift'/);
   assert.match(procedural, /theme\?\.palette\?\.accent/);
   assert.match(procedural, /const lineWidth = encirclement \? 7 : 5/);
   const worker = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'render-paper-studio.mjs'), 'utf8');
@@ -102,12 +119,79 @@ test('v3 renderer is isolated and uses Img/staticFile, recursive nodes and regis
   }
 });
 
-test('proof renderer isolates each target in its own browser lifecycle', () => {
+test('proof renderer reuses a bounded browser batch and retries one target after browser failure', () => {
   const worker = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'render-paper-studio.mjs'), 'utf8');
-  assert.match(worker, /const proofBrowser = await openRenderBrowser\(\)/);
-  assert.match(worker, /puppeteerInstance: proofBrowser/);
+  assert.match(worker, /proofTargetsPerBrowser.*\|\| 5/);
+  assert.match(worker, /targetsInSession >= proofTargetsPerBrowser/);
+  assert.match(worker, /Date\.now\(\) - sessionStartedAt >= 60_000/);
+  assert.match(worker, /await renderTarget\(true\)/);
   assert.match(worker, /await proofBrowser\.close\(\{ silent: true \}\)/);
   assert.match(worker, /mode === 'proof' \? null : await openRenderBrowser\(\)/);
+  assert.match(worker, /delayRender\|timed\?\\s\*out\|timeout/);
+});
+
+test('preview and formal renderers use bounded timeouts and restart with one render tab', () => {
+  const worker = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'render-paper-studio.mjs'), 'utf8');
+  const service = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'paper-studio', 'paperStudioRenderService.js'), 'utf8');
+  assert.match(worker, /args\['timeout-ms'\]/);
+  assert.match(worker, /mode === 'preview' \? Math\.min\(2, configuredConcurrency\) : configuredConcurrency/);
+  assert.match(worker, /timeoutInMilliseconds: renderTimeoutMs/);
+  assert.match(service, /preview_render_concurrency \|\| 2/);
+  assert.match(service, /preview_frame_timeout_ms \|\| 120_000/);
+  assert.match(service, /formal_render_concurrency/);
+  assert.match(service, /formal_component_timeout_ms \|\| 180_000/);
+  assert.match(service, /formal_retry_timeout_ms \|\| 300_000/);
+  assert.match(service, /restarting worker with one render tab/);
+  assert.match(service, /mode === 'preview' \|\| mode === 'formal'/);
+  assert.match(service, /else args\.push\('--concurrency', String\(concurrency\)\)/);
+  assert.match(service, /concurrency: 1/);
+  assert.match(service, /Math\.max\(firstTimeoutMs, Number/);
+  assert.match(service, /plan_revision_id = \?[\s\S]*step_key = 'render_formal'/);
+  assert.match(service, /plan_revision_id = \?[\s\S]*step_key = 'publish_video'/);
+});
+
+test('preview render failure keeps passed proof reusable and exposes the correct retry action', () => {
+  assert.equal(orchestratorService.ACTIONS.render_preview.failureState, 'proof_ready');
+  assert.deepEqual(
+    stateService.nextActionForShot('proof_ready', { step_key: 'render_preview' }),
+    { type: 'render_preview', label: '重试预览渲染', blocking: true },
+  );
+  assert.deepEqual(
+    stateService.nextActionForShot('proof_failed', { step_key: 'render_preview' }),
+    { type: 'render_preview', label: '重试预览渲染', blocking: true },
+  );
+  assert.deepEqual(
+    stateService.nextActionForShot('proof_failed', { step_key: 'render_proof' }),
+    { type: 'inspect_evidence', label: '检查动态证据', blocking: true },
+  );
+});
+
+test('renderer publishes a first bundle atomically behind a cross-process lock', async () => {
+  const worker = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'render-paper-studio.mjs'), 'utf8');
+  assert.match(worker, /ensureBundleCache/);
+  assert.match(worker, /bundle_lock_waited: bundleResult\.waitedForLock/);
+  const { ensureBundleCache, validBundleDirectory } = await import('../src/services/paper-studio/paperStudioBundleCache.mjs');
+  const root = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'lmd-paper-bundle-cache-'));
+  const cacheDirectory = path.join(root, 'same-key');
+  let builds = 0;
+  const build = async (temporaryDirectory) => {
+    builds += 1;
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    fs.mkdirSync(temporaryDirectory, { recursive: true });
+    fs.writeFileSync(path.join(temporaryDirectory, 'index.html'), '<!doctype html>');
+  };
+  try {
+    const results = await Promise.all([
+      ensureBundleCache({ cacheDirectory, build, pollMilliseconds: 5 }),
+      ensureBundleCache({ cacheDirectory, build, pollMilliseconds: 5 }),
+    ]);
+    assert.equal(builds, 1);
+    assert.equal(validBundleDirectory(cacheDirectory), true);
+    assert.equal(results.filter((result) => result.cacheHit).length, 1);
+    assert.equal(results.some((result) => result.waitedForLock), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('proof repeat gate tolerates only sub-pixel browser rasterization drift and records evidence', () => {

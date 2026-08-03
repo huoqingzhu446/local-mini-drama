@@ -1,6 +1,7 @@
 const { PaperStudioError } = require('./paperStudioUtils');
 const transitionService = require('./paperSceneTransitionService');
 const {
+  numericRange,
   orderedKeyframes,
   resolveTrackValue,
 } = require('../../paper-studio-renderer/motion/trackResolver.cjs');
@@ -166,6 +167,87 @@ function evaluate(plan = {}, context = {}) {
         `${scene.label || scene.key} 必须冻结与自身背景对应的地面和禁区合同`,
       ));
     }
+  }
+
+  const mobilityContracts = context.mobility_contracts
+    || context.semantic_contract?.mobility_contracts
+    || context.spatial_contract?.mobility_contracts
+    || [];
+  for (const contract of mobilityContracts) {
+    const subjectKey = String(contract.subject_key || '');
+    const subjectNode = nodes.find((item) => item.key === subjectKey) || null;
+    const persistedAssembly = (context.spatial_contract?.mobility_assemblies || []).find((item) => item.subject_key === subjectKey) || null;
+    const subjectDescendants = subjectNode ? nodeList(subjectNode, []).slice(1) : [];
+    const units = subjectNode
+      ? subjectDescendants.filter((item) => item.relation?.role === 'transport_unit')
+      : (persistedAssembly?.units || []);
+    const movementTracks = ['x', 'y']
+      .map((property) => trackFor(plan, subjectKey, property))
+      .filter(Boolean);
+    const moving = movementTracks.some((track) => numericRange(track) >= 0.015);
+    const minVisible = Math.max(1, Number(contract.unit_count?.min_visible || 1));
+    const subjectSlot = families.flatMap((family) => family.slots || []).find((slot) => (
+      slot.constraints?.subject_key === subjectKey && slot.constraints?.ensemble_kind === 'transport_unit'
+    ));
+    assertions.push(assertion(
+      `mobility:${subjectKey}:subject_group`,
+      !moving || Boolean(
+        (subjectNode?.kind === 'group' && subjectNode.relation?.role === 'ground_vehicle')
+        || persistedAssembly?.group_compiled
+      ),
+      `${subjectKey} 发生移动时必须编译为完整运输组合，而不是单独滑动的车辆贴图`,
+    ));
+    assertions.push(assertion(
+      `mobility:${subjectKey}:asset_contract`,
+      !moving || Boolean(subjectSlot?.constraints?.composite_subject || persistedAssembly?.composite_asset_contract),
+      `${subjectKey} 的正式素材必须声明车辆、动力角色和接触关系为一个组合单位`,
+    ));
+    assertions.push(assertion(
+      `mobility:${subjectKey}:unit_count`,
+      !moving || units.length >= minVisible,
+      `${subjectKey} 的运输规模至少需要 ${minVisible} 组可见运输单位，当前 ${units.length} 组`,
+      { actual: units.length, min: minVisible },
+    ));
+    const requiredMovers = Array.isArray(contract.required_movers) ? contract.required_movers : [];
+    const poweredUnits = units.filter((unit) => requiredMovers.every((requirement) => {
+      const embedded = (unit.relation?.embedded_movers || []).find((item) => item.role === requirement.role);
+      return embedded && Number(embedded.min_visible || 0) >= Number(requirement.min_visible || 1);
+    }));
+    const causalPass = !moving || contract.allow_self_motion === true
+      || (requiredMovers.length > 0 && poweredUnits.length >= minVisible);
+    assertions.push(assertion(
+      `mobility:${subjectKey}:causal_power`,
+      causalPass,
+      contract.allow_self_motion === true
+        ? `${subjectKey} 已声明为可自行驱动运输工具`
+        : `${subjectKey} 移动时必须让推、拉、牵引或操作成员持续可见`,
+      { powered_units: poweredUnits.length, required_units: minVisible, required_movers: requiredMovers },
+    ));
+    const independentUnitMotion = units.some((unit) => ['x', 'y'].some((property) => {
+      const unitTrack = trackFor(plan, unit.key, property);
+      return unitTrack && numericRange(unitTrack) >= 0.01;
+    }));
+    assertions.push(assertion(
+      `mobility:${subjectKey}:formation_cohesion`,
+      !moving || !independentUnitMotion,
+      `${subjectKey} 的车、动力角色和队列成员必须由同一父级轨迹驱动，不能相互漂移`,
+    ));
+    const xTrack = trackFor(plan, subjectKey, 'x');
+    const visibleFrame = xTrack
+      ? Math.max(...orderedKeyframes(xTrack).map((keyframe) => keyframe.frame))
+      : durationFrames - 1;
+    const groupX = Number(xTrack ? resolveTrackValue(xTrack, visibleFrame) || 0 : 0);
+    const visibleUnits = units.filter((unit) => {
+      const center = Number(unit.transform?.x ?? 0.5) + groupX;
+      const halfWidth = Number(unit.transform?.width || 0) / 2;
+      return center + halfWidth > 0.02 && center - halfWidth < 0.98;
+    });
+    assertions.push(assertion(
+      `mobility:${subjectKey}:visibility`,
+      !moving || visibleUnits.length >= minVisible,
+      `${subjectKey} 的动力与队列成员必须在主要动作结束时保持可见，当前可见 ${visibleUnits.length} 组`,
+      { frame: visibleFrame, actual: visibleUnits.length, min: minVisible },
+    ));
   }
 
   for (let transitionIndex = 0; transitionIndex < transitions.length; transitionIndex += 1) {

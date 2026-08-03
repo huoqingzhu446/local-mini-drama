@@ -24,9 +24,13 @@ function runOne(database, sql, file, index) {
     const msg = (err.message || '').toLowerCase();
     if (err.code === 'SQLITE_ERROR' && (msg.includes('duplicate column') || msg.includes('already exists'))) {
       console.log('Skip (already exists):', file + (index >= 0 ? ' #' + (index + 1) : ''));
-    } else if (err.code === 'SQLITE_ERROR' && msg.includes('no such table')) {
-      // ALTER TABLE 遇到表不存在时，记录警告并跳过（启动后 ensureAllColumns 会兜底建表补列）
-      console.warn('Skip migration (table not found, will be ensured later):', file, '-', err.message);
+    } else if (err.code === 'SQLITE_ERROR' && (
+      msg.includes('no such table')
+      || (file === '42_paper_studio_generation_attempt_ledger.sql' && msg.includes('no such column'))
+    )) {
+      // Legacy partial schemas are completed by ensureAllColumns below. Index
+      // creation is replayed after those columns exist.
+      console.warn('Skip migration (schema dependency will be ensured later):', file, '-', err.message);
     } else {
       throw err;
     }
@@ -41,6 +45,10 @@ function runMigrations(database) {
   }
   const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
   for (const file of files) {
+    // Migration 45 includes schema, backfill and integrity assertions that
+    // must commit as one unit. It is applied only by the dedicated reviewed
+    // executor, never by this per-statement compatibility runner.
+    if (file === '45_paper_storyboard_history_fork.sql') continue;
     const fullPath = path.join(migrationsDir, file);
     const sql = fs.readFileSync(fullPath, 'utf8');
     const statements = sql
@@ -53,6 +61,70 @@ function runMigrations(database) {
       statements.forEach((stmt, i) => runOne(database, stmt + ';', file, i));
     }
   }
+}
+
+function ensurePaperHistoryForkSchema(database) {
+  const migrationId = '45_paper_storyboard_history_fork';
+  const migrationPath = path.join(__dirname, '..', '..', 'migrations', `${migrationId}.sql`);
+  if (!fs.existsSync(migrationPath)) throw new Error(`Migration definition missing: ${migrationPath}`);
+  const tables = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+  if (!tables.has('paper_storyboards') || !tables.has('paper_storyboard_revisions')) {
+    throw new Error('Migration 45 requires paper_storyboards and paper_storyboard_revisions');
+  }
+  let report;
+  database.transaction(() => {
+    const storyboardColumns = tableColumns(database, 'paper_storyboards');
+    if (!storyboardColumns.has('working_copy_base_revision_id')) {
+      database.exec('ALTER TABLE paper_storyboards ADD COLUMN working_copy_base_revision_id INTEGER');
+    }
+    if (!storyboardColumns.has('working_copy_fork_audit_id')) {
+      database.exec('ALTER TABLE paper_storyboards ADD COLUMN working_copy_fork_audit_id INTEGER');
+    }
+
+    const sql = fs.readFileSync(migrationPath, 'utf8');
+    for (const raw of sql.split(';').map((statement) => statement.trim()).filter(Boolean)) {
+      const statement = stripLeadingComments(raw);
+      if (!/^CREATE\s+(?:TABLE|INDEX)/i.test(statement)) continue;
+      database.exec(`${statement};`);
+    }
+
+    database.prepare(
+      `UPDATE paper_storyboards
+       SET working_copy_base_revision_id = current_revision_id
+       WHERE working_copy_base_revision_id IS NULL AND current_revision_id IS NOT NULL`,
+    ).run();
+
+    const missingBase = Number(database.prepare(
+      `SELECT COUNT(*) AS count FROM paper_storyboards
+       WHERE deleted_at IS NULL AND current_revision_id IS NOT NULL
+         AND working_copy_base_revision_id IS NULL`,
+    ).get().count || 0);
+    const crossStoryboardBase = Number(database.prepare(
+      `SELECT COUNT(*) AS count
+       FROM paper_storyboards ps
+       LEFT JOIN paper_storyboard_revisions psr
+         ON psr.id = ps.working_copy_base_revision_id
+        AND psr.paper_storyboard_id = ps.id
+       WHERE ps.working_copy_base_revision_id IS NOT NULL AND psr.id IS NULL`,
+    ).get().count || 0);
+    if (missingBase || crossStoryboardBase) {
+      throw new Error(`Migration 45 integrity failed: missing_base=${missingBase}, cross_storyboard_base=${crossStoryboardBase}`);
+    }
+    const appliedAt = new Date().toISOString();
+    const storyboardCount = Number(database.prepare('SELECT COUNT(*) AS count FROM paper_storyboards').get().count || 0);
+    const details = {
+      storyboard_count: storyboardCount,
+      missing_working_copy_base: missingBase,
+      cross_storyboard_base: crossStoryboardBase,
+    };
+    database.prepare(
+      `INSERT INTO paper_schema_migrations (migration_id, applied_at, details_json)
+       VALUES (?, ?, ?)
+       ON CONFLICT(migration_id) DO UPDATE SET details_json = excluded.details_json`,
+    ).run(migrationId, appliedAt, JSON.stringify(details));
+    report = { migration_id: migrationId, applied_at: appliedAt, ...details };
+  })();
+  return report;
 }
 
 /**
@@ -117,6 +189,192 @@ function ensurePaperStudioTables(database) {
   ensureMigrationCreateStatements(database, '34_paper_studio_business_ux_phase0.sql');
   ensureMigrationCreateStatements(database, '39_paper_studio_audio_delivery.sql');
   ensureMigrationCreateStatements(database, '40_paper_studio_product_experience.sql');
+  ensureMigrationCreateStatements(database, '44_paper_studio_plan_history_reuse.sql');
+}
+
+function tableColumns(database, table) {
+  return new Set(database.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+}
+
+function uniqueIndexColumns(database, table) {
+  return database.prepare(`PRAGMA index_list(${table})`).all()
+    .filter((index) => Number(index.unique) === 1)
+    .map((index) => database.prepare(`PRAGMA index_info(${JSON.stringify(index.name)})`).all().map((column) => column.name));
+}
+
+function hasUniqueColumns(database, table, expected) {
+  return uniqueIndexColumns(database, table).some((columns) => (
+    columns.length === expected.length && columns.every((column, index) => column === expected[index])
+  ));
+}
+
+function ensureInitialPlanRevisions(database) {
+  const shots = database.prepare(
+    `SELECT id, blueprint_revision_id, current_plan_revision_id, plan_summary_json,
+            status, created_at, updated_at
+     FROM paper_studio_shots`,
+  ).all();
+  const insert = database.prepare(
+    `INSERT INTO paper_plan_revisions
+      (shot_id, revision_number, blueprint_revision_id, plan_hash, status,
+       transition_report_json, created_from, created_at, confirmed_at)
+     VALUES (?, 1, ?, ?, ?, '{}', 'migration_44', ?, ?)`,
+  );
+  const updateShot = database.prepare(
+    'UPDATE paper_studio_shots SET current_plan_revision_id = ? WHERE id = ?',
+  );
+  for (const shot of shots) {
+    if (shot.current_plan_revision_id) continue;
+    const existing = database.prepare(
+      'SELECT id FROM paper_plan_revisions WHERE shot_id = ? ORDER BY revision_number DESC, id DESC LIMIT 1',
+    ).get(Number(shot.id));
+    let revisionId = existing?.id == null ? null : Number(existing.id);
+    if (!revisionId) {
+      let summary = {};
+      try { summary = JSON.parse(shot.plan_summary_json || '{}'); } catch (_) { summary = {}; }
+      const fallbackHash = require('crypto').createHash('sha256')
+        .update(JSON.stringify({ shot_id: Number(shot.id), summary }))
+        .digest('hex');
+      const planHash = String(summary.plan_hash || fallbackHash);
+      const confirmed = !['pending', 'analyzed'].includes(String(shot.status || ''));
+      const result = insert.run(
+        Number(shot.id),
+        shot.blueprint_revision_id == null ? null : Number(shot.blueprint_revision_id),
+        planHash,
+        confirmed ? 'confirmed' : 'draft',
+        shot.created_at || shot.updated_at || new Date().toISOString(),
+        confirmed ? (shot.updated_at || shot.created_at || new Date().toISOString()) : null,
+      );
+      revisionId = Number(result.lastInsertRowid);
+    }
+    updateShot.run(revisionId, Number(shot.id));
+  }
+  database.prepare(
+    `UPDATE paper_source_families
+     SET plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = paper_source_families.shot_id)
+     WHERE plan_revision_id IS NULL`,
+  ).run();
+  database.prepare(
+    `UPDATE paper_composition_nodes
+     SET plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = paper_composition_nodes.shot_id)
+     WHERE plan_revision_id IS NULL`,
+  ).run();
+  database.prepare(
+    `UPDATE paper_motion_plans
+     SET plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = paper_motion_plans.shot_id)
+     WHERE plan_revision_id IS NULL`,
+  ).run();
+  database.prepare(
+    `UPDATE paper_job_steps
+     SET plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = paper_job_steps.shot_id)
+     WHERE shot_id IS NOT NULL AND plan_revision_id IS NULL`,
+  ).run();
+}
+
+function rebuildPlanOwnedTables(database) {
+  const rebuildFamilies = !hasUniqueColumns(database, 'paper_source_families', ['plan_revision_id', 'family_key']);
+  const rebuildNodes = !hasUniqueColumns(database, 'paper_composition_nodes', ['plan_revision_id', 'node_key']);
+  const rebuildMotion = !hasUniqueColumns(database, 'paper_motion_plans', ['plan_revision_id']);
+  if (!rebuildFamilies && !rebuildNodes && !rebuildMotion) return;
+  database.transaction(() => {
+    if (rebuildFamilies) {
+      database.exec('ALTER TABLE paper_source_families RENAME TO paper_source_families_h44_legacy');
+      database.exec(`CREATE TABLE paper_source_families (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shot_id INTEGER NOT NULL,
+        plan_revision_id INTEGER NOT NULL,
+        family_key TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        registration_canvas_json TEXT NOT NULL DEFAULT '{}',
+        contract_json TEXT NOT NULL DEFAULT '{}',
+        layout_master_version_id INTEGER,
+        context_snapshot_id TEXT,
+        provider_signature TEXT,
+        status TEXT NOT NULL DEFAULT 'planned',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        UNIQUE(plan_revision_id, family_key)
+      )`);
+      database.exec(`INSERT INTO paper_source_families
+        SELECT id, shot_id, plan_revision_id, family_key, pattern,
+               registration_canvas_json, contract_json, layout_master_version_id,
+               context_snapshot_id, provider_signature, status, version,
+               created_at, updated_at, deleted_at
+        FROM paper_source_families_h44_legacy`);
+      database.exec('DROP TABLE paper_source_families_h44_legacy');
+      database.exec('CREATE INDEX idx_paper_source_families_shot ON paper_source_families(shot_id, plan_revision_id, status)');
+    }
+    if (rebuildNodes) {
+      database.exec('ALTER TABLE paper_composition_nodes RENAME TO paper_composition_nodes_h44_legacy');
+      database.exec(`CREATE TABLE paper_composition_nodes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shot_id INTEGER NOT NULL,
+        plan_revision_id INTEGER NOT NULL,
+        node_key TEXT NOT NULL,
+        parent_node_id INTEGER,
+        node_kind TEXT NOT NULL,
+        pattern TEXT,
+        slot TEXT,
+        asset_version_id INTEGER,
+        transform_json TEXT NOT NULL DEFAULT '{}',
+        relation_json TEXT NOT NULL DEFAULT '{}',
+        clip_json TEXT NOT NULL DEFAULT '{}',
+        local_z INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'draft',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        UNIQUE(plan_revision_id, node_key)
+      )`);
+      database.exec(`INSERT INTO paper_composition_nodes
+        SELECT id, shot_id, plan_revision_id, node_key, parent_node_id, node_kind,
+               pattern, slot, asset_version_id, transform_json, relation_json,
+               clip_json, local_z, status, version, created_at, updated_at, deleted_at
+        FROM paper_composition_nodes_h44_legacy`);
+      database.exec('DROP TABLE paper_composition_nodes_h44_legacy');
+      database.exec('CREATE INDEX idx_paper_composition_nodes_shot ON paper_composition_nodes(shot_id, plan_revision_id, parent_node_id, local_z)');
+    }
+    if (rebuildMotion) {
+      database.exec('ALTER TABLE paper_motion_plans RENAME TO paper_motion_plans_h44_legacy');
+      database.exec(`CREATE TABLE paper_motion_plans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shot_id INTEGER NOT NULL,
+        plan_revision_id INTEGER NOT NULL UNIQUE,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        semantic_contract_hash TEXT NOT NULL,
+        timing_hash TEXT,
+        plan_json TEXT NOT NULL,
+        compiled_tracks_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'draft',
+        version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`);
+      database.exec(`INSERT INTO paper_motion_plans
+        SELECT id, shot_id, plan_revision_id, schema_version, semantic_contract_hash,
+               timing_hash, plan_json, compiled_tracks_json, status, version,
+               created_at, updated_at
+        FROM paper_motion_plans_h44_legacy`);
+      database.exec('DROP TABLE paper_motion_plans_h44_legacy');
+      database.exec('CREATE INDEX idx_paper_motion_plans_shot ON paper_motion_plans(shot_id, plan_revision_id, status)');
+    }
+  })();
+}
+
+function ensurePaperPlanRevisionSchema(database) {
+  const required = ['paper_plan_revisions', 'paper_studio_shots', 'paper_source_families', 'paper_composition_nodes', 'paper_motion_plans', 'paper_job_steps'];
+  const present = new Set(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+  if (!required.every((table) => present.has(table))) return;
+  ensureInitialPlanRevisions(database);
+  rebuildPlanOwnedTables(database);
+  database.exec('DROP INDEX IF EXISTS idx_paper_job_steps_idempotency');
+  database.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_job_steps_idempotency
+    ON paper_job_steps(run_id, COALESCE(shot_id, 0), COALESCE(plan_revision_id, 0), step_key, input_hash, attempt)`);
+  database.exec('CREATE INDEX IF NOT EXISTS idx_paper_job_steps_plan_revision ON paper_job_steps(plan_revision_id, status, updated_at)');
+  require('../services/paper-studio/paperAssetReuseFingerprintService').backfillReuseFingerprints(database);
 }
 
 /**
@@ -143,6 +401,22 @@ function ensureAllColumns(database) {
     { name: 'legacy_storyboard_id', type: 'INTEGER' },
     { name: 'source_kind', type: "TEXT NOT NULL DEFAULT 'legacy'" },
     { name: 'attention_required', type: "TEXT NOT NULL DEFAULT 'none'" },
+    { name: 'current_plan_revision_id', type: 'INTEGER' },
+  ]);
+  ensureColumns(database, 'paper_source_families', [
+    { name: 'plan_revision_id', type: 'INTEGER' },
+  ]);
+  ensureColumns(database, 'paper_composition_nodes', [
+    { name: 'plan_revision_id', type: 'INTEGER' },
+  ]);
+  ensureColumns(database, 'paper_motion_plans', [
+    { name: 'plan_revision_id', type: 'INTEGER' },
+  ]);
+  ensureColumns(database, 'paper_asset_slots', [
+    { name: 'reuse_fingerprint', type: 'TEXT' },
+  ]);
+  ensureColumns(database, 'paper_asset_versions', [
+    { name: 'reuse_fingerprint', type: 'TEXT' },
   ]);
   ensureColumns(database, 'paper_studio_episodes', [
     { name: 'request_id', type: 'TEXT' },
@@ -161,6 +435,7 @@ function ensureAllColumns(database) {
     { name: 'blocked_reason', type: 'TEXT' },
     { name: 'user_visible_status', type: 'TEXT' },
     { name: 'cancel_requested_at', type: 'TEXT' },
+    { name: 'plan_revision_id', type: 'INTEGER' },
   ]);
   // --- dramas ---
   ensureColumns(database, 'dramas', [
@@ -426,6 +701,12 @@ function ensureAllColumns(database) {
     { name: 'request_fingerprint', type: 'TEXT' },
     { name: 'provider_task_id', type: 'TEXT' },
     { name: 'paper_storyboard_id', type: 'INTEGER' },
+    { name: 'paper_studio_run_id', type: 'INTEGER' },
+    { name: 'paper_studio_shot_id', type: 'INTEGER' },
+    { name: 'paper_asset_slot_id', type: 'INTEGER' },
+    { name: 'generation_authorization_id', type: 'INTEGER' },
+    { name: 'provider_attempted_at', type: 'TEXT' },
+    { name: 'provider_call_count', type: 'INTEGER NOT NULL DEFAULT 0' },
     { name: 'created_at',       type: 'TEXT' },
     { name: 'updated_at',       type: 'TEXT' },
     { name: 'deleted_at',       type: 'TEXT' },
@@ -848,6 +1129,11 @@ function ensureAllColumns(database) {
 function runMigrationsAndEnsure(database) {
   runMigrations(database);
   ensureAllColumns(database);
+  ensureMigrationCreateStatements(database, '42_paper_studio_generation_attempt_ledger.sql');
+  const stageMigration = fs.readFileSync(path.join(__dirname, '..', '..', 'migrations', '43_paper_studio_asset_stage_state_machine.sql'), 'utf8');
+  stageMigration.split(';').map((statement) => statement.trim()).filter(Boolean)
+    .forEach((statement, index) => runOne(database, `${statement};`, '43_paper_studio_asset_stage_state_machine.sql', index));
+  ensurePaperPlanRevisionSchema(database);
 }
 
 function main() {
@@ -861,4 +1147,9 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { runMigrationsAndEnsure, ensureColumns };
+module.exports = {
+  runMigrationsAndEnsure,
+  ensureColumns,
+  ensurePaperPlanRevisionSchema,
+  ensurePaperHistoryForkSchema,
+};

@@ -192,7 +192,10 @@ function buildTransitionContracts(scenes, blueprint, plan, captions, fps, durati
       ? 'dust_whip_pan'
       : relation === 'time_jump' ? 'color_dip' : relation === 'explicit_hard_cut' ? 'hard_cut' : 'soft_crossfade');
     const duration = transitionService.durationFramesFor({ ...intent, relation, kind }, fps);
-    const boundary = boundaries[index];
+    const anchorRatio = Number(intent.anchor_ratio);
+    const boundary = Number.isFinite(anchorRatio)
+      ? Math.max(1, Math.min(durationFrames - 2, Math.round((durationFrames - 1) * anchorRatio)))
+      : boundaries[index];
     const start = Math.max(0, boundary - Math.floor(duration / 2));
     const end = Math.min(durationFrames - 1, start + duration);
     return {

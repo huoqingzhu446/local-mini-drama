@@ -28,12 +28,6 @@ export const paperStudioAPI = {
   getPaperEpisode(episodeId) {
     return request.get(`/paper-studio/episodes/${episodeId}`)
   },
-  updatePaperEpisode(episodeId, body) {
-    return request.put(`/paper-studio/episodes/${episodeId}`, body)
-  },
-  deletePaperEpisode(episodeId, body) {
-    return request.delete(`/paper-studio/episodes/${episodeId}`, { data: body })
-  },
   listPaperStoryboards(episodeId) {
     return request.get(`/paper-studio/episodes/${episodeId}/storyboards`)
   },
@@ -42,6 +36,27 @@ export const paperStudioAPI = {
   },
   getPaperStoryboard(storyboardId) {
     return request.get(`/paper-studio/storyboards/${storyboardId}`)
+  },
+  getPaperStoryboardHistory(storyboardId, params = {}) {
+    return request.get(`/paper-studio/storyboards/${storyboardId}/history`, { params })
+  },
+  getPaperStoryboardHistoryRevision(storyboardId, revisionId) {
+    return request.get(`/paper-studio/storyboards/${storyboardId}/history/revisions/${revisionId}`)
+  },
+  previewPaperStoryboardHistoryFork(storyboardId, body) {
+    return request.post(`/paper-studio/storyboards/${storyboardId}/history/fork-preview`, body)
+  },
+  forkPaperStoryboardHistoryDraft(storyboardId, body) {
+    return request.post(`/paper-studio/storyboards/${storyboardId}/history/fork-draft`, body)
+  },
+  forkPaperStoryboardHistoryRun(storyboardId, body) {
+    return request.post(`/paper-studio/storyboards/${storyboardId}/history/fork-run`, body)
+  },
+  getPaperStoryboardHistoryRun(storyboardId, runId) {
+    return request.get(`/paper-studio/storyboards/${storyboardId}/history/runs/${runId}`)
+  },
+  getPaperStoryboardHistoryAsset(storyboardId, assetVersionId) {
+    return request.get(`/paper-studio/storyboards/${storyboardId}/history/assets/${assetVersionId}`)
   },
   updatePaperStoryboard(storyboardId, body) {
     return request.put(`/paper-studio/storyboards/${storyboardId}`, body)
@@ -170,6 +185,12 @@ export const paperStudioAPI = {
   generationQuote(runId, body) {
     return request.post(`/paper-studio/runs/${runId}/generation-quote`, body)
   },
+  reusePreview(runId, body) {
+    return request.post(`/paper-studio/runs/${runId}/reuse-preview`, body)
+  },
+  applyReuse(runId, body) {
+    return request.post(`/paper-studio/runs/${runId}/apply-reuse`, body)
+  },
   authorizeGeneration(runId, body) {
     return request.post(`/paper-studio/runs/${runId}/generation-authorizations`, body)
   },
@@ -181,9 +202,6 @@ export const paperStudioAPI = {
   },
   advanceRun(runId, body) {
     return request.post(`/paper-studio/runs/${runId}/advance`, body)
-  },
-  recoverRun(runId, body) {
-    return request.post(`/paper-studio/runs/${runId}/recover`, body)
   },
   cancelRun(runId, body) {
     return request.post(`/paper-studio/runs/${runId}/cancel`, body)
@@ -199,9 +217,6 @@ export const paperStudioAPI = {
   },
   listEvents(runId) {
     return request.get(`/paper-studio/runs/${runId}/events`)
-  },
-  listContinuity(runId) {
-    return request.get(`/paper-studio/runs/${runId}/continuity`)
   },
   getRunReport(runId) {
     return request.get(`/paper-studio/runs/${runId}/report`)
@@ -241,11 +256,14 @@ export const paperStudioAPI = {
   syncAudioTiming(shotId, body) {
     return request.post(`/paper-studio/shots/${shotId}/sync-audio-timing`, body)
   },
+  continuityRepairPreview(shotId, body) {
+    return request.post(`/paper-studio/shots/${shotId}/continuity-repair-preview`, body)
+  },
+  continuityRepair(shotId, body) {
+    return request.post(`/paper-studio/shots/${shotId}/continuity-repair`, body)
+  },
   reviseMotion(shotId, body) {
     return request.post(`/paper-studio/shots/${shotId}/revise`, body)
-  },
-  listRevisions(shotId) {
-    return request.get(`/paper-studio/shots/${shotId}/revisions`)
   },
   getEvidence(shotId) {
     return request.get(`/paper-studio/shots/${shotId}/evidence`)

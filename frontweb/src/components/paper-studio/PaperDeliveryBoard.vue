@@ -154,6 +154,7 @@ export default { components: { StatusText } }
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { mergeStatusLabel } from '@/utils/paperStudioLabels'
 
 const props = defineProps({
   delivery: { type: Object, default: null },
@@ -210,10 +211,6 @@ function videoLabel(item) {
   if (item.blockers?.some((entry) => entry.key === 'audio_duration')) return '视频短于完整声音'
   if (!item.audio_embedded) return '声音版本已变化'
   return '当前有声版本'
-}
-
-function mergeStatusLabel(status) {
-  return { pending: '等待合并', processing: '正在合并', failed: '合并失败', completed: '可交付', stale: '历史版本' }[status] || status
 }
 
 function formatTime(value) {

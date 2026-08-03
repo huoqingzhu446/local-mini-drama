@@ -1,6 +1,6 @@
-// Version 9 keeps v8 entity/spatial safeguards and adds explicit visual-scene
-// groups, transition contracts, per-scene environments, and continuity gates.
-const CURRENT_PLANNER_VERSION = 9;
+// Version 11 keeps v10 mobility safeguards and makes recorded speech the
+// bidirectional timing authority, preventing long silent action tails.
+const CURRENT_PLANNER_VERSION = 11;
 
 function isCurrentPlannerVersion(summary = {}) {
   return Number(summary?.planner_version || 0) === CURRENT_PLANNER_VERSION;

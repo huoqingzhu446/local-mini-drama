@@ -32,13 +32,17 @@ async function generateTextWithRetry(db, log, prompt, systemPrompt, options, att
 }
 
 
-function systemPrompt(entities, targetShotCount, defaultDuration) {
+function systemPrompt(entities, targetShotCount, defaultDuration, options = {}) {
+  const continuation = options.generation_mode === 'continuation';
+  const task = continuation
+    ? `现有分镜已经覆盖到第 ${Number(options.existing_shot_count || 0)} 镜。请只生成紧接其后的 ${targetShotCount} 个新增分镜，不得重写或重复现有分镜`
+    : `请把剧本拆解为 ${targetShotCount} 个左右的分镜`;
   const listByType = (type, label) => {
     const items = entities.filter((item) => item.entity_type === type);
     if (!items.length) return `${label}：（无）`;
     return `${label}：${items.map((item) => `「${item.name}」`).join('、')}`;
   };
-  return `你是短剧纸片动画的分镜师。请把剧本拆解为 ${targetShotCount} 个左右的分镜，输出严格 JSON（不要解释、不要 markdown 代码块）：
+  return `你是短剧纸片动画的分镜师。${task}，输出严格 JSON（不要解释、不要 markdown 代码块）：
 
 {
   "shots": [{
@@ -63,10 +67,23 @@ ${listByType('scene', '场景')}
 ${listByType('prop', '道具')}
 
 规则：
-1. 按剧情顺序覆盖整个剧本，重要转折必须有独立分镜。
+1. ${continuation ? '只输出新增分镜；承接现有最后一镜，从剧本尚未覆盖或需要继续展开的后续内容开始，禁止重复现有镜头的标题、画面、动作和对白。' : '按剧情顺序覆盖整个剧本，重要转折必须有独立分镜。'}
 2. environment_only 为 true 时 characters 必须为空数组、action 为空字符串。
 3. 每镜 duration 在 3-12 秒之间。
 4. 对白照抄剧本原文，不改写。只输出 JSON。`;
+}
+
+function generationPrompt(content, existingStoryboards, generationMode, targetShotCount) {
+  if (generationMode !== 'continuation') return `【剧本内容】\n${content}`;
+  const outline = existingStoryboards.map((item) => ({
+    shot_number: Number(item.shot_number),
+    title: item.title || '',
+    description: String(item.description || '').slice(0, 240),
+    action: String(item.action || '').slice(0, 180),
+    dialogue: String(item.dialogue || '').slice(0, 160),
+    narration: String(item.narration || '').slice(0, 160),
+  }));
+  return `【完整剧本内容】\n${content}\n\n【已经存在且必须原样保留的分镜】\n${JSON.stringify(outline)}\n\n【本次任务】\n只生成 ${targetShotCount} 个后续新增分镜。不要返回上述已有分镜，不要从第 1 镜重新拆解。`;
 }
 
 function entityIndex(entities) {
@@ -220,19 +237,36 @@ async function generate(db, cfg, log, episodeId, body = {}) {
     content = content.slice(0, MAX_SCRIPT_CHARS);
     truncated = true;
   }
-  const targetShotCount = Number(body.target_shot_count || 0) || Math.max(4, Math.min(12, Math.round(content.length / 400)));
+  const existingStoryboards = storyboardService.list(db, episode.id);
+  const generationMode = body.generation_mode || 'full';
+  if (generationMode === 'continuation' && !existingStoryboards.length) {
+    throw new PaperStudioError('PAPER_STUDIO_CONTINUATION_BASE_MISSING', '当前分集还没有可续写的现有分镜，请先使用完整拆分模式', { paper_episode_id: episode.id }, 409);
+  }
+  const targetShotCount = Number(body.target_shot_count || 0)
+    || (generationMode === 'continuation' ? 1 : Math.max(4, Math.min(12, Math.round(content.length / 400))));
   const defaultDuration = Number(body.default_duration || episode.default_duration || 6);
+  const startShotNumber = generationMode === 'continuation'
+    ? Math.max(...existingStoryboards.map((item) => Number(item.shot_number || 0))) + 1
+    : 1;
 
   let responseText;
   try {
     // 输出预算按镜数收紧：每镜约 400 token，响应越短、上游中转越不容易断流
     const maxTokens = Math.max(3000, Math.min(8000, 1500 + targetShotCount * 420));
-    responseText = await generateTextWithRetry(db, log, `【剧本内容】\n${content}`, systemPrompt(entities, targetShotCount, defaultDuration), {
+    responseText = await generateTextWithRetry(
+      db,
+      log,
+      generationPrompt(content, existingStoryboards, generationMode, targetShotCount),
+      systemPrompt(entities, targetShotCount, defaultDuration, {
+        generation_mode: generationMode,
+        existing_shot_count: existingStoryboards.length,
+      }), {
       scene_key: 'paper_storyboard_generation',
       max_tokens: maxTokens,
       temperature: 0.4,
       deepseek_thinking: 'disabled',
-    });
+      },
+    );
   } catch (error) {
     throw new PaperStudioError('PAPER_STUDIO_STORYBOARD_GENERATION_AI_FAILED', `文本模型生成分镜失败：${error.message || '未知错误'}`, { paper_episode_id: episode.id, script_id: script.id }, 502);
   }
@@ -249,7 +283,8 @@ async function generate(db, cfg, log, episodeId, body = {}) {
   }
 
   const warnings = [];
-  const shots = rawShots.slice(0, 48).map((raw, index) => normalizeShot(raw, index + 1, entities, defaultDuration, warnings));
+  const shots = rawShots.slice(0, generationMode === 'continuation' ? targetShotCount : 48)
+    .map((raw, index) => normalizeShot(raw, startShotNumber + index, entities, defaultDuration, warnings));
   const issues = scanDraftIssues(shots);
   if (truncated) warnings.unshift('剧本较长，本次只分析了前 3 万字');
   if (log) log.info('Paper storyboards generated (draft)', {
@@ -261,6 +296,9 @@ async function generate(db, cfg, log, episodeId, body = {}) {
   });
   return {
     script: { id: script.id, version_number: script.version_number },
+    generation_mode: generationMode,
+    existing_shot_count: existingStoryboards.length,
+    start_shot_number: startShotNumber,
     shots,
     warnings,
     issues,

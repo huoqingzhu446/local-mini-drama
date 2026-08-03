@@ -8,6 +8,7 @@ const revisionService = require('./paperSourceRevisionService');
 const audioMotionSyncService = require('./paperAudioMotionSyncService');
 const spatialContractService = require('./paperSpatialContractService');
 const transitionGateService = require('./paperTransitionGateService');
+const motionNaturalizer = require('./paperMotionNaturalizerService');
 const {
   PaperStudioError,
   assertExpectedVersion,
@@ -105,19 +106,25 @@ function planMotion(db, cfg, log, shotId, body = {}) {
   }
   const audioSync = audioMotionSyncService.sync(db, shot, { fps: cfg?.paper_studio?.fps || shot.motion_plan?.plan_json?.fps || 30 });
   if (audioSync.changed) shot = shotService.get(db, shot.id);
-  const report = evaluate(shot.motion_plan?.plan_json || {}, shot.plan_summary_json || {});
+  const motionQuality = motionNaturalizer.motionQualityFromConfig(cfg);
+  const naturalizedPlan = motionNaturalizer.naturalize(
+    shot.motion_plan?.plan_json || {},
+    motionQuality,
+    resolveTrackValue,
+  );
+  const report = evaluate(naturalizedPlan, shot.plan_summary_json || {});
   if (!report.pass) {
     const failure = { code: 'PAPER_STUDIO_MOTION_GATE_FAILED', message: '主体动作没有达到语义门禁', report, at: nowIso() };
     db.prepare("UPDATE paper_studio_shots SET status = 'motion_failed', last_error_json = ?, version = version + 1, updated_at = ? WHERE id = ?").run(JSON.stringify(failure), nowIso(), Number(shot.id));
     runAggregateService.sync(db, shot.run_id);
     throw new PaperStudioError(failure.code, failure.message, report, 422);
   }
-  db.prepare("UPDATE paper_motion_plans SET status = 'compiled', compiled_tracks_json = ?, version = version + 1, updated_at = ? WHERE shot_id = ?").run(JSON.stringify({ subject_tracks: shot.motion_plan.plan_json.subject_tracks, camera_tracks: shot.motion_plan.plan_json.camera_tracks, scene_tracks: shot.motion_plan.plan_json.scene_tracks || [], transition_tracks: shot.motion_plan.plan_json.transition_tracks || [], gate: report }), nowIso(), Number(shot.id));
+  db.prepare("UPDATE paper_motion_plans SET status = 'compiled', compiled_tracks_json = ?, version = version + 1, updated_at = ? WHERE shot_id = ? AND plan_revision_id = ?").run(JSON.stringify({ motion_plan: naturalizedPlan, subject_tracks: naturalizedPlan.subject_tracks, camera_tracks: naturalizedPlan.camera_tracks, scene_tracks: naturalizedPlan.scene_tracks || [], transition_tracks: naturalizedPlan.transition_tracks || [], gate: report }), nowIso(), Number(shot.id), Number(shot.current_plan_revision_id));
   const fallbackRepair = assetProductionService.ensureProceduralStateFallbacks(db, shot.id);
-  const snapshot = snapshotService.compile(db, cfg, shot.id);
+  const snapshot = snapshotService.compile(db, cfg, shot.id, { motionPlan: naturalizedPlan, motionQuality });
   db.prepare("UPDATE paper_studio_shots SET status = 'motion_ready', current_snapshot_id = ?, last_error_json = '{}', version = version + 1, updated_at = ? WHERE id = ?").run(snapshot.snapshot_id, nowIso(), Number(shot.id));
   db.prepare("UPDATE paper_studio_runs SET status = 'proofing', progress = 55, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.run_id));
-  db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key IN ('plan_motion','compile_snapshot')").run(JSON.stringify({ snapshot_id: snapshot.snapshot_id, snapshot_hash: snapshot.snapshot_hash, render_hash: snapshot.render_hash, gate: report }), nowIso(), nowIso(), Number(shot.run_id), Number(shot.id));
+  db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ? AND step_key IN ('plan_motion','compile_snapshot')").run(JSON.stringify({ snapshot_id: snapshot.snapshot_id, snapshot_hash: snapshot.snapshot_hash, render_hash: snapshot.render_hash, gate: report }), nowIso(), nowIso(), Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id));
   runAggregateService.sync(db, shot.run_id);
   if (log) log.info('Paper studio motion compiled', { shot_id: Number(shot.id), snapshot_id: snapshot.snapshot_id, render_hash: snapshot.render_hash, repaired_fallbacks: fallbackRepair.repaired_count });
   return { shot: shotService.get(db, shot.id), snapshot: { id: snapshot.snapshot_id, snapshot_hash: snapshot.snapshot_hash, render_hash: snapshot.render_hash, local_path: snapshot.local_path, reused: snapshot.reused }, gate: report, fallback_repair: fallbackRepair, audio_timing_sync: audioSync };

@@ -54,7 +54,7 @@ test('batch advance analyzes and confirms all four shots as one recoverable stag
   assert.equal(analyzed.run.status, 'plan_review');
   assert.ok(analyzed.run.shots.every((shot) => shot.status === 'analyzed'));
   assert.ok(analyzed.run.shots.every((shot) => shot.plan_summary_json.planner_version === CURRENT_PLANNER_VERSION));
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM paper_job_steps WHERE run_id = ?').get(run.id).count, 60);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM paper_job_steps WHERE run_id = ?').get(run.id).count, 64);
 
   const confirmed = await advanceService.advance(db, {}, log, run.id, { request_id: randomUUID(), expected_version: analyzed.run.version });
   assert.equal(confirmed.stage, 'confirm_plan');
@@ -124,6 +124,24 @@ test('startup recovery supersedes orphan preview rows and requeues deterministic
   assert.equal(step.status, 'queued');
   assert.equal(Number(step.attempt), 8);
   assert.equal(step.error_json, '{}');
+  db.close();
+});
+
+test('startup recovery releases a stranded rendering shot after its local worker is gone', () => {
+  const { db, run } = setup();
+  const analyzed = analyzerService.analyzeRun(db, log, run.id, {
+    request_id: randomUUID(), expected_version: run.version,
+  }, { fps: 30 }).run;
+  const shot = analyzed.shots[0];
+  db.prepare("UPDATE paper_studio_shots SET status = 'rendering' WHERE id = ?").run(Number(shot.id));
+  db.prepare("UPDATE paper_job_steps SET status = 'queued' WHERE shot_id = ? AND step_key = 'render_formal'")
+    .run(Number(shot.id));
+
+  const report = recoveryService.recoverOnStartup(db, log);
+  assert.equal(report.stranded_render_shots, 1);
+  const recovered = db.prepare('SELECT status, last_error_json FROM paper_studio_shots WHERE id = ?').get(Number(shot.id));
+  assert.equal(recovered.status, 'render_failed');
+  assert.equal(JSON.parse(recovered.last_error_json).code, 'PAPER_STUDIO_LOCAL_RENDER_INTERRUPTED');
   db.close();
 });
 
@@ -259,15 +277,16 @@ test('persistent orchestrator claims one dependency-ready step with an exclusive
   const downstream = db.prepare("SELECT * FROM paper_job_steps WHERE shot_id = ? AND step_key = 'generate_required_slots'").get(shot.id);
 
   assert.equal(orchestratorService.dependenciesCompleted(db, first), true);
-  assert.equal(orchestratorService.dependenciesCompleted(db, downstream), false);
-  const lease = orchestratorService.claim(db, first.id, 'worker-a', 60_000);
+  assert.equal(first.status, 'completed');
+  assert.equal(orchestratorService.dependenciesCompleted(db, downstream), true);
+  const lease = orchestratorService.claim(db, downstream.id, 'worker-a', 60_000);
   assert.equal(lease.lease_owner, 'worker-a');
-  assert.equal(orchestratorService.claim(db, first.id, 'worker-b', 60_000), null);
-  const stored = db.prepare('SELECT status, lease_owner, lease_expires_at FROM paper_job_steps WHERE id = ?').get(first.id);
+  assert.equal(orchestratorService.claim(db, downstream.id, 'worker-b', 60_000), null);
+  const stored = db.prepare('SELECT status, lease_owner, lease_expires_at FROM paper_job_steps WHERE id = ?').get(downstream.id);
   assert.equal(stored.status, 'running');
   assert.equal(stored.lease_owner, 'worker-a');
   assert.ok(Date.parse(stored.lease_expires_at) > Date.now());
-  assert.equal(orchestratorService.claim(db, downstream.id, 'worker-b', 60_000), null);
+  assert.equal(orchestratorService.claim(db, first.id, 'worker-b', 60_000), null);
   db.close();
 });
 

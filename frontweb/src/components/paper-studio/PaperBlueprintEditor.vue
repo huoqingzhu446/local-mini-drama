@@ -85,13 +85,9 @@
           <label>
             <span>主动作</span>
             <select v-model="blueprint.action_contract.primary_action" :disabled="!editable">
-              <option value="carry_move_sit">携带移动并坐下</option>
-              <option value="directed_move">定向移动</option>
-              <option value="state_transition">姿态切换</option>
-              <option value="generic_subject_action">通用主体动作</option>
-              <option value="environmental_depth_motion">环境层次运动</option>
-              <option value="map_route_reveal">战役地图推进</option>
-              <option value="siege_supply_sequence">缺粮·运粮·围城多阶段</option>
+              <option v-for="action in blueprintActions" :key="action.key" :value="action.key" :disabled="action.compatibility_only">
+                {{ action.label }}
+              </option>
             </select>
           </label>
           <label>
@@ -189,6 +185,21 @@
             <span>{{ transitionKindLabel(transitionAfter(index).kind) }}</span>
             <strong>{{ transitionDuration(transitionAfter(index)) }}</strong>
             <small>{{ transitionAfter(index).direction || '无方向' }} · {{ transitionAfter(index).requires_new_plate ? '正确模式：独立新背景' : '零调用模式：同地点虚拟机位' }}</small>
+            <label v-if="editable" class="transition-anchor">
+              <span>转场锚点 {{ Math.round(Number(transitionAfter(index).anchor_ratio ?? defaultTransitionAnchor(index)) * 100) }}%</span>
+              <input
+                v-model.number="transitionAfter(index).anchor_ratio"
+                type="range"
+                min="0.05"
+                max="0.95"
+                step="0.01"
+                :aria-label="`转场 ${index + 1} 时间锚点`"
+              />
+            </label>
+            <label v-if="editable" class="transition-duration-input">
+              <span>时长（秒）</span>
+              <input v-model.number="transitionAfter(index).duration_seconds" type="number" min="0.3" max="3" step="0.1" />
+            </label>
             <a
               v-if="shot?.evidence?.some((item) => String(item.target_key || '').startsWith(`${transitionAfter(index).key}_`))"
               :href="`#transition-evidence-${transitionAfter(index).key}`"
@@ -271,6 +282,7 @@ const EntitySelect = defineComponent({
 const props = defineProps({
   shot: { type: Object, default: null },
   busy: { type: Boolean, default: false },
+  actions: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['save', 'confirm'])
 const blueprint = ref(null)
@@ -283,6 +295,21 @@ const blueprintCompatibility = computed(() => paperBlueprintCompatibility(bluepr
 const generationCount = computed(() => (blueprint.value?.generation_slots || []).filter((slot) => slot.source === 'image_api').length)
 const visualScenes = computed(() => blueprint.value?.visual_scenes || [])
 const transitionContracts = computed(() => blueprint.value?.transition_contracts || [])
+const blueprintActions = computed(() => {
+  const selectable = props.actions
+    .filter((action) => action.blueprint_supported && action.user_selectable)
+    .map((action) => ({ ...action, compatibility_only: false }))
+  const current = blueprint.value?.action_contract?.primary_action
+  if (current && !selectable.some((action) => action.key === current)) {
+    const catalogued = props.actions.find((action) => action.key === current)
+    selectable.push({
+      key: current,
+      label: catalogued?.label || `${current}（历史动作）`,
+      compatibility_only: true,
+    })
+  }
+  return selectable
+})
 const visualBeats = computed(() => props.shot?.plan_summary_json?.visual_beats || [])
 const lowConfidenceScenes = computed(() => visualScenes.value.filter((scene) => Number(scene.confidence ?? 1) < 0.75))
 const lowConfidenceTransitions = computed(() => transitionContracts.value.filter((item) => Number(item.confidence ?? 1) < 0.75))
@@ -400,7 +427,7 @@ const validationIssues = computed(() => {
   if (blueprint.value.relations.some((relation) => !keySet.has(relation.subject_key) || !keySet.has(relation.object_key))) issues.push('关系中存在已删除的实体')
   const byKey = new Map(blueprint.value.entities.map((entity) => [entity.key, entity]))
   if (blueprint.value.relations.some((relation) => relation.predicate === 'holds' && /ground_vehicle|vehicle/.test(String(byKey.get(relation.object_key)?.role || '')))) {
-    issues.push('粮车、车辆等大型接地道具不能设置为手持关系')
+    issues.push('大型接地道具（车辆、推车、大型器物等）不能设置为手持关系')
   }
   if (blueprint.value.entities.some((entity) => bindingIssue(entity))) issues.push('实体库绑定与剧本证据不一致，请改为匿名角色或选择正确实体')
   if (blueprint.value.action_contract.waypoints.some((item) => !Number.isFinite(Number(item.x)) || !Number.isFinite(Number(item.y)))) issues.push('关键点坐标必须是数字')
@@ -424,7 +451,7 @@ function bindingIssue(entity) {
   // still highlighting that the binding needs review.
   if (!evidence || !name) return false
   if (evidence.includes(name)) return false
-  const shortName = name.replace(/^(?:秦军|楚军|赵军|军用|一辆|一队)/, '')
+  const shortName = name.replace(/^(?:一辆|一队|一箱|一捆|一名|一位)/, '')
   return !shortName || !evidence.includes(shortName)
 }
 
@@ -451,6 +478,7 @@ function sourceLabel(source) {
   return { image_api: '图片 API', local_derivation: '本地生成', existing_asset: '复用素材', procedural: '程序效果' }[source] || source
 }
 function transitionAfter(index) { return transitionContracts.value[index] || null }
+function defaultTransitionAnchor(index) { return (index + 1) / Math.max(2, visualScenes.value.length) }
 function beatsForScene(key) { return visualBeats.value.filter((beat) => beat.scene_key === key) }
 function confidenceLabel(value) {
   const score = Number(value ?? 1)
@@ -539,13 +567,16 @@ input:disabled, select:disabled { opacity: .65; }
 .scene-card dt { color: var(--paper-dim); }
 .scene-card dd { min-width: 0; margin: 0; color: var(--paper-muted); overflow-wrap: anywhere; }
 .scene-card code { color: #b9a67a; }
-.transition-card { flex: 0 0 138px; align-self: center; position: relative; display: flex; flex-direction: column; gap: 5px; padding: 12px; border-top: 1px solid #6f5d35; border-bottom: 1px solid #6f5d35; color: var(--paper-muted); text-align: center; }
+.transition-card { flex: 0 0 178px; align-self: center; position: relative; display: flex; flex-direction: column; gap: 5px; padding: 12px; border-top: 1px solid #6f5d35; border-bottom: 1px solid #6f5d35; color: var(--paper-muted); text-align: center; }
 .transition-card::before, .transition-card::after { content: ''; position: absolute; top: 50%; width: 10px; border-top: 1px solid #6f5d35; }
 .transition-card::before { left: -10px; }.transition-card::after { right: -10px; }
 .transition-card span { color: var(--paper-accent); font-size: var(--paper-fs-xs); }
 .transition-card strong { color: var(--paper-text); font: 600 var(--paper-fs-sm) ui-monospace, monospace; }
 .transition-card small, .transition-card em { color: var(--paper-dim); font-size: var(--paper-fs-xs); font-style: normal; line-height: 1.45; }
 .transition-card a { color: #83a982; font-size: var(--paper-fs-xs); }
+.transition-anchor, .transition-duration-input { display: grid; gap: 4px; margin-top: 4px; text-align: left; }
+.transition-anchor input { width: 100%; accent-color: var(--paper-accent); }
+.transition-duration-input input { width: 100%; box-sizing: border-box; border: 1px solid var(--paper-line); background: #111310; color: var(--paper-text); padding: 5px 7px; }
 .scene-warning { margin-top: 8px; padding: 9px 11px; border-left: 2px solid #b98252; background: #292117; color: #d7b889; font-size: var(--paper-fs-xs); }
 .blueprint-errors { margin: 16px 24px; padding: 12px 14px; border-left: 2px solid #bb695b; background: #2b1e1b; color: #dba99f; font-size: var(--paper-fs-sm); }
 .blueprint-errors ul { margin: 7px 0 0; padding-left: 18px; line-height: 1.7; }

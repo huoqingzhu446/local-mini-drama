@@ -59,9 +59,11 @@ function acceptedAssets(db, shotId) {
      FROM paper_asset_slots pas
      JOIN paper_source_families psf ON psf.id = pas.family_id
      LEFT JOIN paper_asset_versions pav ON pav.id = pas.current_version_id
-     WHERE psf.shot_id = ? AND psf.deleted_at IS NULL AND pas.deleted_at IS NULL
+     WHERE psf.shot_id = ?
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+       AND psf.deleted_at IS NULL AND pas.deleted_at IS NULL
      ORDER BY psf.id, pas.id`,
-  ).all(Number(shotId));
+  ).all(Number(shotId), Number(shotId));
 }
 
 function assertAssetVersions(cfg, rows) {
@@ -162,7 +164,7 @@ function assertSourceCurrent(db, detail, run) {
   revisionService.assertShotCurrent(db, detail.id);
 }
 
-function compile(db, cfg, shotId) {
+function compile(db, cfg, shotId, options = {}) {
   const detail = shotService.get(db, shotId);
   const run = db.prepare('SELECT * FROM paper_studio_runs WHERE id = ? AND deleted_at IS NULL').get(Number(detail.run_id));
   if (!run) throw new PaperStudioError('PAPER_STUDIO_RUN_NOT_FOUND', '纸片动画生产版本不存在', { run_id: detail.run_id }, 404);
@@ -173,8 +175,10 @@ function compile(db, cfg, shotId) {
   const versions = assertAssetVersions(cfg, acceptedAssets(db, detail.id));
   const root = spatialContractService.enrichComposition(compositionTree(detail, versions), versions);
   // M1/M5 运动自然化：仅作用于 snapshot 拷贝；配置关闭或历史 snapshot 保持旧行为
-  const motionQuality = motionNaturalizer.motionQualityFromConfig(cfg);
-  const motionPlan = motionNaturalizer.naturalize(detail.motion_plan.plan_json, motionQuality, resolveTrackValue);
+  const motionQuality = options.motionQuality === undefined
+    ? motionNaturalizer.motionQualityFromConfig(cfg)
+    : options.motionQuality;
+  const motionPlan = options.motionPlan || motionNaturalizer.naturalize(detail.motion_plan.plan_json, motionQuality, resolveTrackValue);
   const sourceFamilies = familySpecs(detail);
   const proofTargets = detail.plan_summary_json?.proof_targets || [];
   const timingHash = detail.motion_plan.timing_hash || sha256(canonicalJson({ fps: motionPlan.fps, duration_frames: motionPlan.duration_frames, cues: motionPlan.cues || [] }));
@@ -192,6 +196,22 @@ function compile(db, cfg, shotId) {
         required_duration_frames: requiredAudioFrames,
         authored_duration_seconds: audioBundle.readiness.authored_duration_seconds,
         speech_end_seconds: audioBundle.readiness.speech_end_seconds,
+        effective_duration_seconds: audioBundle.readiness.effective_duration_seconds,
+      },
+      409,
+    );
+  }
+  const speechEndFrame = Number(audioBundle.readiness?.speech_end_frame || 0);
+  if (speechEndFrame > 0 && requiredAudioFrames !== Number(motionPlan.duration_frames || 0)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_AUDIO_TIMELINE_MISMATCH',
+      '动作时间轴没有按当前语音时长收束；请重新规划动作后再冻结快照',
+      {
+        shot_id: Number(detail.id),
+        motion_duration_frames: Number(motionPlan.duration_frames || 0),
+        required_duration_frames: requiredAudioFrames,
+        speech_end_frame: speechEndFrame,
+        authored_duration_seconds: audioBundle.readiness.authored_duration_seconds,
         effective_duration_seconds: audioBundle.readiness.effective_duration_seconds,
       },
       409,

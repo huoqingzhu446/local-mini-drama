@@ -25,6 +25,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import { shotStatusLabel } from '@/utils/paperStudioLabels'
 
 const props = defineProps({
   mode: { type: String, default: 'select' },
@@ -75,13 +76,7 @@ function onSelect(item) {
 }
 
 function statusLabel(status) {
-  const labels = {
-    pending: '待分析', analyzed: '已分析', plan_confirmed: '计划确认', asset_pending: '素材中', asset_review: '待审素材',
-    asset_ready: '素材就绪', motion_ready: '动作就绪', proof_ready: '门禁通过',
-    preview_ready: '待批准', approved: '已批准', rendering: '渲染中', rendered: '已渲染', published: '已发布',
-    asset_failed: '素材失败', motion_failed: '动作失败', proof_failed: '门禁失败', render_failed: '渲染失败', stale: '已失效',
-  }
-  return labels[status] || status
+  return shotStatusLabel(status, { compact: true })
 }
 </script>
 

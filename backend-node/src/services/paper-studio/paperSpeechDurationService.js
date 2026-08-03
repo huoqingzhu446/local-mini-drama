@@ -1,4 +1,5 @@
 const DEFAULT_TAIL_PADDING_SECONDS = 0.5;
+const MINIMUM_AUDIO_DRIVEN_SECONDS = 5;
 
 function normalizeFps(value) {
   const fps = Number(value || 30);
@@ -41,8 +42,15 @@ function durationProfile({
     : 0;
   const requiredWithTail = speechEndFrame > 0 ? speechEndFrame + tailPaddingFrames : authoredFrames;
   // Keep the UI and delivery timeline readable while preserving a deterministic
-  // frame boundary. Whole-second rounding also leaves room for AAC encoder delay.
-  const effectiveFrames = Math.max(authoredFrames, Math.ceil(requiredWithTail / fps) * fps);
+  // frame boundary. When speech exists it is the timing authority in both
+  // directions: long speech extends the shot and short speech contracts it.
+  // Five seconds is the universal lower bound used by the most demanding paper
+  // template, while whole-second rounding leaves room for AAC encoder delay.
+  const audioDrivenFrames = Math.max(
+    Math.round(MINIMUM_AUDIO_DRIVEN_SECONDS * fps),
+    Math.ceil(requiredWithTail / fps) * fps,
+  );
+  const effectiveFrames = speechEndFrame > 0 ? audioDrivenFrames : authoredFrames;
   return {
     fps,
     authored_duration_frames: authoredFrames,
@@ -57,6 +65,8 @@ function durationProfile({
     overflow_frames: Math.max(0, speechEndFrame - authoredFrames),
     overflow_seconds: Number((Math.max(0, speechEndFrame - authoredFrames) / fps).toFixed(3)),
     duration_extended: effectiveFrames > authoredFrames,
+    duration_shortened: effectiveFrames < authoredFrames,
+    duration_adjusted: effectiveFrames !== authoredFrames,
     authored_fits_speech: speechEndFrame <= authoredFrames,
     tracks,
   };
@@ -64,6 +74,7 @@ function durationProfile({
 
 module.exports = {
   DEFAULT_TAIL_PADDING_SECONDS,
+  MINIMUM_AUDIO_DRIVEN_SECONDS,
   normalizeFps,
   audioEndFrame,
   durationProfile,

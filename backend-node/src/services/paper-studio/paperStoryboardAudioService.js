@@ -206,7 +206,7 @@ function assertNoRenderInProgress(db, storyboardId) {
 
 function invalidateActiveSnapshots(db, storyboardId, now) {
   const shots = db.prepare(
-    `SELECT id, run_id, status, current_snapshot_id
+    `SELECT id, run_id, status, current_snapshot_id, current_plan_revision_id
      FROM paper_studio_shots
      WHERE paper_storyboard_id = ? AND deleted_at IS NULL
        AND status NOT IN ('published','cancelled','stale','pending','analyzed','plan_confirmed','asset_pending','asset_review','asset_failed')`,
@@ -215,8 +215,8 @@ function invalidateActiveSnapshots(db, storyboardId, now) {
     if (shot.current_snapshot_id == null) continue;
     db.prepare("UPDATE paper_render_snapshots SET status = 'superseded' WHERE shot_id = ? AND status IN ('compiled','approved')").run(Number(shot.id));
     db.prepare("UPDATE paper_proof_runs SET status = 'superseded' WHERE shot_id = ? AND status IN ('pending','running','passed','completed')").run(Number(shot.id));
-    db.prepare("UPDATE paper_motion_plans SET status = 'confirmed', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ?")
-      .run(now, Number(shot.id));
+    db.prepare("UPDATE paper_motion_plans SET status = 'confirmed', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ? AND plan_revision_id = ?")
+      .run(now, Number(shot.id), Number(shot.current_plan_revision_id));
     db.prepare(
       `UPDATE paper_studio_shots
        SET status = 'asset_ready', current_snapshot_id = NULL, approved_snapshot_id = NULL,
@@ -227,10 +227,10 @@ function invalidateActiveSnapshots(db, storyboardId, now) {
       `UPDATE paper_job_steps
        SET status = 'queued', result_json = '{}', error_json = '{}', lease_owner = NULL,
            lease_expires_at = NULL, started_at = NULL, completed_at = NULL, updated_at = ?
-       WHERE run_id = ? AND shot_id = ? AND step_key IN
+       WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ? AND step_key IN
          ('plan_motion','compile_snapshot','render_proof','dynamic_gate','render_preview',
           'wait_preview_approval','render_formal','publish_video')`,
-    ).run(now, Number(shot.run_id), Number(shot.id));
+    ).run(now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id));
     runAggregateService.sync(db, shot.run_id);
   }
   return shots.map((shot) => Number(shot.id));
@@ -316,6 +316,8 @@ function workspace(db, cfg, storyboardId, source = null) {
     overflow_frames: result.overflow_frames,
     overflow_seconds: result.overflow_seconds,
     duration_extended: result.duration_extended,
+    duration_shortened: result.duration_shortened,
+    duration_adjusted: result.duration_adjusted,
     authored_fits_speech: result.authored_fits_speech,
     timing_tracks: result.tracks,
     dialogue: currentVersion(db, storyboard, 'dialogue'),
@@ -342,6 +344,8 @@ function applyTimingToContext(db, context, fps = 30) {
       duration: Number(result.effective_duration_seconds || context.storyboard.duration || 6),
       audio_captions: captions,
       audio_duration_extended: Boolean(result.duration_extended),
+      audio_duration_shortened: Boolean(result.duration_shortened),
+      audio_duration_adjusted: Boolean(result.duration_adjusted),
     },
   };
 }

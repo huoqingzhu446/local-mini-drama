@@ -22,7 +22,9 @@ function colorDistance(r, g, b, key) {
 
 function chooseKeyColor(method, options) {
   if (Array.isArray(options.key_color) && options.key_color.length >= 3) return options.key_color.slice(0, 3).map(Number);
-  return method === 'white_v1' ? [255, 255, 255] : [0, 255, 0];
+  if (method === 'white_v1') return [255, 255, 255];
+  if (method === 'dark_v1') return [0, 0, 0];
+  return [0, 255, 0];
 }
 
 function median(values) {
@@ -36,13 +38,11 @@ function median(values) {
  * RGB(255,255,255). Sample a narrow border band so the key follows the actual
  * generated plate while avoiding most of the centered subject.
  */
-function estimateBorderKeyColor(data, info) {
+function borderCandidate(data, info, side) {
   const { width, height, channels } = info;
   const band = Math.max(2, Math.round(Math.min(width, height) * 0.025));
   const stride = Math.max(1, Math.floor(Math.min(width, height) / 300));
-  const red = [];
-  const green = [];
-  const blue = [];
+  const samples = [];
   for (let y = 0; y < height; y += stride) {
     for (let x = 0; x < width; x += stride) {
       if (x >= band && x < width - band && y >= band && y < height - band) continue;
@@ -53,14 +53,59 @@ function estimateBorderKeyColor(data, info) {
       // white_v1 intentionally targets a light plate. Excluding dark edge
       // pixels prevents a subject touching one border from polluting the key.
       const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      if (luminance < 128) continue;
-      red.push(r);
-      green.push(g);
-      blue.push(b);
+      if (side === 'light' ? luminance < 128 : luminance >= 128) continue;
+      samples.push([r, g, b]);
     }
   }
-  if (!red.length) return [255, 255, 255];
-  return [median(red), median(green), median(blue)];
+  if (!samples.length) return null;
+  const key = [0, 1, 2].map((channel) => median(samples.map((sample) => sample[channel])));
+  const variance = samples.reduce((sum, sample) => {
+    const distance = colorDistance(sample[0], sample[1], sample[2], key);
+    return sum + distance * distance;
+  }, 0) / samples.length;
+  return { side, key, sample_count: samples.length, variance, deviation: Math.sqrt(variance) };
+}
+
+function estimateBorderKey(data, info, mode = 'auto') {
+  const light = borderCandidate(data, info, 'light');
+  const dark = borderCandidate(data, info, 'dark');
+  const total = Number(light?.sample_count || 0) + Number(dark?.sample_count || 0);
+  let selected;
+  if (mode === 'white_v1') selected = light;
+  else if (mode === 'dark_v1') selected = dark;
+  else {
+    const eligible = [light, dark].filter((candidate) => candidate
+      && candidate.sample_count >= Math.max(64, total * 0.35));
+    selected = eligible.sort((left, right) => (
+      (left.variance + (1 - left.sample_count / Math.max(1, total)) * 64)
+      - (right.variance + (1 - right.sample_count / Math.max(1, total)) * 64)
+    ))[0] || [light, dark].filter(Boolean).sort((left, right) => right.sample_count - left.sample_count)[0];
+  }
+  const fallback = mode === 'dark_v1' ? [0, 0, 0] : [255, 255, 255];
+  const key = selected?.key || fallback;
+  const sampleCount = Number(selected?.sample_count || 0);
+  const deviation = Number(selected?.deviation || 0);
+  const alternate = selected === light ? dark : light;
+  const keySeparation = selected && alternate
+    ? colorDistance(selected.key[0], selected.key[1], selected.key[2], alternate.key)
+    : null;
+  return {
+    key,
+    mode: selected?.side === 'dark' ? 'dark_v1' : 'white_v1',
+    sample_count: sampleCount,
+    deviation: Number(deviation.toFixed(4)),
+    key_separation: keySeparation == null ? null : Number(keySeparation.toFixed(4)),
+    review_recommended: sampleCount < 500 || deviation > 24 || (keySeparation != null && keySeparation < 24),
+    candidates: [light, dark].filter(Boolean).map((candidate) => ({
+      mode: candidate.side === 'dark' ? 'dark_v1' : 'white_v1',
+      sample_count: candidate.sample_count,
+      deviation: Number(candidate.deviation.toFixed(4)),
+    })),
+  };
+}
+
+function estimateBorderKeyColor(data, info) {
+  return estimateBorderKey(data, info, 'white_v1').key;
 }
 
 function alphaForPixel(r, g, b, a, key, threshold, softness) {
@@ -80,6 +125,45 @@ function isChromaGreenKey(key) {
     && Number(key[1]) >= 180
     && Number(key[1]) - Number(key[0]) >= 80
     && Number(key[1]) - Number(key[2]) >= 80;
+}
+
+function contractAlphaEdges(data, info, options = {}) {
+  const { width, height } = info;
+  const pixels = width * height;
+  const radius = Math.max(0, Math.min(3, Math.round(Number(options.edge_contract_px ?? 1))));
+  const featherRatio = Math.max(0, Math.min(1, Number(options.edge_feather_ratio ?? 0.35)));
+  if (!radius || !pixels) {
+    return { applied: false, radius, feather_ratio: featherRatio, contracted_pixels: 0, alpha_removed: 0 };
+  }
+  const sourceAlpha = Buffer.allocUnsafe(pixels);
+  for (let pixel = 0; pixel < pixels; pixel += 1) sourceAlpha[pixel] = data[pixel * 4 + 3];
+  let contractedPixels = 0;
+  let alphaRemoved = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixel = y * width + x;
+      const current = sourceAlpha[pixel];
+      if (!current) continue;
+      let eroded = current;
+      for (let nearbyY = Math.max(0, y - radius); nearbyY <= Math.min(height - 1, y + radius); nearbyY += 1) {
+        for (let nearbyX = Math.max(0, x - radius); nearbyX <= Math.min(width - 1, x + radius); nearbyX += 1) {
+          eroded = Math.min(eroded, sourceAlpha[nearbyY * width + nearbyX]);
+        }
+      }
+      if (eroded >= current) continue;
+      const feathered = clampByte(eroded + ((current - eroded) * featherRatio));
+      data[pixel * 4 + 3] = feathered;
+      contractedPixels += 1;
+      alphaRemoved += current - feathered;
+    }
+  }
+  return {
+    applied: contractedPixels > 0,
+    radius,
+    feather_ratio: featherRatio,
+    contracted_pixels: contractedPixels,
+    alpha_removed: alphaRemoved,
+  };
 }
 
 /**
@@ -130,6 +214,8 @@ function defringeRgba(data, info, key, options = {}) {
       lowAlphaCleared += 1;
     }
   }
+
+  const edgeContraction = contractAlphaEdges(data, info, options);
 
   for (let pixel = 0; pixel < pixels; pixel += 1) {
     const offset = pixel * 4;
@@ -211,7 +297,7 @@ function defringeRgba(data, info, key, options = {}) {
   }
 
   return {
-    version: 'edge-defringe-v2',
+    version: 'edge-defringe-v3',
     key_color: key.map((value) => clampByte(value)),
     chroma_green: chromaGreen,
     unmixed_pixels: unmixedPixels,
@@ -221,6 +307,7 @@ function defringeRgba(data, info, key, options = {}) {
     despilled_pixels: despilledPixels,
     residual_key_edge_pixels: residualKeyEdgePixels,
     residual_key_edge_ratio: edgePixels ? Number((residualKeyEdgePixels / edgePixels).toFixed(6)) : 0,
+    edge_contraction: edgeContraction,
     low_alpha_cleanup: {
       applied: lowAlphaCleanupApplied,
       threshold: lowAlphaThreshold,
@@ -239,35 +326,40 @@ async function process(db, cfg, asset, options = {}) {
     throw new PaperError('PAPER_ASSET_PATH_INVALID', '抠图源文件不存在或路径非法', { asset_id: asset.id, local_path: sourceRel }, 422);
   }
   const method = options.method || 'green_screen_v1';
-  const threshold = Number(options.threshold ?? (method === 'white_v1' ? 34 : 72));
+  const threshold = Number(options.threshold ?? (['white_v1', 'dark_v1', 'auto'].includes(method) ? 34 : 72));
   const softness = Math.max(1, Number(options.softness ?? 22));
   const input = await sharp(source).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const data = Buffer.from(input.data);
+  const explicitKey = Array.isArray(options.key_color) && options.key_color.length >= 3;
+  const borderEstimate = ['white_v1', 'dark_v1', 'auto'].includes(method) && !explicitKey
+    ? estimateBorderKey(data, input.info, method)
+    : null;
+  const key = borderEstimate?.key || chooseKeyColor(method, options);
+  for (let y = 0; y < input.info.height; y += 1) {
+    for (let x = 0; x < input.info.width; x += 1) {
+      const i = (y * input.info.width + x) * 4;
+      const alpha = alphaForPixel(data[i], data[i + 1], data[i + 2], data[i + 3], key, threshold, softness);
+      data[i + 3] = alpha;
+    }
+  }
+  const defringe = defringeRgba(data, input.info, key, { apply_unmix: true });
   let transparent = 0;
   let visible = 0;
   let minX = input.info.width;
   let minY = input.info.height;
   let maxX = -1;
   let maxY = -1;
-  const explicitKey = Array.isArray(options.key_color) && options.key_color.length >= 3;
-  const key = method === 'white_v1' && !explicitKey
-    ? estimateBorderKeyColor(data, input.info)
-    : chooseKeyColor(method, options);
   for (let y = 0; y < input.info.height; y += 1) {
     for (let x = 0; x < input.info.width; x += 1) {
-      const i = (y * input.info.width + x) * 4;
-      const alpha = alphaForPixel(data[i], data[i + 1], data[i + 2], data[i + 3], key, threshold, softness);
-      data[i + 3] = alpha;
-      if (alpha < 12) {
-        transparent += 1;
-      } else {
+      const alpha = data[(y * input.info.width + x) * 4 + 3];
+      if (alpha < 12) transparent += 1;
+      else {
         visible += 1;
         minX = Math.min(minX, x); minY = Math.min(minY, y);
         maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
       }
     }
   }
-  const defringe = defringeRgba(data, input.info, key, { apply_unmix: true });
   const total = input.info.width * input.info.height;
   const transparentRatio = total ? transparent / total : 0;
   const visibleRatio = total ? visible / total : 0;
@@ -282,7 +374,8 @@ async function process(db, cfg, asset, options = {}) {
     schema_version: 1,
     method,
     key_color: key,
-    key_color_source: explicitKey ? 'manual' : (method === 'white_v1' ? 'border_median' : 'preset'),
+    key_color_source: explicitKey ? 'manual' : (borderEstimate?.mode === 'white_v1' ? 'border_median' : borderEstimate ? `border_${borderEstimate.mode}` : 'preset'),
+    key_confidence: borderEstimate,
     source_hash: sha256File(source),
     width: input.info.width,
     height: input.info.height,
@@ -339,6 +432,8 @@ module.exports = {
   colorDistance,
   alphaForPixel,
   estimateBorderKeyColor,
+  estimateBorderKey,
   isChromaGreenKey,
+  contractAlphaEdges,
   defringeRgba,
 };

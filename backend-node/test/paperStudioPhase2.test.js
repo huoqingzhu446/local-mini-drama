@@ -85,14 +85,14 @@ test('environment-only establishing shot plans atmospheric depth instead of inve
   assert.equal(plan.motionPlan.primary_action, 'environmental_depth_motion');
 });
 
-test('strategic map shot reveals a registered route and encirclement without a fake character or generated labels', () => {
+test('flat-diagram shot reveals a registered path and completion marker without a fake character or generated labels', () => {
   const plan = build({ title: '战线北移', action: '镜头沿旧绢地图由定陶向北推进，路线逐段延伸并在巨鹿合拢，文字留给后期' }, {
     scene: { id: 9, prompt: '无文字的旧绢战略地图干净背景' }, props: [], characters: [],
   });
-  assertPlan(plan, 'map-route-reveal-v1');
+  assertPlan(plan, 'path-reveal-v1');
   assert.equal(plan.semanticContract.subjects[0].kind, 'effect');
-  assert.ok(plan.root.children.filter((node) => node.relation?.procedural_kind === 'route-reveal').length >= 2);
-  assert.equal(plan.motionPlan.primary_action, 'map_route_reveal');
+  assert.ok(plan.root.children.filter((node) => node.relation?.procedural_kind === 'path-reveal').length >= 2);
+  assert.equal(plan.motionPlan.primary_action, 'path_reveal');
   assert.ok(plan.summary.relation_contracts.includes('no generated text'));
 });
 

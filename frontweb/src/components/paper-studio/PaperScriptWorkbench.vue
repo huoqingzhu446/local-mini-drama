@@ -50,8 +50,15 @@
           <article class="ready">
             <strong>④ 一键生成纸片分镜</strong>
             <p>按剧本 + 实体库生成分镜草稿并自动绑定实体，预览满意后再应用。0 图片调用。</p>
+            <div v-if="existingShotCount" class="generation-mode" role="radiogroup" aria-label="分镜生成方式">
+              <button type="button" :class="{ active: generationMode === 'continuation' }" @click="setGenerationMode('continuation')">续写追加</button>
+              <button type="button" :class="{ active: generationMode === 'full' }" @click="setGenerationMode('full')">重新拆分全剧本</button>
+            </div>
+            <small v-if="existingShotCount && generationMode === 'continuation'" class="generation-note">
+              保留现有 {{ existingShotCount }} 镜，只生成第 {{ existingShotCount + 1 }} 镜以后。若是新增剧情，请先在上方补写并保存剧本新版本。
+            </small>
             <div class="gen-controls">
-              <label>目标镜数
+              <label>{{ generationMode === 'continuation' ? '新增镜数' : '目标总镜数' }}
                 <input v-model.number="targetShotCount" type="number" min="1" max="48" placeholder="自动" />
               </label>
               <button
@@ -60,7 +67,7 @@
                 :disabled="!canGen || generatingStoryboards || repairing || busy"
                 @click="emitGenerate"
               >
-                {{ generatingStoryboards ? `正在生成… ${genElapsed}s` : '生成纸片分镜' }}
+                {{ generatingStoryboards ? `正在生成… ${genElapsed}s` : generationMode === 'continuation' ? '生成后续分镜' : '生成纸片分镜' }}
               </button>
             </div>
             <small v-if="generatingStoryboards">文本模型正在拆解剧本，通常 15–60 秒；上游超时会自动重试最多 3 次，5 分钟无响应会报错。</small>
@@ -70,7 +77,10 @@
 
         <div v-if="sbDraft?.shots?.length" ref="draftPanel" class="draft-panel">
           <div class="draft-heading">
-            <strong>分镜草稿预览 · 来自剧本 v{{ sbDraft.script?.version_number }} · {{ sbDraft.shots.length }} 镜</strong>
+            <strong>
+              分镜草稿预览 · 来自剧本 v{{ sbDraft.script?.version_number }} · {{ sbDraft.shots.length }} 镜
+              <template v-if="isContinuationDraft"> · 将追加为第 {{ sbDraft.start_shot_number }}–{{ sbDraft.start_shot_number + sbDraft.shots.length - 1 }} 镜</template>
+            </strong>
             <div class="draft-heading-actions">
               <span v-if="draftIssues.length" class="draft-incomplete">{{ issueShotCount }} 镜不完整</span>
               <span v-else>完整性检查通过 · 应用前不会写入数据</span>
@@ -85,7 +95,7 @@
           </div>
           <p v-for="(warning, index) in sbDraft.warnings || []" :key="index" class="draft-warning">⚠ {{ warning }}</p>
           <article v-for="(shot, index) in sbDraft.shots" :key="index" class="draft-shot">
-            <span class="draft-number">{{ String(index + 1).padStart(2, '0') }}</span>
+              <span class="draft-number">{{ String(displayShotNumber(index)).padStart(2, '0') }}</span>
             <div class="draft-copy">
               <strong>{{ shot.title }} <i>{{ shot.duration }}s · {{ shot.shot_type || '—' }} · {{ shot.camera_motion || '—' }}</i></strong>
               <p v-if="shot.description">{{ shot.description }}</p>
@@ -128,7 +138,10 @@
             </footer>
           </section>
           <div class="draft-footer">
-            <div class="mode-select" role="radiogroup" aria-label="应用方式">
+            <div v-if="isContinuationDraft" class="append-lock">
+              只追加新分镜；现有 {{ sbDraft.existing_shot_count }} 镜及其图片、视频和历史版本不变
+            </div>
+            <div v-else class="mode-select" role="radiogroup" aria-label="应用方式">
               <button type="button" :class="{ active: applyMode === 'append' }" @click="applyMode = 'append'">追加到现有分镜后</button>
               <button type="button" :class="{ active: applyMode === 'replace' }" @click="applyMode = 'replace'">替换未发布分镜</button>
             </div>
@@ -139,7 +152,7 @@
               :title="draftIssues.length ? '请先补齐所有画面描述和主体动作' : repairPreview ? '请先接受或放弃 AI 补全建议' : ''"
               @click="$emit('apply-storyboards', applyMode)"
             >
-              {{ applying ? '正在应用…' : `应用 ${sbDraft.shots.length} 个分镜` }}
+              {{ applying ? '正在应用…' : isContinuationDraft ? `追加 ${sbDraft.shots.length} 个新分镜` : `应用 ${sbDraft.shots.length} 个分镜` }}
             </button>
             <button type="button" class="ghost" :disabled="applying || repairing" @click="$emit('discard-draft')">丢弃草稿</button>
           </div>
@@ -190,16 +203,19 @@ const props = defineProps({
   repairPreview: { type: Object, default: null },
   canGenerateStoryboards: { type: Boolean, default: false },
   hasEntities: { type: Boolean, default: false },
+  existingShotCount: { type: Number, default: 0 },
 })
 const emit = defineEmits([
   'save', 'select-version', 'generate-storyboards', 'repair-storyboards', 'accept-repairs', 'discard-repairs',
   'apply-storyboards', 'discard-draft',
 ])
 
-const targetShotCount = ref(null)
+const targetShotCount = ref(props.existingShotCount > 0 ? 1 : null)
+const generationMode = ref(props.existingShotCount > 0 ? 'continuation' : 'full')
 const applyMode = ref('append')
 // prop `draft`（分镜草稿）被本地剧本文本 ref `draft` 遮蔽，模板一律通过 sbDraft 访问
 const sbDraft = computed(() => props.draft)
+const isContinuationDraft = computed(() => sbDraft.value?.generation_mode === 'continuation')
 const draftIssues = computed(() => (sbDraft.value?.shots || []).flatMap((shot, index) => {
   const missingFields = []
   if (!String(shot?.description || '').trim()) missingFields.push('description')
@@ -210,9 +226,17 @@ const issueShotCount = computed(() => new Set(draftIssues.value.map((item) => it
 const draftPanel = ref(null)
 watch(() => props.draft, async (draft) => {
   if (draft?.shots?.length) {
+    if (draft.generation_mode === 'continuation') applyMode.value = 'append'
     await nextTick()
     draftPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
+})
+watch(() => props.existingShotCount, (count) => {
+  if (count > 0 && generationMode.value === 'full' && targetShotCount.value == null) {
+    generationMode.value = 'continuation'
+    targetShotCount.value = 1
+  }
+  if (count === 0) generationMode.value = 'full'
 })
 const genElapsed = ref(0)
 let genTimer = null
@@ -234,7 +258,17 @@ function emitGenerate() {
   emit('generate-storyboards', {
     target_shot_count: targetShotCount.value || null,
     script_version_id: props.activeScript?.id || null,
+    generation_mode: generationMode.value,
   })
+}
+
+function setGenerationMode(mode) {
+  generationMode.value = mode
+  if (mode === 'continuation' && !targetShotCount.value) targetShotCount.value = 1
+}
+
+function displayShotNumber(index) {
+  return Number(isContinuationDraft.value ? sbDraft.value?.start_shot_number || props.existingShotCount + 1 : 1) + index
 }
 
 function repairFieldLabel(field) {
@@ -256,7 +290,7 @@ watch(() => props.activeScript, (script) => {
     draft.value = script.content
     dirty.value = false
   }
-})
+}, { immediate: true })
 
 watch(() => props.episode?.id, () => {
   draft.value = ''
@@ -283,6 +317,7 @@ function onFileChosen(event) {
 function sourceLabel(kind) {
   if (kind === 'file_upload') return '上传文件'
   if (kind === 'legacy_copy') return '旧工作台复制'
+  if (kind === 'recovered_media') return '从历史素材恢复'
   return '手动粘贴'
 }
 
@@ -384,7 +419,11 @@ function formatTime(value) {
 .draft-footer .ghost { min-height: var(--paper-control-h); padding: 0 16px; border: 1px solid var(--paper-line); background: transparent; color: var(--paper-muted); font-size: var(--paper-fs-sm); cursor: pointer; }
 .next-steps strong { display: block; color: var(--paper-text); font-size: var(--paper-fs-base); }
 .next-steps p { margin: 8px 0 12px; color: var(--paper-dim); font-size: var(--paper-fs-sm); line-height: 1.6; }
-.next-steps button { min-height: var(--paper-hit-min); padding: 0 14px; border: 1px solid var(--paper-line); background: transparent; color: var(--paper-dim); font-size: var(--paper-fs-sm); cursor: not-allowed; opacity: .6; }
+.generation-mode { display: inline-flex; margin: 0 0 10px; }
+.generation-mode button { min-height: var(--paper-control-h); border-color: var(--paper-line); color: var(--paper-muted); cursor: pointer; opacity: 1; }
+.generation-mode button.active { border-color: var(--paper-accent); background: #282216; color: var(--paper-accent); }
+.generation-note { display: block; margin: -2px 0 12px; color: #a99b79; font-size: var(--paper-fs-xs); line-height: 1.55; }
+.append-lock { padding: 8px 10px; border-left: 2px solid var(--paper-accent); background: #22211c; color: var(--paper-muted); font-size: var(--paper-fs-sm); }
 .script-versions { border-left: 1px solid var(--paper-line); padding: 20px 0; overflow-y: auto; }
 .versions-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 18px 12px; color: var(--paper-dim); font-size: var(--paper-fs-sm); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 .versions-heading i { display: grid; place-items: center; min-width: 20px; height: 20px; border: 1px solid var(--paper-line); border-radius: 50%; font-style: normal; font-size: var(--paper-fs-xs); }

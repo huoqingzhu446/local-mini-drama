@@ -10,14 +10,75 @@ const ACTION_CATALOG = Object.freeze({
   hold_and_lift: { family: 'attachment', revision_axes: ['intensity', 'timing', 'direction', 'rotation', 'relation'] },
   foreground_occluded_action: { family: 'occlusion', revision_axes: ['intensity', 'timing', 'occlusion', 'relation', 'state'] },
   directed_move: { family: 'staging', revision_axes: ['timing', 'direction', 'relation', 'state', 'staging'] },
+  transport_move: { family: 'mobility-ensemble', revision_axes: ['timing', 'direction', 'relation', 'state', 'staging', 'grounding'] },
   state_transition: { family: 'staging', revision_axes: ['timing', 'relation', 'state', 'staging'] },
   generic_subject_action: { family: 'free', revision_axes: ['intensity', 'timing', 'direction', 'rotation', 'state', 'relation'] },
   subject_settle: { family: 'free', revision_axes: ['intensity', 'timing', 'direction', 'rotation', 'state', 'relation'] },
   environmental_depth_motion: { family: 'environment', revision_axes: ['intensity', 'timing', 'direction', 'depth'] },
-  map_route_reveal: { family: 'information-reveal', revision_axes: ['intensity', 'timing', 'direction'] },
+  path_reveal: { family: 'information-reveal', revision_axes: ['intensity', 'timing', 'direction'] },
+  multi_beat_grounded_sequence: { family: 'multi-beat-grounded-sequence', revision_axes: ['timing', 'direction', 'state', 'relation', 'staging', 'grounding'] },
   object_sequence_transition: { family: 'object-sequence', revision_axes: ['intensity', 'timing', 'direction', 'rotation', 'state', 'relation', 'staging'] },
-  siege_supply_sequence: { family: 'multi-beat-grounded-sequence', revision_axes: ['timing', 'direction', 'state', 'relation', 'staging', 'grounding'] },
 });
+
+const ACTION_UI = Object.freeze({
+  carry_move_sit: { label: '携带移动并坐下', user_selectable: true, blueprint_supported: true, compiler_strategy: 'compound' },
+  directed_move: { label: '定向移动', user_selectable: true, blueprint_supported: true, compiler_strategy: 'generic' },
+  transport_move: { label: '接地运输移动', user_selectable: true, blueprint_supported: true, compiler_strategy: 'transport' },
+  state_transition: { label: '姿态切换', user_selectable: true, blueprint_supported: true, compiler_strategy: 'generic' },
+  generic_subject_action: { label: '通用主体动作', user_selectable: true, blueprint_supported: true, compiler_strategy: 'generic' },
+  environmental_depth_motion: { label: '环境层次运动', user_selectable: true, blueprint_supported: true, compiler_strategy: 'environment' },
+  path_reveal: { label: '路径逐步揭示', user_selectable: true, blueprint_supported: true, compiler_strategy: 'path-reveal' },
+  multi_beat_grounded_sequence: { label: '多节拍接地序列', user_selectable: true, blueprint_supported: true, compiler_strategy: 'multi-beat-grounded' },
+});
+
+const ACTION_ALIASES = Object.freeze({
+  map_route_reveal: 'path_reveal',
+  siege_supply_sequence: 'multi_beat_grounded_sequence',
+});
+
+const BLUEPRINT_ID_ALIASES = Object.freeze({
+  'map-route-reveal-v1': 'path-reveal-v1',
+  'blueprint-map-route-reveal-v2': 'blueprint-path-reveal-v1',
+  'siege-supply-sequence-v1': 'multi-beat-grounded-sequence-v1',
+  'siege-supply-sequence-v2': 'multi-beat-grounded-sequence-v1',
+  'siege-supply-sequence-v3': 'multi-beat-grounded-sequence-v1',
+});
+
+const PROCEDURAL_KIND_ALIASES = Object.freeze({
+  'route-reveal': 'path-reveal',
+  'map-title-card': 'label-card',
+  'army-formation': 'crowd-formation',
+  'ember-field': 'ember-drift',
+});
+
+const APPEARANCE_ALIASES = Object.freeze({
+  'qin-silhouette': 'neutral-silhouette',
+});
+
+function normalizeAction(action) {
+  return ACTION_ALIASES[action] || action;
+}
+
+function normalizeBlueprintId(catalogKey) {
+  return BLUEPRINT_ID_ALIASES[catalogKey] || catalogKey;
+}
+
+function normalizeProceduralKind(kind) {
+  return PROCEDURAL_KIND_ALIASES[kind] || kind;
+}
+
+function normalizeAppearance(appearance) {
+  return APPEARANCE_ALIASES[appearance] || appearance;
+}
+
+function isPathRevealSummary(summary = {}) {
+  const action = normalizeAction(summary.primary_action);
+  const catalogKey = normalizeBlueprintId(String(summary.catalog_key || ''));
+  return action === 'path_reveal'
+    || summary.path_reveal === true
+    || summary.map_route === true
+    || /(?:path|map)-route-reveal|path-reveal/.test(catalogKey);
+}
 
 const NUMERIC_LIMITS = Object.freeze({
   x: [-2, 2],
@@ -62,7 +123,8 @@ function validateTrack(track, durationFrames) {
 
 function validatePlan(plan = {}) {
   const durationFrames = Math.max(2, Number(plan.duration_frames || 0));
-  const catalog = ACTION_CATALOG[plan.primary_action] || null;
+  const normalizedAction = normalizeAction(plan.primary_action);
+  const catalog = ACTION_CATALOG[normalizedAction] || null;
   const assertions = [{
     key: 'primary_action_catalogued',
     pass: Boolean(catalog),
@@ -85,19 +147,41 @@ function validatePlan(plan = {}) {
   });
   return {
     pass: assertions.every((assertion) => assertion.pass),
-    action: catalog ? { key: plan.primary_action, ...catalog } : null,
+    action: catalog ? { key: normalizedAction, ...catalog, legacy_key: normalizedAction === plan.primary_action ? null : plan.primary_action } : null,
     assertions,
     subject_motion_ranges: (plan.subject_tracks || []).filter((track) => track.property !== 'state').map((track) => ({ target: track.target, property: track.property, range: numericRange(track) })),
   };
 }
 
 function get(action) {
-  const item = ACTION_CATALOG[action];
-  return item ? { key: action, ...item } : null;
+  const normalizedAction = normalizeAction(action);
+  const item = ACTION_CATALOG[normalizedAction];
+  return item ? {
+    key: normalizedAction,
+    ...item,
+    ...(ACTION_UI[normalizedAction] || { label: normalizedAction, user_selectable: false, blueprint_supported: false, compiler_strategy: null }),
+    legacy_key: normalizedAction === action ? null : action,
+  } : null;
 }
 
 function list() {
-  return Object.entries(ACTION_CATALOG).map(([key, item]) => ({ key, ...item }));
+  return Object.keys(ACTION_CATALOG).map((key) => get(key));
 }
 
-module.exports = { ACTION_CATALOG, NUMERIC_LIMITS, get, list, validatePlan };
+module.exports = {
+  ACTION_CATALOG,
+  ACTION_UI,
+  ACTION_ALIASES,
+  BLUEPRINT_ID_ALIASES,
+  PROCEDURAL_KIND_ALIASES,
+  APPEARANCE_ALIASES,
+  NUMERIC_LIMITS,
+  normalizeAction,
+  normalizeBlueprintId,
+  normalizeProceduralKind,
+  normalizeAppearance,
+  isPathRevealSummary,
+  get,
+  list,
+  validatePlan,
+};

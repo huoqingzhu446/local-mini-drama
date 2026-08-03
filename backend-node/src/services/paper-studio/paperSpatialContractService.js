@@ -57,7 +57,10 @@ function stateIsGrounded(placement, state) {
 
 function spatialNodesFromRoot(root) {
   return flattenNodes(root)
-    .filter((node) => node.kind === 'asset' && node.relation?.placement?.support_kind === 'ground')
+    .filter((node) => (
+      (node.kind === 'asset' || (node.kind === 'group' && node.relation?.mobility_contract))
+      && node.relation?.placement?.support_kind === 'ground'
+    ))
     .map((node) => ({
       key: node.key,
       scene_key: node.relation?.scene_key || null,

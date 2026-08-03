@@ -44,6 +44,7 @@
           <span>制作</span>
         </label>
         <div v-if="Number(storyboard.id) === Number(currentId)" class="row-tools">
+          <button type="button" :disabled="busy" title="查看全部历史版本" @click="$emit('history', storyboard.id)">历</button>
           <button type="button" :disabled="index === 0 || busy" title="上移" @click="$emit('move', storyboard.id, -1)">↑</button>
           <button type="button" :disabled="index === storyboards.length - 1 || busy" title="下移" @click="$emit('move', storyboard.id, 1)">↓</button>
         </div>
@@ -63,6 +64,8 @@
 </template>
 
 <script setup>
+import { storyboardStatusLabel } from '@/utils/paperStudioLabels'
+
 const props = defineProps({
   episodeId: { type: [Number, String], default: null },
   storyboards: { type: Array, default: () => [] },
@@ -71,14 +74,14 @@ const props = defineProps({
   busy: { type: Boolean, default: false },
 })
 
-defineEmits(['create', 'select', 'toggle', 'move'])
+defineEmits(['create', 'select', 'toggle', 'move', 'history'])
 
 function isSelected(id) {
   return props.selectedIds.some((selectedId) => Number(selectedId) === Number(id))
 }
 
 function statusLabel(status) {
-  return { draft: '草稿', ready: '参考图就绪', in_production: '制作中', published: '已发布', archived: '已归档' }[status] || status
+  return storyboardStatusLabel(status)
 }
 </script>
 
@@ -119,7 +122,7 @@ function statusLabel(status) {
 .paper-storyboard-row.selected .run-select { color: #a9956c; }
 .row-tools { position: absolute; right: 5px; bottom: 4px; display: flex; gap: 2px; opacity: 0; transition: opacity .16s ease; }
 .paper-storyboard-row:hover .row-tools, .paper-storyboard-row.active .row-tools { opacity: 1; }
-.row-tools button { width: 18px; height: 17px; padding: 0; border: 0; background: #171816; color: var(--paper-muted); font-size: var(--paper-fs-sm); cursor: pointer; }
+.row-tools button { min-width: 18px; height: 17px; padding: 0 3px; border: 0; background: #171816; color: var(--paper-muted); font-size: var(--paper-fs-sm); cursor: pointer; }
 .row-tools button:disabled { opacity: .25; }
 .empty-shot { width: 100%; min-height: 138px; display: grid; place-items: center; align-content: center; gap: 7px; padding: 18px; border: 1px dashed var(--paper-line); background: transparent; color: var(--paper-muted); text-align: center; cursor: pointer; }
 .empty-shot:hover { border-color: var(--paper-accent); color: var(--paper-accent); }

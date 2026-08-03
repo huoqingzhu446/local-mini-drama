@@ -57,6 +57,10 @@ function validateRenderedMedia(snapshotJson, mediaInfo) {
     Math.max(max, (Number(source.from_frame || 0) + Number(source.duration_frames || 0)) / fps)
   ), 0);
   const tolerance = Math.max(0.15, 2 / fps);
+  const minimumTimelineSeconds = 5;
+  const allowedPostrollSeconds = expectedSpeechEndSeconds > 0
+    ? Math.max(1.5, minimumTimelineSeconds - expectedSpeechEndSeconds)
+    : Infinity;
   const failures = [];
   if (!mediaInfo?.has_video) failures.push({ key: 'video_stream_missing' });
   if (Number(mediaInfo?.video_duration_seconds || mediaInfo?.format_duration_seconds || 0) + tolerance < expectedVideoSeconds) {
@@ -65,6 +69,15 @@ function validateRenderedMedia(snapshotJson, mediaInfo) {
   if (expectedSpeechEndSeconds > 0 && !mediaInfo?.has_audio) failures.push({ key: 'audio_stream_missing' });
   if (expectedSpeechEndSeconds > 0 && Number(mediaInfo?.audio_duration_seconds || 0) + tolerance < expectedSpeechEndSeconds) {
     failures.push({ key: 'audio_truncated', expected_seconds: expectedSpeechEndSeconds, actual_seconds: mediaInfo?.audio_duration_seconds || 0 });
+  }
+  if (expectedSpeechEndSeconds > 0 && expectedVideoSeconds - expectedSpeechEndSeconds > allowedPostrollSeconds + tolerance) {
+    failures.push({
+      key: 'excessive_silent_postroll',
+      speech_end_seconds: expectedSpeechEndSeconds,
+      video_end_seconds: expectedVideoSeconds,
+      actual_postroll_seconds: Number((expectedVideoSeconds - expectedSpeechEndSeconds).toFixed(3)),
+      max_postroll_seconds: Number(allowedPostrollSeconds.toFixed(3)),
+    });
   }
   return {
     pass: failures.length === 0,
@@ -88,10 +101,18 @@ function assertRenderedMedia(snapshotJson, videoPath) {
   return report;
 }
 
-function runWorker(cfg, log, { snapshotPath, output, mode, scale, crf }) {
+function runWorkerAttempt(cfg, log, {
+  snapshotPath, output, mode, scale, crf, concurrency, timeoutMs, attempt,
+}) {
   return new Promise((resolve, reject) => {
-    const args = [workerScript, '--snapshot', snapshotPath, '--output', output, '--public-dir', storageRoot(cfg), '--mode', mode, '--scale', String(scale)];
+    const args = [
+      workerScript, '--snapshot', snapshotPath, '--output', output,
+      '--public-dir', storageRoot(cfg), '--mode', mode, '--scale', String(scale),
+      '--timeout-ms', String(timeoutMs),
+    ];
     if (crf != null) args.push('--crf', String(crf));
+    if (mode === 'proof') args.push('--proof-targets-per-browser', String(Math.max(1, Number(cfg?.paper_studio?.proof_browser_targets_per_session || 5))));
+    else args.push('--concurrency', String(concurrency));
     const child = spawn(process.execPath, args, { cwd: backendRoot, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -103,13 +124,53 @@ function runWorker(cfg, log, { snapshotPath, output, mode, scale, crf }) {
     child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
     child.once('error', reject);
     child.once('close', (code) => {
-      if (code !== 0) return reject(new PaperStudioError('PAPER_STUDIO_RENDER_WORKER_FAILED', `纸片渲染进程失败（exit ${code}）`, { mode, stderr: stderr.slice(-4000), stdout: stdout.slice(-2000) }, 500));
+      if (code !== 0) return reject(new PaperStudioError('PAPER_STUDIO_RENDER_WORKER_FAILED', `纸片渲染进程失败（exit ${code}）`, {
+        mode, attempt, concurrency, timeout_ms: timeoutMs,
+        stderr: stderr.slice(-4000), stdout: stdout.slice(-2000),
+      }, 500));
       const manifestPath = path.join(output, 'manifest.json');
       if (!fs.existsSync(manifestPath)) return reject(new PaperStudioError('PAPER_STUDIO_RENDER_MANIFEST_MISSING', '纸片渲染进程未生成 manifest', { mode, output }, 500));
       try { resolve(JSON.parse(fs.readFileSync(manifestPath, 'utf8'))); }
       catch (error) { reject(new PaperStudioError('PAPER_STUDIO_RENDER_MANIFEST_INVALID', '纸片渲染 manifest 无法解析', { error: error.message }, 500)); }
     });
   });
+}
+
+async function runWorker(cfg, log, { snapshotPath, output, mode, scale, crf }) {
+  const previewConcurrency = Math.max(1, Math.min(2, Number(cfg?.paper_studio?.preview_render_concurrency || 2)));
+  const formalConcurrency = Math.max(1, Number(cfg?.paper_studio?.formal_render_concurrency || cfg?.paper_studio?.render_concurrency || 1));
+  const firstConcurrency = mode === 'preview' ? previewConcurrency : mode === 'formal' ? formalConcurrency : 1;
+  const firstTimeoutMs = mode === 'preview'
+    ? Math.max(30_000, Number(cfg?.paper_studio?.preview_frame_timeout_ms || 120_000))
+    : mode === 'formal'
+      ? Math.max(60_000, Number(cfg?.paper_studio?.formal_component_timeout_ms || 180_000))
+      : 180_000;
+  try {
+    return await runWorkerAttempt(cfg, log, {
+      snapshotPath, output, mode, scale, crf,
+      concurrency: firstConcurrency,
+      timeoutMs: firstTimeoutMs,
+      attempt: 1,
+    });
+  } catch (error) {
+    const stderr = String(error?.details?.stderr || '');
+    const retryableDelay = error?.code === 'PAPER_STUDIO_RENDER_WORKER_FAILED'
+      && /delayRender|timed?\s*out|timeout/i.test(stderr);
+    const retryableMode = mode === 'preview' || mode === 'formal';
+    if (!retryableMode || !retryableDelay) throw error;
+    const retryTimeoutMs = mode === 'formal'
+      ? Math.max(firstTimeoutMs, Number(cfg?.paper_studio?.formal_retry_timeout_ms || 300_000))
+      : Math.max(firstTimeoutMs, 180_000);
+    if (mode === 'preview' && firstConcurrency === 1 && retryTimeoutMs === firstTimeoutMs) throw error;
+    if (log) log.warn(`Paper studio ${mode} stalled; restarting worker with one render tab`, {
+      output, first_concurrency: firstConcurrency, retry_concurrency: 1,
+      first_timeout_ms: firstTimeoutMs, retry_timeout_ms: retryTimeoutMs,
+    });
+    return runWorkerAttempt(cfg, log, {
+      snapshotPath, output, mode, scale, crf, concurrency: 1,
+      timeoutMs: retryTimeoutMs, attempt: 2,
+    });
+  }
 }
 
 async function pixelDifference(baselinePath, comparisonPath) {
@@ -339,6 +400,16 @@ function assertSnapshotManifest(snapshotRow, manifest) {
   }
 }
 
+function persistedRenderFailure(error, extra = {}) {
+  return {
+    code: error?.code || 'PAPER_STUDIO_RENDER_FAILED',
+    message: error?.message || '纸片渲染失败',
+    ...extra,
+    details: error?.details || null,
+    at: nowIso(),
+  };
+}
+
 async function proof(db, cfg, log, shotId, body = {}) {
   revisionService.assertShotCurrent(db, shotId);
   schemaService.assertValid('apiShotAction', body, '执行动态门禁的参数无效');
@@ -380,10 +451,10 @@ async function proof(db, cfg, log, shotId, body = {}) {
     return { shot: shotService.get(db, shot.id), proof: { id: proofRunId, proof_hash: proofHash, report } };
   } catch (error) {
     const row = db.prepare('SELECT status FROM paper_proof_runs WHERE id = ?').get(proofRunId);
-    if (row?.status === 'running') db.prepare("UPDATE paper_proof_runs SET status = 'failed', report_json = ?, completed_at = ? WHERE id = ?").run(JSON.stringify({ error: error.message, code: error.code || null }), nowIso(), proofRunId);
+    const failure = persistedRenderFailure(error, { step_key: 'render_proof', proof_run_id: proofRunId });
+    if (row?.status === 'running') db.prepare("UPDATE paper_proof_runs SET status = 'failed', report_json = ?, completed_at = ? WHERE id = ?").run(JSON.stringify(failure), nowIso(), proofRunId);
     const latest = db.prepare('SELECT status FROM paper_studio_shots WHERE id = ?').get(Number(shot.id));
-    if (latest?.status === 'motion_ready') {
-      const failure = { code: error.code || 'PAPER_STUDIO_PROOF_RENDER_FAILED', message: error.message, proof_run_id: proofRunId, at: nowIso() };
+    if (['motion_ready', 'proof_failed'].includes(String(latest?.status || ''))) {
       db.prepare("UPDATE paper_studio_shots SET status = 'proof_failed', last_error_json = ?, version = version + 1, updated_at = ? WHERE id = ?").run(JSON.stringify(failure), nowIso(), Number(shot.id));
     }
     runAggregateService.sync(db, shot.run_id);
@@ -396,8 +467,17 @@ async function preview(db, cfg, log, shotId, body = {}) {
   schemaService.assertValid('apiShotAction', body, '渲染纸片预览的参数无效');
   const shot = shotService.get(db, shotId);
   assertExpectedVersion(shot.version, body.expected_version, '纸片动画镜头');
-  if (shot.status !== 'proof_ready') throw new PaperStudioError('PAPER_STUDIO_SHOT_STATE_CONFLICT', '当前镜头尚未通过动态门禁', { shot_id: shot.id, status: shot.status }, 409);
   const snapshot = snapshotService.get(db, shot.current_snapshot_id);
+  const previewRetry = shot.status === 'proof_failed'
+    && shot.last_error_json?.step_key === 'render_preview'
+    && Boolean(db.prepare(
+      `SELECT 1 AS ok FROM paper_proof_runs
+       WHERE shot_id = ? AND snapshot_id = ? AND run_kind = 'motion_proof' AND status = 'passed'
+       ORDER BY id DESC LIMIT 1`,
+    ).get(Number(shot.id), Number(snapshot.id)));
+  if (shot.status !== 'proof_ready' && !previewRetry) {
+    throw new PaperStudioError('PAPER_STUDIO_SHOT_STATE_CONFLICT', '当前镜头尚未通过动态门禁', { shot_id: shot.id, status: shot.status }, 409);
+  }
   assertSnapshotContinuity(snapshot.snapshot_json);
   const scale = Number(cfg?.paper_studio?.preview_scale || 0.5);
   const runId = createProofRun(db, shot.id, snapshot.id, 'preview', scale);
@@ -408,13 +488,19 @@ async function preview(db, cfg, log, shotId, body = {}) {
     const mediaDuration = assertRenderedMedia(snapshot.snapshot_json, manifest.video.path);
     const videoPath = toRelative(cfg, manifest.video.path);
     db.prepare("UPDATE paper_proof_runs SET status = 'completed', preview_local_path = ?, report_json = ?, proof_hash = ?, completed_at = ? WHERE id = ?").run(videoPath, JSON.stringify({ manifest, media_duration: mediaDuration, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }), manifest.video.hash, nowIso(), runId);
-    db.prepare("UPDATE paper_studio_shots SET status = 'preview_ready', version = version + 1, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.id));
+    db.prepare("UPDATE paper_studio_shots SET status = 'preview_ready', last_error_json = '{}', version = version + 1, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.id));
     db.prepare("UPDATE paper_studio_runs SET status = 'preview_ready', progress = 78, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.run_id));
-    db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key = 'render_preview'").run(JSON.stringify({ proof_run_id: runId, preview_local_path: videoPath, artifact_hash: manifest.video.hash, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }), nowIso(), nowIso(), Number(shot.run_id), Number(shot.id));
+    db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, error_json = '{}', completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key = 'render_preview'").run(JSON.stringify({ proof_run_id: runId, preview_local_path: videoPath, artifact_hash: manifest.video.hash, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }), nowIso(), nowIso(), Number(shot.run_id), Number(shot.id));
     runAggregateService.sync(db, shot.run_id);
     return { shot: shotService.get(db, shot.id), preview: { proof_run_id: runId, local_path: videoPath, url: `/static/${videoPath}`, artifact_hash: manifest.video.hash, snapshot_id: snapshot.id, render_hash: snapshot.render_hash } };
   } catch (error) {
-    db.prepare("UPDATE paper_proof_runs SET status = 'failed', report_json = ?, completed_at = ? WHERE id = ?").run(JSON.stringify({ error: error.message, code: error.code || null }), nowIso(), runId);
+    const failure = persistedRenderFailure(error, { step_key: 'render_preview', proof_run_id: runId });
+    const now = nowIso();
+    db.prepare("UPDATE paper_proof_runs SET status = 'failed', report_json = ?, completed_at = ? WHERE id = ?")
+      .run(JSON.stringify(failure), now, runId);
+    db.prepare("UPDATE paper_studio_shots SET status = 'proof_ready', last_error_json = ?, version = version + 1, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(failure), now, Number(shot.id));
+    runAggregateService.sync(db, shot.run_id);
     throw error;
   }
 }
@@ -617,14 +703,24 @@ async function renderFormal(db, cfg, log, shotId, body = {}) {
              version = version + 1, updated_at = ?
          WHERE id = ? AND status != 'published'`,
       ).run(video.id, now, Number(shot.id));
-      db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key = 'render_formal'").run(JSON.stringify({ video_generation_id: video.id, snapshot_id: snapshot.id, render_hash: snapshot.render_hash, artifact_hash: manifest.video.hash, local_path: localPath, media_duration: mediaDuration }), now, now, Number(shot.run_id), Number(shot.id));
+      db.prepare(
+        `UPDATE paper_job_steps
+         SET status = 'completed', result_json = ?, error_json = '{}',
+             lease_owner = NULL, lease_expires_at = NULL,
+             completed_at = ?, updated_at = ?
+         WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ?
+           AND step_key = 'render_formal' AND status = 'running'`,
+      ).run(
+        JSON.stringify({ video_generation_id: video.id, snapshot_id: snapshot.id, render_hash: snapshot.render_hash, artifact_hash: manifest.video.hash, local_path: localPath, media_duration: mediaDuration }),
+        now, now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id),
+      );
     });
     finish();
     runAggregateService.sync(db, shot.run_id);
     return { shot: shotService.get(db, shot.id), video_generation: { id: video.id, generation_kind: 'paper_studio', local_path: localPath, video_url: url, artifact_hash: manifest.video.hash, snapshot_id: snapshot.id, render_hash: snapshot.render_hash, reused: false } };
   } catch (error) {
     const now = nowIso();
-    const failure = { code: error.code || 'PAPER_STUDIO_RENDER_FAILED', message: error.message };
+    const failure = persistedRenderFailure(error, { step_key: 'render_formal', video_generation_id: video.id });
     db.prepare("UPDATE video_generations SET status = 'failed', error_msg = ?, updated_at = ? WHERE id = ?").run(error.message, now, video.id);
     db.prepare("UPDATE paper_studio_shots SET status = 'render_failed', last_error_json = ?, version = version + 1, updated_at = ? WHERE id = ?").run(JSON.stringify(failure), now, Number(shot.id));
     db.prepare(
@@ -663,7 +759,17 @@ function publish(db, cfg, log, shotId, body = {}) {
         .run(video.video_url, now, Number(shot.legacy_storyboard_id || shot.storyboard_id));
     }
     db.prepare("UPDATE paper_studio_shots SET status = 'published', version = version + 1, updated_at = ? WHERE id = ?").run(now, Number(shot.id));
-    db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key = 'publish_video'").run(JSON.stringify({ video_generation_id: Number(video.id), video_url: video.video_url, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }), now, now, Number(shot.run_id), Number(shot.id));
+    db.prepare(
+      `UPDATE paper_job_steps
+       SET status = 'completed', result_json = ?, error_json = '{}',
+           lease_owner = NULL, lease_expires_at = NULL,
+           completed_at = ?, updated_at = ?
+       WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ?
+         AND step_key = 'publish_video' AND status IN ('queued','running','failed_retryable')`,
+    ).run(
+      JSON.stringify({ video_generation_id: Number(video.id), video_url: video.video_url, snapshot_id: snapshot.id, render_hash: snapshot.render_hash }),
+      now, now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id),
+    );
     const remaining = db.prepare("SELECT COUNT(*) AS count FROM paper_studio_shots WHERE run_id = ? AND deleted_at IS NULL AND status != 'published'").get(Number(shot.run_id));
     db.prepare('UPDATE paper_studio_runs SET status = ?, progress = ?, completed_at = ?, updated_at = ? WHERE id = ?').run(Number(remaining.count) === 0 ? 'delivered' : 'partial', Number(remaining.count) === 0 ? 100 : 95, Number(remaining.count) === 0 ? now : null, now, Number(shot.run_id));
   });

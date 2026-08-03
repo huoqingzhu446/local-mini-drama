@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { createHash, randomUUID } = require('node:crypto');
 const Database = require('better-sqlite3');
 const sharp = require('sharp');
 
@@ -22,6 +22,8 @@ const snapshotService = require('../src/services/paper-studio/paperSnapshotServi
 const schemaService = require('../src/services/paper-studio/paperStudioSchemaService');
 const renderService = require('../src/services/paper-studio/paperStudioRenderService');
 const authorizationService = require('../src/services/paper-studio/paperGenerationAuthorizationService');
+const reuseService = require('../src/services/paper-studio/paperAssetReuseService');
+const orchestratorService = require('../src/services/paper-studio/paperOrchestratorService');
 
 const log = { info() {}, warn() {}, error() {}, errorw() {} };
 
@@ -159,13 +161,27 @@ test('asset production generates clean transparent layers from reusable referenc
     assert.ok(accepted.every((version) => version.source_hash?.startsWith('sha256:')));
     assert.equal(accepted.filter((version) => version.derivation_kind === 'image_api').length, 5);
     assert.equal(accepted.filter((version) => version.derivation_kind === 'image_api' && version.alpha_local_path).length, 4);
+    for (const version of accepted) {
+      const sourceBytes = fs.readFileSync(path.join(storage, version.source_local_path));
+      assert.equal(`sha256:${createHash('sha256').update(sourceBytes).digest('hex')}`, version.source_hash);
+      if (version.alpha_local_path) {
+        const alphaBytes = fs.readFileSync(path.join(storage, version.alpha_local_path));
+        assert.equal(`sha256:${createHash('sha256').update(alphaBytes).digest('hex')}`, version.alpha_hash);
+      }
+    }
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM image_generations WHERE generation_kind = 'paper_studio_asset' AND status = 'completed'").get().count, 5);
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM paper_asset_slots WHERE required_for_gate = 1 AND status != 'ready'").get().count, 0);
     assert.ok(accepted.every((version) => fs.existsSync(path.join(storage, version.source_local_path))));
+    assert.equal(db.prepare("SELECT status FROM paper_job_steps WHERE shot_id = ? AND step_key = 'technical_asset_gate'").get(result.shot.id).status, 'completed');
+    assert.equal(db.prepare("SELECT status FROM paper_job_steps WHERE shot_id = ? AND step_key = 'asset_gate'").get(result.shot.id).status, 'queued');
+    assert.equal(db.prepare("SELECT status FROM paper_job_steps WHERE shot_id = ? AND step_key = 'plan_motion'").get(result.shot.id).status, 'queued');
+    assert.equal(orchestratorService.runnableSteps(db).some((step) => step.step_key === 'plan_motion'), false);
 
     const approvedAssets = approveAllCurrentAssets(db, result.shot.id);
     assert.equal(approvedAssets.shot.status, 'asset_ready');
     assert.equal(runService.get(db, run.id).status, 'motion_planning');
+    assert.equal(db.prepare("SELECT status FROM paper_job_steps WHERE shot_id = ? AND step_key = 'asset_gate'").get(result.shot.id).status, 'completed');
+    assert.equal(orchestratorService.runnableSteps(db).some((step) => step.step_key === 'plan_motion'), true);
     const motion = motionGateService.planMotion(db, { storage: { local_path: storage }, paper_studio: { renderer_version: 'paper-studio-v3', proof_rule_version: 'paper-proof-v3' } }, log, result.shot.id, {
       request_id: randomUUID(), expected_version: approvedAssets.shot.version,
     });
@@ -177,6 +193,9 @@ test('asset production generates clean transparent layers from reusable referenc
     assert.ok(fs.existsSync(path.join(storage, motion.snapshot.local_path)));
     const frozen = snapshotService.get(db, motion.snapshot.id).snapshot_json;
     assert.equal(schemaService.validate('renderSnapshotV3', frozen).valid, true);
+    const compiledMotion = shotService.get(db, result.shot.id).motion_plan.compiled_tracks_json.motion_plan;
+    assert.deepEqual(compiledMotion, frozen.motion_plan);
+    assert.equal(compiledMotion.naturalized.pack, 'natural-v1');
     const actors = frozen.root.children.find((node) => node.key === 'supported_group').children.find((node) => node.key === 'actors');
     assert.deepEqual(Object.keys(actors.relation.state_asset_version_ids), ['engage', 'destabilize', 'separate']);
     const repeated = snapshotService.compile(db, { storage: { local_path: storage }, paper_studio: { renderer_version: 'paper-studio-v3', proof_rule_version: 'paper-proof-v3' } }, result.shot.id);
@@ -215,13 +234,20 @@ test('independent environment plate reuses the selected composition reference wi
     });
     assert.equal(quote.estimated_image_count, 0);
     assert.deepEqual(quote.slots, []);
-    const authorizationId = authorizeGeneration(db, run.id);
-    const readyToGenerate = shotService.get(db, before.id);
-    const generated = await assetService.generateAssets(db, { storage: { local_path: storage } }, log, before.id, {
-      request_id: randomUUID(), expected_version: readyToGenerate.version, authorization_id: authorizationId,
+    assert.equal(quote.local_derivation_count, 1);
+    assert.equal(quote.reuse_slots[0].derivation_kind, 'source_import');
+    assert.equal(quote.reuse_slots[0].local_source_kind, 'storyboard_reference');
+    const applied = await reuseService.applyReusePreview(db, { storage: { local_path: storage } }, log, run.id, {
+      request_id: randomUUID(), expected_version: run.version,
+      reuse_preview_fingerprint: quote.reuse_preview_fingerprint,
+      shot_ids: [Number(before.id)],
     });
+    assert.equal(applied.provider_call_delta, 0);
+    assert.deepEqual(applied.materialized_shot_ids, [Number(before.id)]);
     assert.equal(apiCalls, 0);
-    const version = generated.shot.families[0].slots.find((slot) => slot.slot_key === 'clean_plate').current_version;
+    const materialized = shotService.get(db, before.id);
+    assert.equal(materialized.status, 'asset_review');
+    const version = materialized.families[0].slots.find((slot) => slot.slot_key === 'clean_plate').current_version;
     assert.equal(version.derivation_kind, 'source_import');
     assert.equal(version.provenance_json.source_kind, 'storyboard_reference');
     assert.equal(version.provenance_json.local_path, referencePath);
@@ -229,7 +255,7 @@ test('independent environment plate reuses the selected composition reference wi
     assert.equal(version.quality_report_json.height, 360);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM image_generations WHERE paper_asset_version_id = ?').get(version.id).count, 0);
     const approved = assetReviewService.review(db, log, before.id, {
-      request_id: randomUUID(), expected_version: generated.shot.version,
+      request_id: randomUUID(), expected_version: materialized.version,
       action: 'approve', asset_version_ids: [Number(version.id)],
     });
     assert.equal(approved.shot.status, 'asset_ready');
@@ -572,6 +598,9 @@ test('local chroma matte removes RGB green spill as well as creating alpha', asy
     assert.equal(report.pass, true);
     assert.equal(report.matte_method, 'border_matte_v2');
     assert.equal(report.defringe.chroma_green, true);
+    assert.equal(report.defringe.version, 'edge-defringe-v3');
+    assert.equal(report.defringe.edge_contraction.radius, 1);
+    assert.ok(report.defringe.edge_contraction.contracted_pixels > 0);
     assert.ok(report.defringe.despilled_pixels > 0);
     assert.ok(report.residual_key_edge_ratio <= 0.02);
 
@@ -618,7 +647,7 @@ test('provider alpha cleanup removes diffuse low-alpha checkerboard noise', asyn
     const report = await assetService.alphaReport(inputPath, outputPath, { requireAlpha: true });
     assert.equal(report.pass, true);
     assert.equal(report.matte_method, 'provider_alpha');
-    assert.equal(report.defringe.version, 'edge-defringe-v2');
+    assert.equal(report.defringe.version, 'edge-defringe-v3');
     assert.equal(report.defringe.low_alpha_cleanup.applied, true);
     assert.ok(report.defringe.low_alpha_cleanup.cleared_pixels > 3000);
     assert.ok(report.transparent_ratio > 0.6);
@@ -627,6 +656,39 @@ test('provider alpha cleanup removes diffuse low-alpha checkerboard noise', asyn
     const pixelAt = (x, y) => Array.from(output.data.subarray((y * width + x) * 4, (y * width + x) * 4 + 4));
     assert.deepEqual(pixelAt(0, 0), [0, 0, 0, 0]);
     assert.deepEqual(pixelAt(48, 32), [105, 70, 40, 255]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('automatic matte detects a dark border plate without falling back to white', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lmd-paper-dark-matte-'));
+  const inputPath = path.join(root, 'dark-source.png');
+  const outputPath = path.join(root, 'cutout.png');
+  const width = 120;
+  const height = 80;
+  const pixels = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      pixels[offset] = 18; pixels[offset + 1] = 22; pixels[offset + 2] = 28; pixels[offset + 3] = 255;
+      if (x >= 30 && x <= 88 && y >= 14 && y <= 68) {
+        pixels[offset] = 196; pixels[offset + 1] = 112; pixels[offset + 2] = 54;
+      }
+    }
+  }
+  try {
+    await sharp(pixels, { raw: { width, height, channels: 4 } }).png().toFile(inputPath);
+    const report = await assetService.alphaReport(inputPath, outputPath, { requireAlpha: true });
+    assert.equal(report.pass, true);
+    assert.equal(report.matte_method, 'border_matte_dark_v1');
+    assert.deepEqual(report.key_color, [18, 22, 28]);
+    assert.equal(report.key_confidence.mode, 'dark_v1');
+    const output = await sharp(outputPath).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const cornerAlpha = output.data[3];
+    const centerAlpha = output.data[(40 * width + 60) * 4 + 3];
+    assert.equal(cornerAlpha, 0);
+    assert.equal(centerAlpha, 255);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

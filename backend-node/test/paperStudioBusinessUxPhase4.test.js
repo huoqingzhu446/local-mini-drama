@@ -142,6 +142,38 @@ test('speech longer than the authored shot extends the production timeline inste
   }
 });
 
+test('speech much shorter than the authored shot contracts the production timeline and keeps a short tail', async () => {
+  const { db, storage, cfg, storyboard } = setup();
+  try {
+    const authored = storyboardService.update(db, log, storyboard.id, {
+      request_id: randomUUID(), expected_version: storyboard.version, duration: 12,
+    });
+    const dialogue = await audioService.upload(db, cfg, log, authored.id, {
+      request_id: randomUUID(), expected_version: authored.version, audio_kind: 'dialogue',
+      start_seconds: '0', captions_enabled: 'true',
+    }, audioFile(silentWav(0.35)));
+    const narration = await audioService.upload(db, cfg, log, authored.id, {
+      request_id: randomUUID(), expected_version: dialogue.storyboard.version, audio_kind: 'narration',
+      start_seconds: '0', captions_enabled: 'true',
+    }, audioFile(silentWav(6)));
+    assert.equal(narration.audio.duration_extended, false);
+    assert.equal(narration.audio.duration_shortened, true);
+    assert.equal(narration.audio.duration_adjusted, true);
+    assert.equal(narration.audio.authored_duration_seconds, 12);
+    assert.equal(narration.audio.speech_end_seconds, 6);
+    assert.equal(narration.audio.effective_duration_seconds, 7);
+    const bundle = audioService.snapshotBundle(db, cfg, {
+      paper_storyboard_id: authored.id,
+      storyboard: { dialogue: authored.dialogue, narration: authored.narration, duration: 12 },
+    });
+    assert.equal(bundle.readiness.effective_duration_frames, 210);
+    assert.equal(bundle.captions.at(-1).end_frame, 180);
+  } finally {
+    db.close();
+    fs.rmSync(storage, { recursive: true, force: true });
+  }
+});
+
 test('audio cue and subtitle edits create a new version without mutating the accepted file', async () => {
   const { db, storage, cfg, storyboard } = setup();
   try {

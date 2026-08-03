@@ -143,7 +143,7 @@ test('independent environment-only blueprint reuses its composition reference an
   db.close();
 });
 
-test('independent strategic-map shot generates a clean map plus named commander markers and keeps overlays procedural', () => {
+test('independent path-reveal shot generates a clean flat diagram plus named subject markers and keeps overlays procedural', () => {
   const { db, project, storyboard, run } = setup({
     title: '秦军的绞索',
     description: '俯拍战役地图，定陶、黄河、邯郸、巨鹿等地名依次亮起，黑色箭头最终将巨鹿团团包围。',
@@ -174,31 +174,31 @@ test('independent strategic-map shot generates a clean map plus named commander 
     request_id: randomUUID(), expected_version: run.version,
   }, { fps: 30 });
   const shot = shotService.get(db, analyzed.run.shots[0].id);
-  assert.equal(shot.plan_summary_json.catalog_key, 'blueprint-map-route-reveal-v2');
-  assert.equal(shot.plan_summary_json.primary_action, 'map_route_reveal');
-  assert.deepEqual(shot.plan_summary_json.map_character_names, ['王离', '章邯']);
-  assert.deepEqual(shot.plan_summary_json.map_place_names, ['定陶', '黄河', '邯郸', '巨鹿']);
+  assert.equal(shot.plan_summary_json.catalog_key, 'blueprint-path-reveal-v1');
+  assert.equal(shot.plan_summary_json.primary_action, 'path_reveal');
+  assert.deepEqual(shot.plan_summary_json.path_subject_names, ['王离', '章邯']);
+  assert.equal(shot.plan_summary_json.path_waypoint_names.length, 3);
   assert.equal(shot.plan_summary_json.required_asset_count, 3);
   assert.deepEqual(
     shot.families.flatMap((family) => family.slots).map((slot) => [slot.slot_key, slot.asset_type, slot.constraints_json.label]),
     [
-      ['clean_plate', 'environment', '干净战役地图底图'],
-      ['map_character_1_cutout', 'character-cutout', '王离 · 地图人物剪影'],
-      ['map_character_2_cutout', 'character-cutout', '章邯 · 地图人物剪影'],
+      ['clean_plate', 'environment', '干净平面底图'],
+      ['path_subject_1_cutout', 'character-cutout', '王离 · 路径主体标记'],
+      ['path_subject_2_cutout', 'character-cutout', '章邯 · 路径主体标记'],
     ],
   );
   const cleanSlot = shot.families[0].slots[0];
   assert.equal(cleanSlot.constraints_json.allow_source_import, false);
   assert.equal(assetService.sourceForSlot(db, shot, cleanSlot), null);
   assert.equal(shot.families.flatMap((family) => family.slots).some((slot) => slot.asset_type === 'prop-cutout'), false);
-  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'route_reveal' && item.node_kind === 'procedural'));
-  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'encirclement' && item.node_kind === 'procedural'));
-  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'map_character_1_title' && item.relation_json.text.includes('秦军围城主将')));
-  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'map_character_2_title' && item.relation_json.text.includes('秦军野战主帅')));
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'path_reveal_layer' && item.node_kind === 'procedural'));
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'path_completion' && item.node_kind === 'procedural'));
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'path_subject_1_label' && item.relation_json.text.includes('秦军围城主将')));
+  assert.ok(shot.composition_nodes.some((item) => item.node_key === 'path_subject_2_label' && item.relation_json.text.includes('秦军野战主帅')));
   assert.equal(motionGateService.evaluate(shot.motion_plan.plan_json, shot.plan_summary_json).pass, true);
   const prompt = assetService.promptForSlot(db, shot, cleanSlot);
-  assert.match(prompt, /clean unannotated strategic-map base/);
-  assert.match(prompt, /Remove every route arrow/);
+  assert.match(prompt, /clean unannotated flat-diagram base/);
+  assert.match(prompt, /Remove every path line/);
   assert.doesNotMatch(prompt, /错误的漳水两岸战场场景/);
 
   const confirmed = analyzerService.confirmPlan(db, log, run.id, {
@@ -208,7 +208,7 @@ test('independent strategic-map shot generates a clean map plus named commander 
     request_id: randomUUID(), expected_version: confirmed.version,
   });
   assert.equal(quote.estimated_image_count, 3);
-  assert.deepEqual(quote.slots.map((slot) => slot.slot_key), ['clean_plate', 'map_character_1_cutout', 'map_character_2_cutout']);
+  assert.deepEqual(quote.slots.map((slot) => slot.slot_key), ['clean_plate', 'path_subject_1_cutout', 'path_subject_2_cutout']);
   db.close();
 });
 
@@ -272,7 +272,8 @@ test('editing a confirmed blueprint recompiles the graph and expires the old ima
   assert.equal(after.semantic_contract_json.subjects.find((subject) => subject.key === 'actor_1').identity, '红衣女孩');
   const actorX = after.motion_plan.plan_json.subject_tracks.find((track) => track.target === 'actor_1' && track.property === 'x');
   assert.equal(range(actorX) >= 0.7, true);
-  assert.equal(db.prepare("SELECT status FROM paper_job_steps WHERE shot_id = ? AND step_key = 'generate_layout_master'").get(after.id).status, 'blocked_user_authorization');
+  assert.equal(db.prepare("SELECT status FROM paper_job_steps WHERE shot_id = ? AND plan_revision_id = ? AND step_key = 'generate_layout_master'").get(after.id, after.current_plan_revision_id).status, 'blocked_user_authorization');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM paper_job_steps WHERE shot_id = ? AND plan_revision_id != ? AND status = 'superseded'").get(after.id, after.current_plan_revision_id).count > 0, true);
   const reconfirmed = analyzerService.confirmBlueprint(db, log, after.id, {
     request_id: randomUUID(), expected_version: after.version,
   });

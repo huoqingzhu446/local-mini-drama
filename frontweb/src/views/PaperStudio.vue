@@ -1,5 +1,5 @@
 <template>
-  <div class="paper-studio" :class="{ 'is-loading': loading, 'has-recovery': restoreLabel && !taskDrawerOpen }">
+  <div class="paper-studio" :class="{ 'is-loading': loading, 'has-recovery': restoreLabel && !taskDrawerOpen, 'has-error': Boolean(error) }">
     <PaperStudioHeader
       :drama="drama"
       :project="project"
@@ -20,9 +20,14 @@
     </div>
 
     <div v-if="error" class="error-banner" role="alert" aria-live="assertive">
-      <strong>当前操作未完成</strong>
-      <span>{{ error }}</span>
-      <button type="button" @click="refreshWorkspace">重新加载</button>
+      <div class="error-banner-copy">
+        <strong>当前操作未完成</strong>
+        <span>{{ error }}</span>
+      </div>
+      <div class="error-banner-actions">
+        <button v-if="transitionRecovery" type="button" class="solution-action" @click="solutionDialogOpen = true">查看解决方案</button>
+        <button type="button" class="reload-action" @click="refreshWorkspace">重新加载</button>
+      </div>
     </div>
 
     <div class="studio-layout" :class="{ 'rail-collapsed': railCollapsed }">
@@ -47,6 +52,7 @@
           @select="selectStoryboard"
           @toggle="toggleStoryboard"
           @move="moveStoryboard"
+          @history="openStoryboardHistory"
         />
 
         <div class="rail-secondary-actions">
@@ -61,6 +67,16 @@
             <span>生产版本</span>
             <i>{{ currentEpisodeRuns.length }}</i>
           </summary>
+          <button
+            v-if="unpublishedResumeRun && Number(unpublishedResumeRun.id) !== Number(currentRun?.id)"
+            type="button"
+            class="run-resume-card"
+            @click="resumeUnpublishedRun"
+          >
+            <span>继续未发布版本</span>
+            <strong>R{{ String(unpublishedResumeRun.run_number).padStart(2, '0') }} · {{ unpublishedRunResumeLabel(unpublishedResumeRun) }}</strong>
+            <small>已保存到数据库，刷新不会删除 · {{ unpublishedResumeRun.progress }}%</small>
+          </button>
           <button
             v-for="runItem in currentEpisodeRuns"
             :key="runItem.id"
@@ -96,6 +112,7 @@
               <span>PRODUCTION RUN</span>
               <strong>R{{ String(currentRun.run_number).padStart(2, '0') }} · {{ runStatusLabel(currentRun.status) }}</strong>
             </div>
+            <button v-if="currentShot?.paper_storyboard_id" type="button" class="history-entry" @click="openStoryboardHistory(currentShot.paper_storyboard_id)">查看该分镜全部历史</button>
           </div>
           <PaperShotRail
             mode="run"
@@ -107,6 +124,7 @@
             :run="currentRun"
             :shot="currentShot"
             :acting="acting"
+            :actions="actions"
             :regenerating-slot-id="regeneratingSlotId"
             @approve-asset="approveAsset"
             @rematte-asset="rematteAsset"
@@ -150,6 +168,7 @@
               :repair-preview="storyboardRepairPreview"
               :can-generate-storyboards="scripts.length > 0 && Boolean(library?.entities?.length)"
               :has-entities="Boolean(library?.entities?.length)"
+              :existing-shot-count="storyboards.length"
               @save="onSaveScript"
               @select-version="onSelectScriptVersion"
               @generate-storyboards="onGenerateStoryboards"
@@ -358,6 +377,68 @@
       @confirm="resolveImpact(true)"
       @cancel="resolveImpact(false)"
     />
+    <PaperHistoryReuseReviewDialog
+      :open="reuseReviewOpen"
+      :preview="reuseReviewPreview"
+      :busy="reuseReviewBusy"
+      @confirm="resolveHistoryReuseReview"
+      @cancel="reuseReviewOpen = false"
+    />
+    <PaperStoryboardHistoryDrawer
+      :open="historyDrawerOpen"
+      :storyboard-id="historyStoryboardId"
+      @close="historyDrawerOpen = false"
+      @open-center="openHistoryCenter"
+    />
+    <PaperStoryboardHistoryCenter
+      :open="historyCenterOpen"
+      :storyboard-id="historyStoryboardId"
+      :initial-selection="historyCenterSelection"
+      @close="historyCenterOpen = false"
+      @forked="handleHistoryForked"
+    />
+
+    <div v-if="solutionDialogOpen && transitionRecovery" class="solution-overlay" @click.self="solutionDialogOpen = false">
+      <section class="solution-dialog" role="dialog" aria-modal="true" aria-labelledby="transition-solution-title">
+        <header>
+          <div>
+            <span>CONTINUITY RECOVERY</span>
+            <h2 id="transition-solution-title">{{ transitionRecovery.title }}</h2>
+          </div>
+          <button type="button" aria-label="关闭解决方案" @click="solutionDialogOpen = false">×</button>
+        </header>
+
+        <div class="solution-context">
+          <strong v-if="transitionRecovery.context.shot_number || transitionRecovery.context.title">
+            分镜 {{ String(transitionRecovery.context.shot_number || currentShot?.shot_index + 1 || '').padStart(2, '0') }}
+            <template v-if="transitionRecovery.context.title"> · {{ transitionRecovery.context.title }}</template>
+          </strong>
+          <p>{{ transitionRecovery.summary }}</p>
+        </div>
+
+        <ol class="solution-list">
+          <li v-for="item in transitionRecovery.visibleFailures" :key="item.key">
+            <span>{{ item.message }}</span>
+            <strong>建议：{{ item.advice }}</strong>
+          </li>
+        </ol>
+        <p v-if="transitionRecovery.hiddenFailureCount" class="solution-more">另有 {{ transitionRecovery.hiddenFailureCount }} 项同类问题，可先按以上建议修改后重新检查。</p>
+
+        <div class="solution-steps">
+          <span>接下来</span>
+          <p>旧计划和所有历史图片都会保留。若只调整动作、转场或时间，可在当前生产版本内预览零调用修复；只有主体、地点或脚本事实变化时才需要新建生产版本，未变化图片仍会先进入复用预检。</p>
+        </div>
+
+        <footer>
+          <button v-if="currentShot?.motion_plan" type="button" class="solution-primary" :disabled="continuityRepairing" @click="previewContinuityRepair">
+            {{ continuityRepairing ? '正在校验…' : '预览零调用修复' }}
+          </button>
+          <button type="button" class="solution-secondary" @click="openStoryboardHistory(transitionRecovery.context.paper_storyboard_id)">查看全部历史图片</button>
+          <button type="button" class="solution-secondary" @click="editTransitionStoryboard">脚本事实已变化，定位原分镜</button>
+          <button type="button" class="solution-secondary" @click="solutionDialogOpen = false">留在当前页面</button>
+        </footer>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -377,6 +458,9 @@ import PaperShotRail from '@/components/paper-studio/PaperShotRail.vue'
 import PaperRunOverview from '@/components/paper-studio/PaperRunOverview.vue'
 import PaperTaskCenter from '@/components/paper-studio/PaperTaskCenter.vue'
 import PaperImpactDialog from '@/components/paper-studio/PaperImpactDialog.vue'
+import PaperHistoryReuseReviewDialog from '@/components/paper-studio/PaperHistoryReuseReviewDialog.vue'
+import PaperStoryboardHistoryDrawer from '@/components/paper-studio/PaperStoryboardHistoryDrawer.vue'
+import PaperStoryboardHistoryCenter from '@/components/paper-studio/PaperStoryboardHistoryCenter.vue'
 import { paperStudioAPI } from '@/api/paperStudio'
 import { usePaperStudioStore } from '@/stores/paperStudioStore'
 import {
@@ -387,18 +471,22 @@ import {
   savePaperStudioContext,
 } from '@/utils/paperStudioExperience'
 import {
+  findBestUnpublishedRun,
   isEnvironmentProductionShot,
   paperProductionActionDescription,
   paperProductionActionLabel,
+  unpublishedRunResumeLabel,
 } from '@/utils/paperStudioProduction'
+import { mergeStatusLabel, runStatusLabel } from '@/utils/paperStudioLabels'
+import { buildTransitionGateRecovery } from '@/utils/paperStudioRecovery'
 
 const route = useRoute()
 const router = useRouter()
 const store = usePaperStudioStore()
 const {
-  drama, project, runs, providers, currentRun, currentShot, currentPaperStoryboard,
+  drama, project, runs, providers, actions, currentRun, currentShot, currentPaperStoryboard,
   selectedEpisodeId, selectedStoryboardIds, doctor, loading, creatingRun, acting,
-  authoring, error, episodes, legacyEpisodes, currentEpisode, storyboards, episodeMerges,
+  authoring, error, errorContext, episodes, legacyEpisodes, currentEpisode, storyboards, episodeMerges,
   runEvents, draftByStoryboardId, saveStateByStoryboardId, hasUnsavedDrafts,
   referenceCandidates, currentAudio, episodeDelivery, taskCenter, taskCenterLoading,
   scripts, latestScript, library, extractionResult, extracting,
@@ -411,6 +499,15 @@ const qualityTier = ref('balanced')
 const imageProviderConfigId = ref(null)
 const motionRevision = ref('')
 const regeneratingSlotId = ref(null)
+const solutionDialogOpen = ref(false)
+const historyDrawerOpen = ref(false)
+const historyStoryboardId = ref(null)
+const historyCenterOpen = ref(false)
+const historyCenterSelection = ref(null)
+const reuseReviewOpen = ref(false)
+const reuseReviewPreview = ref(null)
+const reuseReviewBusy = ref(false)
+const continuityRepairing = ref(false)
 const taskDrawerOpen = ref(false)
 const railCollapsed = ref(false)
 const taskSection = ref('attention')
@@ -465,6 +562,18 @@ const deliverySummary = computed(() => {
 })
 const currentEpisodeRuns = computed(() => runs.value.filter((item) => Number(item.paper_episode_id) === Number(selectedEpisodeId.value)))
 const historicalRuns = computed(() => runs.value.filter((item) => !item.paper_episode_id))
+const unpublishedResumeRun = computed(() => findBestUnpublishedRun(currentEpisodeRuns.value, {
+  paperEpisodeId: selectedEpisodeId.value,
+}))
+const transitionRecovery = computed(() => buildTransitionGateRecovery(errorContext.value, {
+  shot_id: currentShot.value?.id,
+  paper_storyboard_id: currentShot.value?.paper_storyboard_id,
+  shot_number: Number(currentShot.value?.shot_index || 0) + 1,
+  title: currentShot.value?.storyboard?.title || '',
+}))
+watch(transitionRecovery, (recovery) => {
+  if (!recovery) solutionDialogOpen.value = false
+})
 function storyboardForm(storyboard) {
   return draftByStoryboardId.value[storyboard?.id] || storyboard || {}
 }
@@ -515,8 +624,10 @@ const currentActionButtonLabel = computed(() => {
   return currentActionLabel.value
 })
 const runnableStates = new Set(['draft', 'analyzing', 'plan_review', 'awaiting_generation_authorization', 'assets_generating', 'assets_processing', 'motion_planning', 'proofing', 'preview_ready', 'approved', 'rendering', 'partial', 'failed'])
+const nonExecutableActions = new Set(['review_source_changes', 'review_assets', 'review_preview', 'generate_assets', 'retry_failed_asset', 'wait_for_render'])
 const canRunCurrentAction = computed(() => Boolean(currentActionType.value)
-  && !['review_source_changes', 'review_assets', 'generate_assets', 'retry_failed_asset'].includes(currentActionType.value)
+  && !nonExecutableActions.has(currentActionType.value)
+  && !currentActionType.value.startsWith('wait_for_')
   && runnableStates.has(currentRun.value?.status))
 const batchableStates = new Set(['draft', 'analyzing', 'plan_review', 'assets_generating', 'assets_processing', 'motion_planning', 'proofing', 'preview_ready', 'approved', 'rendering', 'partial', 'failed'])
 const canAdvanceRun = computed(() => Boolean(currentRun.value?.id) && batchableStates.has(currentRun.value.status) && (currentRun.value.shots || []).some((shot) => !['published', 'cancelled', 'stale'].includes(shot.status)))
@@ -524,13 +635,17 @@ const revisableStates = new Set(['analyzed', 'plan_confirmed', 'asset_failed', '
 const canReviseMotion = computed(() => Boolean(currentShot.value?.motion_plan) && revisableStates.has(currentShot.value?.status))
 const canControlRun = computed(() => Boolean(currentRun.value?.id) && !['delivered', 'cancelled', 'stale'].includes(currentRun.value.status))
 const batchActionLabel = computed(() => {
-  const statuses = new Set((currentRun.value?.shots || []).map((shot) => shot.status))
-  const environmentOnly = (currentRun.value?.shots || []).length > 0
-    && (currentRun.value?.shots || []).every(isEnvironmentProductionShot)
+  const shots = currentRun.value?.shots || []
+  const statuses = new Set(shots.map((shot) => shot.status))
+  const environmentOnly = shots.length > 0 && shots.every(isEnvironmentProductionShot)
+  const activeShots = shots.filter((shot) => !['published', 'cancelled', 'stale'].includes(shot.status))
+  const previewFailures = activeShots.filter((shot) => shot.last_error_json?.step_key === 'render_preview'
+    && ['proof_ready', 'proof_failed'].includes(shot.status))
   if (statuses.has('pending')) return '批量分析全部分镜'
   if (statuses.has('analyzed')) return '批量确认全部计划'
   if (statuses.has('plan_confirmed') || statuses.has('asset_failed')) return environmentOnly ? '批量生成／修复环境底板' : '批量生成／重试素材'
   if (statuses.has('asset_ready') || statuses.has('motion_failed')) return environmentOnly ? '批量生成／修复环境动态' : '批量规划主体动作'
+  if (activeShots.length > 0 && previewFailures.length === activeShots.length) return '批量重试预览渲染'
   if (statuses.has('motion_ready') || statuses.has('proof_failed')) return environmentOnly ? '批量检查环境动态' : '批量执行动态门禁'
   if (statuses.has('proof_ready')) return '批量渲染预览'
   if (statuses.has('approved') || statuses.has('render_failed')) return '批量渲染正式视频'
@@ -550,7 +665,7 @@ const nextActionDescription = computed(() => paperProductionActionDescription(cu
   revise_motion: '动作未通过门禁，需要修改主体动作或关系，不能用运镜替代。',
   run_proof: '渲染证明帧，生成 ROI、像素差和遮挡证据。',
   inspect_evidence: '检查失败证据后局部修订动作计划。',
-  render_preview: '用同一 snapshot 渲染低清预览。',
+  render_preview: '复用已通过的动态证明和同一 snapshot 重试低清预览，不调用图片 API。',
   approve_preview: '批准并绑定 snapshot、render hash 和 proof hash。',
   render_formal: '用已批准 snapshot 渲染正式 H.264。',
   retry_render: '复用同一 snapshot 重试正式渲染。',
@@ -561,6 +676,51 @@ const nextActionDescription = computed(() => paperProductionActionDescription(cu
 
 let pollTimer = null
 let autoSaveTimer = null
+
+const MANUAL_POLL_ACTIONS = new Set([
+  'confirm_shot_plan', 'confirm_plan', 'authorize_generation', 'review_assets',
+  'inspect_evidence', 'approve_preview', 'review_preview', 'review_source_changes',
+])
+const MANUAL_POLL_STATUSES = new Set([
+  'plan_review', 'awaiting_generation_authorization', 'assets_processing', 'proof_ready', 'preview_ready',
+])
+
+function activePollDelay() {
+  if (currentRun.value?.id && !['delivered', 'stale', 'cancelled'].includes(currentRun.value.status)) {
+    return MANUAL_POLL_ACTIONS.has(currentActionType.value) || MANUAL_POLL_STATUSES.has(currentRun.value.status)
+      ? 8000
+      : 2500
+  }
+  if (latestMerge.value && ['pending', 'processing'].includes(latestMerge.value.status)) return 2500
+  if (taskDrawerOpen.value && Number(taskCenter.value?.summary?.processing || 0) > 0) return 2500
+  return null
+}
+
+function schedulePoll(delay = activePollDelay()) {
+  if (pollTimer || delay == null) return
+  pollTimer = window.setTimeout(runPoll, Math.max(0, Number(delay)))
+}
+
+async function runPoll() {
+  pollTimer = null
+  if (document.visibilityState === 'visible' && !acting.value && !authoring.value) {
+    try {
+      if (currentRun.value?.id && !['delivered', 'stale', 'cancelled'].includes(currentRun.value.status)) await store.refreshActiveRun()
+      else if (latestMerge.value && ['pending', 'processing'].includes(latestMerge.value.status)) {
+        await Promise.all([store.loadPaperEpisodes(selectedEpisodeId.value), store.loadEpisodeMerges(), store.loadEpisodeDelivery()])
+      }
+      if (taskDrawerOpen.value && Number(taskCenter.value?.summary?.processing || 0) > 0) {
+        await store.loadTaskCenter({ silent: true })
+      }
+    } catch (_) {}
+  }
+  schedulePoll()
+}
+
+watch(
+  () => [currentRun.value?.id, currentRun.value?.status, currentActionType.value, latestMerge.value?.status, taskDrawerOpen.value, taskCenter.value?.summary?.processing],
+  () => schedulePoll(0),
+)
 
 function currentContext() {
   return {
@@ -724,22 +884,11 @@ onMounted(async () => {
     window.localStorage.setItem(paperStudioOnboardingKey(dramaId.value), new Date().toISOString())
     void store.recordProductEvent('onboarding_checklist_opened', { surface: 'paper_studio', stage: 'authoring' })
   }
-  pollTimer = window.setInterval(async () => {
-    if (document.visibilityState !== 'visible' || acting.value || authoring.value) return
-    try {
-      if (currentRun.value?.id && !['delivered', 'stale', 'cancelled'].includes(currentRun.value.status)) await store.refreshActiveRun()
-      else if (latestMerge.value && ['pending', 'processing'].includes(latestMerge.value.status)) {
-        await Promise.all([store.loadPaperEpisodes(selectedEpisodeId.value), store.loadEpisodeMerges(), store.loadEpisodeDelivery()])
-      }
-      if (taskDrawerOpen.value && Number(taskCenter.value?.summary?.processing || 0) > 0) {
-        await store.loadTaskCenter({ silent: true })
-      }
-    } catch (_) {}
-  }, 2500)
+  schedulePoll(0)
 })
 
 onUnmounted(() => {
-  if (pollTimer) window.clearInterval(pollTimer)
+  if (pollTimer) window.clearTimeout(pollTimer)
   if (autoSaveTimer) window.clearTimeout(autoSaveTimer)
   if (impactResolver) resolveImpact(false)
   window.removeEventListener('beforeunload', beforeUnload)
@@ -1227,7 +1376,25 @@ async function onSaveStyleAnchor(anchorText) {
   }
 }
 
-watch(selectedEpisodeId, () => { activeScript.value = null })
+let activeScriptLoadToken = 0
+watch([
+  selectedEpisodeId,
+  () => latestScript.value?.id,
+  () => latestScript.value?.paper_episode_id,
+], async ([episodeId, scriptId, scriptEpisodeId]) => {
+  const token = ++activeScriptLoadToken
+  if (!episodeId || !scriptId || Number(scriptEpisodeId) !== Number(episodeId)) {
+    activeScript.value = null
+    return
+  }
+  if (Number(activeScript.value?.paper_episode_id) === Number(episodeId) && activeScript.value?.content != null) return
+  try {
+    const loaded = await store.loadScriptContent(scriptId)
+    if (token === activeScriptLoadToken && Number(selectedEpisodeId.value) === Number(episodeId)) activeScript.value = loaded
+  } catch (cause) {
+    if (token === activeScriptLoadToken && cause?.message) ElMessage.error(`剧本正文加载失败：${cause.message}`)
+  }
+}, { immediate: true })
 
 async function refreshDelivery() {
   try {
@@ -1281,11 +1448,108 @@ async function editShotAudio() {
   document.querySelector('#paper-audio-workbench')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+async function editTransitionStoryboard() {
+  const storyboardId = Number(transitionRecovery.value?.context?.paper_storyboard_id || currentShot.value?.paper_storyboard_id || 0)
+  if (!storyboardId) {
+    solutionDialogOpen.value = false
+    ElMessage.warning('没有找到对应的原分镜，请从左侧分镜列表手动打开并修改。')
+    return
+  }
+  store.closeRun()
+  await store.selectPaperStoryboard(storyboardId)
+  workspaceMode.value = 'authoring'
+  solutionDialogOpen.value = false
+  syncRoute()
+  await nextTick()
+  const field = transitionRecovery.value?.focusField || 'description'
+  const selector = field === 'duration'
+    ? '.script-form .duration-field input'
+    : field === 'action'
+      ? '.script-form .field.wide:nth-of-type(4) textarea'
+      : '.script-form .field.wide:nth-of-type(3) textarea'
+  const input = document.querySelector(selector) || document.querySelector('.script-form textarea')
+  input?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  window.setTimeout(() => input?.focus(), 260)
+  ElMessage.info('已定位问题分镜；若主体、地点或脚本事实发生变化，保存后创建新生产版本。旧图片不会丢失，并会先做零调用复用预检。')
+}
+
+async function previewContinuityRepair() {
+  if (!currentShot.value?.id || !currentShot.value?.motion_plan?.plan_json || continuityRepairing.value) return
+  continuityRepairing.value = true
+  try {
+    const motionPlan = currentShot.value.motion_plan.plan_json
+    const response = await paperStudioAPI.continuityRepairPreview(currentShot.value.id, {
+      expected_version: Number(currentShot.value.version),
+      motion_plan: motionPlan,
+    })
+    const preview = response.preview
+    if (preview.repairability && !preview.repairability.pass) {
+      ElMessage.warning(preview.repairability.message || '当前生产状态暂时不能应用零调用修复')
+      return
+    }
+    if (!preview.can_apply_zero_call) {
+      ElMessage.warning(`当前动作计划仍有门禁问题，已保留 ${preview.asset_diff.preserved_asset_count} 张素材；请先在动作编辑器修正失败项，不需要重新生图。`)
+      return
+    }
+    if (!(await requestImpact({
+      title: '应用当前版本内的零调用连续性修复？',
+      description: '系统会新增计划修订并重新映射未变化素材，原 run、shot、旧计划和旧图片全部保留。',
+      impact: {
+        preserves: `${preview.asset_diff.preserved_asset_count} 张素材及其文件哈希；旧计划仍可在历史抽屉查看`,
+        invalidates: `${preview.asset_diff.invalidated_asset_count} 张；新增槽位 ${preview.asset_diff.added_slot_count} 个`,
+        cost: `图片 API ${preview.asset_diff.image_api_calls} 次`,
+      },
+      confirmLabel: '应用零调用修复',
+    }))) return
+    await paperStudioAPI.continuityRepair(currentShot.value.id, {
+      request_id: `paper-continuity-repair-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      expected_version: Number(currentShot.value.version),
+      preview_fingerprint: preview.preview_fingerprint,
+      motion_plan: motionPlan,
+      confirmation: {
+        actor: 'local_owner',
+        reason: 'continuity_exact_reuse_confirmed',
+        source_asset_version_ids: preview.asset_diff.slots
+          .map((slot) => Number(slot.asset_version_id || 0))
+          .filter(Boolean),
+      },
+    })
+    await store.refreshActiveRun()
+    solutionDialogOpen.value = false
+    ElMessage.success('已在当前生产版本内新增计划修订，图片 API 调用数为 0')
+  } catch (cause) {
+    if (cause !== 'cancel' && cause !== 'close' && cause?.message) ElMessage.error(cause.message)
+  } finally {
+    continuityRepairing.value = false
+  }
+}
+
 async function createRun() {
   try {
+    const selected = selectedStoryboardIds.value.map((id) => storyboards.value.find((item) => Number(item.id) === Number(id))).filter(Boolean)
+    const existing = selected.length === selectedStoryboardIds.value.length && selected.length
+      ? findBestUnpublishedRun(runs.value, {
+          paperEpisodeId: selectedEpisodeId.value,
+          storyboardIds: selectedStoryboardIds.value,
+          revisionIds: selected.map((item) => item.current_revision_id),
+        })
+      : null
+    if (existing) {
+      await store.openRun(existing.id)
+      syncRoute()
+      ElMessage.success(`已恢复未发布版本 R${String(existing.run_number).padStart(2, '0')}：${unpublishedRunResumeLabel(existing)}`)
+      return
+    }
     const run = await store.createRun({ qualityTier: qualityTier.value, imageProviderConfigId: imageProviderConfigId.value })
     if (run) { syncRoute(); ElMessage.success(`已创建独立生产版本 R${String(run.run_number).padStart(2, '0')}`) }
   } catch (_) {}
+}
+
+async function resumeUnpublishedRun() {
+  if (!unpublishedResumeRun.value?.id) return
+  await store.openRun(unpublishedResumeRun.value.id)
+  syncRoute()
+  ElMessage.success(`已回到 R${String(unpublishedResumeRun.value.run_number).padStart(2, '0')}，未发布内容仍然完整保留`)
 }
 
 async function mergeEpisode() {
@@ -1328,11 +1592,54 @@ async function syncToLegacy() {
 
 async function openRun(id) { await store.openRun(id); syncRoute() }
 async function openShot(id) { await store.openShot(id); syncRoute() }
+function openStoryboardHistory(id) {
+  const storyboardId = Number(id || currentShot.value?.paper_storyboard_id || currentPaperStoryboard.value?.id || 0)
+  if (!storyboardId) return
+  historyStoryboardId.value = storyboardId
+  historyDrawerOpen.value = true
+}
+function openHistoryCenter(selection = {}) {
+  const storyboardId = Number(selection.storyboardId || historyStoryboardId.value || 0)
+  if (!storyboardId) return
+  historyStoryboardId.value = storyboardId
+  historyCenterSelection.value = selection.kind
+    ? { kind: selection.kind, id: Number(selection.id) }
+    : null
+  historyDrawerOpen.value = false
+  historyCenterOpen.value = true
+}
+async function handleHistoryForked(result) {
+  if (result?.run?.id) {
+    historyCenterOpen.value = false
+    await store.loadRuns()
+    await store.openRun(result.run.id)
+    syncRoute()
+    ElMessage.success(`已创建生产版本 R${String(result.run.run_number).padStart(2, '0')}；源版本和旧图全部保留，图片 API 0 次`)
+    return
+  }
+  const storyboardId = Number(result?.storyboard?.id || historyStoryboardId.value || 0)
+  if (!storyboardId) return
+  historyCenterOpen.value = false
+  store.closeRun()
+  await store.loadEpisodeStoryboards(selectedEpisodeId.value)
+  await store.selectPaperStoryboard(storyboardId)
+  workspaceMode.value = 'authoring'
+  syncRoute()
+  ElMessage.success(`已基于历史版本创建工作副本；旧版本和图片全部保留，图片 API 0 次`)
+}
 function returnToAuthoring() { store.closeRun(); workspaceMode.value = 'authoring'; syncRoute() }
 
 async function runCurrentAction() {
   if (currentActionType.value === 'authorize_generation') return authorizeGeneration()
-  try { await store.runNextAction(); syncRoute(); ElMessage.success('当前生产步骤已完成') } catch (_) {}
+  try {
+    const result = await store.runNextAction()
+    syncRoute()
+    if (result?.noop) {
+      await store.refreshActiveRun()
+      return
+    }
+    ElMessage.success('当前生产步骤已完成')
+  } catch (_) {}
 }
 async function saveBlueprint(blueprint) {
   try {
@@ -1363,18 +1670,111 @@ async function confirmBlueprint() {
 async function authorizeGeneration() {
   try {
     const shotIds = currentShot.value?.id ? [Number(currentShot.value.id)] : null
-    const quote = await store.getGenerationQuote({ shotIds })
+    const reuseResponse = await paperStudioAPI.reusePreview(currentRun.value.id, {
+      expected_version: Number(currentRun.value.version),
+      ...(shotIds ? { shot_ids: shotIds } : {}),
+    })
+    if (Number(reuseResponse.preview?.history_review_count || 0) > 0) {
+      reuseReviewPreview.value = reuseResponse.preview
+      reuseReviewOpen.value = true
+      return
+    }
+    let quote = await store.getGenerationQuote({ shotIds })
+    if (Number(quote.history_reuse_count || 0) > 0) {
+      const noPaidSlotsAfterReuse = Number(quote.estimated_image_count || 0) === 0
+      if (!(await requestImpact({
+        title: `先应用 ${quote.history_reuse_count} 张历史素材？`,
+        description: '这些图片已通过审核、文件哈希一致且静态视觉合同完全相同。应用只会建立新的版本关联，不会调用图片 API。',
+        impact: {
+          preserves: '源生产版本、源图片文件、审核记录和所有淘汰版本',
+          invalidates: '不会覆盖或删除任何历史图片',
+          cost: `历史复用 ${quote.history_reuse_count} 张，0 次图片 API；应用后只对剩余差异槽位重新报价`,
+        },
+        confirmLabel: `应用 ${quote.history_reuse_count} 张（0 调用）`,
+        cancelLabel: '先查看历史版本',
+      }))) {
+        openStoryboardHistory(currentShot.value?.paper_storyboard_id)
+        return
+      }
+      await paperStudioAPI.applyReuse(currentRun.value.id, {
+        request_id: `paper-history-reuse-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        expected_version: Number(currentRun.value.version),
+        reuse_preview_fingerprint: quote.reuse_preview_fingerprint,
+        shot_ids: quote.shot_ids,
+        confirmation: {
+          actor: 'local_owner',
+          reason: 'historical_exact_reuse_confirmed',
+          source_asset_version_ids: (quote.reuse_slots || [])
+            .filter((slot) => slot.source_kind === 'historical_reuse')
+            .map((slot) => Number(slot.source_asset_version_id)),
+        },
+      })
+      await store.refreshActiveRun()
+      if (noPaidSlotsAfterReuse) {
+        ElMessage.success('历史与本地素材已全部应用，图片 API 调用数为 0')
+        return
+      }
+      quote = await store.getGenerationQuote({ shotIds })
+      ElMessage.success('历史素材已挂接，图片 API 调用数为 0；差异报价已重新计算')
+    }
+    if (Number(quote.estimated_image_count || 0) === 0) {
+      const pendingZeroCall = Number(quote.current_reuse_count || 0)
+        + Number(quote.library_reuse_count || 0)
+        + Number(quote.local_derivation_count || 0)
+      if (pendingZeroCall > 0) {
+        if (!(await requestImpact({
+          title: `应用 ${pendingZeroCall} 个零调用素材？`,
+          description: '将挂接当前已采用素材、现有分镜参考图或实体库正式形象，并执行必要的本地 Mask/程序化派生，然后进入素材审核；不会建立图片生成授权。',
+          impact: { preserves: '全部历史素材和当前蓝图', invalidates: '不会覆盖历史图片', cost: '0 次图片 API' },
+          confirmLabel: '应用并进入审核',
+        }))) return
+        await paperStudioAPI.applyReuse(currentRun.value.id, {
+          request_id: `paper-zero-call-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          expected_version: Number(currentRun.value.version),
+          reuse_preview_fingerprint: quote.reuse_preview_fingerprint,
+          shot_ids: quote.shot_ids,
+        })
+        await store.refreshActiveRun()
+      }
+      ElMessage.success('当前素材已通过复用或本地派生处理，不需要图片 API 授权')
+      return
+    }
     const requiredCount = quote.slots.filter((slot) => slot.required).length
     if (!(await requestImpact({
       title: '确认图片 API 数量与范围',
-      description: `服务：${quote.provider} / ${quote.model}；范围：${quote.shot_ids.length} 个分镜，必需素材 ${requiredCount} 张，最大授权调用 ${quote.max_authorized_calls} 次。${quote.library_reuse?.count ? `另有 ${quote.library_reuse.count} 个槽位复用实体库已批准形象，0 次调用。` : ''}`,
-      impact: { preserves: '当前蓝图、已接受素材和所有历史版本', invalidates: '新结果返回前不会替换当前采用素材', cost: `${quote.estimated_image_count} 张预计图片，最多 ${quote.max_authorized_calls} 次授权调用${quote.library_reuse?.count ? `；库复用 ${quote.library_reuse.count} 项 0 调用` : ''}` },
+      description: `服务：${quote.provider} / ${quote.model}；范围：${quote.shot_ids.length} 个分镜。当前采用 ${quote.current_reuse_count || 0}、历史复用 ${quote.history_reuse_count || 0}、实体库 ${quote.library_reuse_count || 0}、本地派生 ${quote.local_derivation_count || 0} 均为 0 调用；仅剩 ${requiredCount} 个必需差异槽位需要图片 API。`,
+      impact: { preserves: '当前蓝图、已接受素材和所有历史版本', invalidates: '新结果返回前不会替换当前采用素材', cost: `${quote.estimated_image_count} 张预计图片，最多 ${quote.max_authorized_calls} 次授权调用（含失败调用与自动重试）` },
       confirmLabel: `确认并生成 ${quote.estimated_image_count} 张`, cancelLabel: '返回修改蓝图',
     }))) return
     await store.authorizeAndStartGeneration(quote)
     ElMessage.success('已授权，正式素材开始生成')
   } catch (cause) {
     if (cause !== 'cancel' && cause !== 'close' && cause?.message) ElMessage.error(cause.message)
+  }
+}
+async function resolveHistoryReuseReview(decisions) {
+  if (!reuseReviewPreview.value || reuseReviewBusy.value) return
+  reuseReviewBusy.value = true
+  try {
+    await paperStudioAPI.applyReuse(currentRun.value.id, {
+      request_id: `paper-history-review-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      expected_version: Number(currentRun.value.version),
+      reuse_preview_fingerprint: reuseReviewPreview.value.reuse_preview_fingerprint,
+      shot_ids: [...new Set(reuseReviewPreview.value.slots
+        .filter((slot) => slot.source_kind === 'history_review_required')
+        .map((slot) => Number(slot.shot_id)))],
+      review_decisions: decisions,
+      confirmation: { actor: 'local_owner', reason: 'historical_review_reuse_confirmed' },
+    })
+    reuseReviewOpen.value = false
+    reuseReviewPreview.value = null
+    await store.refreshActiveRun()
+    ElMessage.success('历史候选处理完成，图片 API 调用数为 0；正在重新计算差异范围')
+    await authorizeGeneration()
+  } catch (cause) {
+    if (cause?.message) ElMessage.error(cause.message)
+  } finally {
+    reuseReviewBusy.value = false
   }
 }
 async function pauseRun() {
@@ -1448,7 +1848,7 @@ async function regenerateAsset(slot) {
     if (!(await requestImpact({
       title: `重新生成 ${slot.slot_key}？`,
       description: `只会调用「${quote.provider} / ${quote.model}」处理当前槽位。`,
-      impact: { preserves: '其它已生成、已批准素材与当前槽位原版本历史', invalidates: '新结果会成为当前待审核版本；通过人工审核后才能继续视频流程', cost: `${quote.estimated_image_count} 次预计图片 API 调用，最多 ${quote.max_authorized_calls} 次授权调用` },
+      impact: { preserves: '其它已生成、已批准素材与当前槽位原版本历史', invalidates: '新结果会成为当前待审核版本；通过人工审核后才能继续视频流程', cost: `${quote.estimated_image_count} 次预计图片 API 调用，最多 ${quote.max_authorized_calls} 次授权调用（含失败调用与自动重试）` },
       confirmLabel: `确认生成 ${quote.estimated_image_count} 张`,
     }))) return
     await store.authorizeAndStartGeneration(quote)
@@ -1530,8 +1930,6 @@ function mediaUrl(value) {
   if (/^(?:https?:)?\/\//.test(value) || value.startsWith('/static/')) return value
   return `/static/${String(value).replace(/^\/+/, '')}`
 }
-function runStatusLabel(status) { return { draft: '草稿', analyzing: '分析中', plan_review: '计划待确认', awaiting_generation_authorization: '等待生成授权', assets_generating: '素材生成中', assets_processing: '素材处理中', motion_planning: '动作规划中', proofing: '动态门禁中', preview_ready: '预览待批准', approved: '已批准', rendering: '渲染中', delivered: '已发布', partial: '部分失败', failed: '失败', cancelled: '已取消', stale: '计划已失效' }[status] || status }
-function mergeStatusLabel(status) { return { pending: '合并任务排队中', processing: '正在合并整集', failed: '整集合并失败', completed: '整集合并完成', stale: '分镜已更新，需要重新合并' }[status] || status }
 </script>
 
 <style scoped>
@@ -1565,8 +1963,12 @@ function mergeStatusLabel(status) { return { pending: '合并任务排队中', p
 .rail-collapse-toggle i { display: grid; place-items: center; min-width: 20px; height: 20px; border: 1px solid var(--paper-line); border-radius: 50%; font-style: normal; font-size: var(--paper-fs-xs); }
 .left-rail.collapsed > *:not(.rail-collapse-toggle) { display: none; }
 .has-recovery .studio-layout { min-height: calc(100vh - 110px); }
+.has-error .studio-layout { min-height: calc(100vh - 120px); }
+.has-error.has-recovery .studio-layout { min-height: calc(100vh - 158px); }
 .left-rail { min-width: 0; max-height: calc(100vh - 72px); overflow-y: auto; border-right: 1px solid var(--paper-line); background: var(--paper-shell); }
 .has-recovery .left-rail, .has-recovery .workspace, .has-recovery .inspector { max-height: calc(100vh - 110px); }
+.has-error .left-rail, .has-error .workspace, .has-error .inspector { max-height: calc(100vh - 120px); }
+.has-error.has-recovery .left-rail, .has-error.has-recovery .workspace, .has-error.has-recovery .inspector { max-height: calc(100vh - 158px); }
 .workspace { min-width: 0; max-height: calc(100vh - 72px); overflow-y: auto; background: var(--paper-workspace); }
 .script-stage { display: flex; flex-direction: column; min-height: 100%; }
 .workspace-modes { position: sticky; top: 0; z-index: 7; height: 48px; display: flex; align-items: stretch; padding: 0 20px; border-bottom: 1px solid var(--paper-line); background: rgb(23 24 22 / 96%); backdrop-filter: blur(12px); }
@@ -1587,6 +1989,11 @@ function mergeStatusLabel(status) { return { pending: '合并任务排队中', p
 .run-history summary { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; color: var(--paper-dim); font-size: var(--paper-fs-sm); font-weight: 700; letter-spacing: .1em; cursor: pointer; list-style: none; }
 .run-history summary::-webkit-details-marker { display: none; }
 .run-history summary i { display: grid; place-items: center; min-width: 19px; height: 19px; border: 1px solid var(--paper-line); border-radius: 50%; font-style: normal; }
+.run-resume-card { width: calc(100% - 20px); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin: 0 10px 8px; padding: 11px 12px; border: 1px solid #76602f; background: #282316; color: var(--paper-muted); text-align: left; cursor: pointer; }
+.run-resume-card > span { color: var(--paper-accent); font-size: var(--paper-fs-xs); font-weight: 700; letter-spacing: .08em; }
+.run-resume-card > strong { color: var(--paper-text); font-size: var(--paper-fs-sm); line-height: 1.45; }
+.run-resume-card > small { color: #a99b79; font-size: var(--paper-fs-xs); line-height: 1.4; }
+.run-resume-card:hover { border-color: var(--paper-accent); background: #302919; }
 .run-item { width: calc(100% - 20px); min-height: var(--paper-hit-min); display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 0 10px 4px; padding: 12px 10px; border: 0; background: transparent; color: var(--paper-muted); text-align: left; cursor: pointer; }
 .run-item:hover, .run-item.active { background: var(--paper-hover); }
 .run-number, .run-item > span:last-child { color: var(--paper-dim); font: 700 var(--paper-fs-xs) ui-monospace, monospace; }
@@ -1600,6 +2007,7 @@ function mergeStatusLabel(status) { return { pending: '合并任务排队中', p
 .production-heading { min-height: 64px; display: flex; align-items: center; gap: 18px; padding: 0 20px; border-bottom: 1px solid var(--paper-line); }
 .production-heading button { border: 0; background: transparent; color: var(--paper-muted); font-size: var(--paper-fs-sm); cursor: pointer; }
 .production-heading button:hover { color: var(--paper-accent); }
+.production-heading .history-entry { margin-left: auto; padding: 8px 11px; border: 1px solid var(--paper-line); color: var(--paper-accent); }
 .production-heading div { display: flex; flex-direction: column; gap: 3px; }
 .production-heading span { color: var(--paper-accent); font: 700 var(--paper-fs-xs) ui-monospace, monospace; letter-spacing: .12em; }
 .production-heading strong { font-size: var(--paper-fs-base); }
@@ -1639,8 +2047,37 @@ function mergeStatusLabel(status) { return { pending: '合并任务排队中', p
 .tier-selector small { color: var(--paper-dim); font-size: var(--paper-fs-xs); }
 .episode-output a { display: block; margin-top: 8px; color: var(--paper-accent); font-size: var(--paper-fs-sm); text-decoration: none; }
 .merge-state { display: block; margin-top: 8px; color: var(--paper-muted); font-size: var(--paper-fs-sm); }
-.error-banner { display: flex; align-items: center; gap: 14px; padding: 9px 18px; background: #482823; color: #ead5cf; font-size: var(--paper-fs-sm); }
-.error-banner button { margin-left: auto; padding: 5px 9px; border: 0; background: #ead5cf; color: #38201d; cursor: pointer; }
+.error-banner { min-height: 48px; display: flex; align-items: center; gap: 18px; padding: 7px 18px; background: #482823; color: #ead5cf; font-size: var(--paper-fs-sm); }
+.error-banner-copy { min-width: 0; display: flex; align-items: baseline; gap: 14px; }
+.error-banner-copy strong { flex: 0 0 auto; }
+.error-banner-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.error-banner-actions { display: flex; gap: 7px; margin-left: auto; }
+.error-banner-actions button { min-height: 30px; padding: 5px 10px; cursor: pointer; }
+.error-banner .solution-action { border: 0; background: #f2d48f; color: #382819; font-weight: 800; }
+.error-banner .reload-action { border: 1px solid #a36e61; background: transparent; color: #e9c8c0; }
+.solution-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; background: rgb(7 8 7 / 76%); backdrop-filter: blur(7px); }
+.solution-dialog { width: min(680px, calc(100vw - 32px)); max-height: min(760px, calc(100vh - 48px)); overflow-y: auto; border: 1px solid #665536; background: #1b1c19; box-shadow: 0 24px 80px rgb(0 0 0 / 55%); }
+.solution-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px 24px 18px; border-bottom: 1px solid var(--paper-line); }
+.solution-dialog > header span { color: var(--paper-accent); font: 700 var(--paper-fs-xs) ui-monospace, monospace; letter-spacing: .14em; }
+.solution-dialog h2 { margin: 7px 0 0; color: var(--paper-text); font: 600 23px/1.25 Georgia, 'Songti SC', serif; }
+.solution-dialog > header button { border: 0; background: transparent; color: var(--paper-dim); font-size: 24px; cursor: pointer; }
+.solution-dialog > header button:hover { color: var(--paper-text); }
+.solution-context { padding: 18px 24px 4px; }
+.solution-context strong { color: var(--paper-accent); font-size: var(--paper-fs-sm); }
+.solution-context p { margin: 8px 0 0; color: var(--paper-muted); font-size: var(--paper-fs-sm); line-height: 1.65; }
+.solution-list { margin: 10px 24px 0; padding: 0; list-style: none; counter-reset: recovery; }
+.solution-list li { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 13px 0 13px 34px; border-top: 1px solid var(--paper-line-soft); counter-increment: recovery; }
+.solution-list li::before { content: counter(recovery, decimal-leading-zero); position: absolute; top: 14px; left: 0; color: var(--paper-dim); font: 700 var(--paper-fs-xs) ui-monospace, monospace; }
+.solution-list span { color: #dbc0ba; font-size: var(--paper-fs-sm); line-height: 1.55; }
+.solution-list strong { color: var(--paper-text); font-size: var(--paper-fs-sm); font-weight: 500; line-height: 1.65; }
+.solution-more { margin: 10px 24px 0; color: var(--paper-dim); font-size: var(--paper-fs-xs); }
+.solution-steps { margin: 18px 24px 0; padding: 13px 14px; border-left: 2px solid var(--paper-accent); background: #22211c; }
+.solution-steps span { color: var(--paper-accent); font-size: var(--paper-fs-xs); font-weight: 800; letter-spacing: .1em; }
+.solution-steps p { margin: 5px 0 0; color: var(--paper-muted); font-size: var(--paper-fs-sm); line-height: 1.6; }
+.solution-dialog > footer { display: flex; gap: 9px; padding: 20px 24px 24px; }
+.solution-dialog > footer button { min-height: 38px; padding: 0 15px; cursor: pointer; }
+.solution-primary { border: 0; background: var(--paper-accent); color: #211c13; font-weight: 800; }
+.solution-secondary { border: 1px solid var(--paper-line); background: transparent; color: var(--paper-muted); }
 .loading-layer { position: fixed; inset: 72px 0 0; z-index: 20; display: grid; place-content: center; gap: 12px; background: rgb(23 24 22 / 84%); backdrop-filter: blur(8px); color: var(--paper-muted); font-size: var(--paper-fs-base); }
 .loading-layer span { width: 48px; height: 2px; overflow: hidden; background: var(--paper-line); }
 .loading-layer span::after { content: ''; display: block; width: 45%; height: 100%; background: var(--paper-accent); animation: loading 1s ease-in-out infinite alternate; }
@@ -1652,6 +2089,11 @@ function mergeStatusLabel(status) { return { pending: '合并任务排队中', p
 }
 @media (max-width: 860px) {
   .studio-layout { grid-template-columns: 1fr; }
+  .error-banner { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .error-banner-copy { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .error-banner-copy span { white-space: normal; }
+  .error-banner-actions { width: 100%; margin-left: 0; }
+  .solution-dialog > footer { align-items: stretch; flex-direction: column; }
   .left-rail { display: none; }
   .workspace { max-height: none; padding-right: 0; }
   .inspector { position: static; width: auto; max-height: none; border-top: 1px solid var(--paper-line); }

@@ -47,6 +47,7 @@
       v-if="shot?.blueprint"
       :shot="shot"
       :busy="acting"
+      :actions="actions"
       :regenerating-slot-id="regeneratingSlotId"
       @save="$emit('save-blueprint', $event)"
       @confirm="$emit('confirm-blueprint')"
@@ -125,12 +126,14 @@ import { computed } from 'vue'
 import PaperBlueprintEditor from './PaperBlueprintEditor.vue'
 import PaperAssetReviewWorkbench from './PaperAssetReviewWorkbench.vue'
 import PaperMotionEvidencePanel from './PaperMotionEvidencePanel.vue'
+import { shotStatusLabel as sharedShotStatusLabel } from '@/utils/paperStudioLabels'
 
 const props = defineProps({
   run: { type: Object, default: null },
   shot: { type: Object, default: null },
   acting: { type: Boolean, default: false },
   regeneratingSlotId: { type: Number, default: null },
+  actions: { type: Array, default: () => [] },
 })
 defineEmits([
   'approve-asset', 'rematte-asset', 'reject-asset', 'regenerate-asset',
@@ -237,22 +240,7 @@ function tierLabel(tier) {
 function shortHash(hash) { return hash ? `${hash.slice(0, 15)}…${hash.slice(-6)}` : '未冻结' }
 function readySlots(family) { return (family?.slots || []).filter((slot) => slot.status === 'ready').length }
 function shotStatusLabel(status) {
-  if (environmentOnly.value) {
-    const environmentStatus = {
-      plan_confirmed: '环境计划已确认，等待生成授权', asset_pending: '环境底板生成中',
-      asset_review: '环境底板待审核', asset_ready: '环境底板已批准', motion_ready: '环境动态已就绪',
-      proof_ready: '环境动态检查通过', motion_failed: '环境动态需要自动修复', proof_failed: '环境动态证据未通过',
-    }[status]
-    if (environmentStatus) return environmentStatus
-  }
-  return {
-    pending: '待分析', analyzed: '已分析', plan_confirmed: '计划已确认，等待生成授权', asset_pending: '素材生产中',
-    asset_review: '素材待人工审核',
-    asset_ready: '素材就绪', motion_ready: '动作就绪', proof_ready: '动态门禁通过', preview_ready: '预览待批准',
-    approved: '已批准', rendering: '渲染中', rendered: '已渲染', published: '已发布', asset_failed: '素材失败',
-    motion_failed: '动作门禁失败', proof_failed: '动态门禁失败', render_failed: '渲染失败',
-    stale: '计划版本已失效', cancelled: '已取消',
-  }[status] || status || '未知'
+  return sharedShotStatusLabel(status, { environmentOnly: environmentOnly.value })
 }
 </script>
 

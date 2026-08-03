@@ -15,12 +15,36 @@ const DEFAULT_LEASE_MS = 10 * 60 * 1_000;
 const TERMINAL_RUN_STATES = new Set(['delivered', 'cancelled', 'stale', 'failed']);
 
 const ACTIONS = Object.freeze({
-  generate_layout_master: {
+  generate_required_slots: {
     queue: 'image',
     states: new Set(['plan_confirmed', 'asset_review', 'asset_failed']),
     failureState: 'asset_failed',
-    run: (db, cfg, log, shot, step) => assetService.generateAssets(db, cfg, log, shot.id, {
+    run: (db, cfg, log, shot, step) => assetService.generateMissingSlots(db, cfg, log, shot.id, {
       request_id: randomUUID(), expected_version: shot.version, authorization_id: Number(step.authorization_id),
+    }),
+  },
+  matte_assets: {
+    queue: 'local',
+    states: new Set(['asset_pending', 'asset_failed']),
+    failureState: 'asset_failed',
+    run: (db, cfg, log, shot) => assetService.mattePendingVersions(db, cfg, log, shot.id, {
+      request_id: randomUUID(), expected_version: shot.version,
+    }),
+  },
+  register_assets: {
+    queue: 'local',
+    states: new Set(['asset_pending', 'asset_failed']),
+    failureState: 'asset_failed',
+    run: (db, cfg, log, shot) => assetService.registerVersions(db, cfg, log, shot.id, {
+      request_id: randomUUID(), expected_version: shot.version,
+    }),
+  },
+  technical_asset_gate: {
+    queue: 'local',
+    states: new Set(['asset_pending', 'asset_failed']),
+    failureState: 'asset_failed',
+    run: (db, cfg, log, shot) => assetService.runTechnicalAssetGate(db, cfg, log, shot.id, {
+      request_id: randomUUID(), expected_version: shot.version,
     }),
   },
   plan_motion: {
@@ -42,7 +66,7 @@ const ACTIONS = Object.freeze({
   render_preview: {
     queue: 'render',
     states: new Set(['proof_ready']),
-    failureState: 'proof_failed',
+    failureState: 'proof_ready',
     run: (db, cfg, log, shot) => renderService.preview(db, cfg, log, shot.id, {
       request_id: randomUUID(), expected_version: shot.version,
     }),
@@ -77,14 +101,15 @@ function dependenciesCompleted(db, step) {
   const dependencies = parseJson(step.depends_on_json, []);
   if (!dependencies.length) return true;
   const rows = db.prepare(`SELECT step_key, status FROM paper_job_steps
-    WHERE run_id = ? AND shot_id = ? AND step_key IN (${dependencies.map(() => '?').join(',')})`)
-    .all(Number(step.run_id), Number(step.shot_id), ...dependencies);
+    WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ?
+      AND step_key IN (${dependencies.map(() => '?').join(',')})`)
+    .all(Number(step.run_id), Number(step.shot_id), Number(step.plan_revision_id), ...dependencies);
   const completed = new Set(rows.filter((row) => row.status === 'completed').map((row) => row.step_key));
   return dependencies.every((key) => completed.has(key));
 }
 
 function continuityReady(db, step) {
-  if (step.step_key !== 'generate_layout_master') return true;
+  if (step.step_key !== 'generate_required_slots') return true;
   return continuityService.assertIncomingSourcesReady(db, step.shot_id).pass;
 }
 
@@ -110,6 +135,7 @@ function runnableSteps(db) {
      JOIN paper_studio_shots pss ON pss.id = pjs.shot_id AND pss.deleted_at IS NULL
      JOIN paper_studio_runs psr ON psr.id = pjs.run_id AND psr.deleted_at IS NULL
      WHERE pjs.status = 'queued' AND psr.paused_at IS NULL
+       AND pjs.plan_revision_id = pss.current_plan_revision_id
      ORDER BY psr.id, pss.shot_index, pjs.id`,
   ).all().filter((step) => {
     const action = ACTIONS[step.step_key];
@@ -129,7 +155,7 @@ function claim(db, stepId, workerId, leaseMs = DEFAULT_LEASE_MS) {
        FROM paper_job_steps pjs
        JOIN paper_studio_shots pss ON pss.id = pjs.shot_id AND pss.deleted_at IS NULL
        JOIN paper_studio_runs psr ON psr.id = pjs.run_id AND psr.deleted_at IS NULL
-       WHERE pjs.id = ?`,
+       WHERE pjs.id = ? AND pjs.plan_revision_id = pss.current_plan_revision_id`,
     ).get(Number(stepId));
     const action = ACTIONS[step?.step_key];
     if (!step || step.status !== 'queued' || !action || TERMINAL_RUN_STATES.has(step.run_status) || step.paused_at) return null;
@@ -166,6 +192,7 @@ function settleUnhandledFailure(db, step, error) {
     message: error.message || '纸片工作室后台步骤失败',
     step_key: row.step_key,
     attempt: Number(row.attempt || 1),
+    details: error.details || null,
     at: nowIso(),
   };
   const now = nowIso();

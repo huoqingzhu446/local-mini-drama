@@ -66,6 +66,14 @@ async function extractAlpha(cfg, sourceRel) {
   const key = estimateBorderKeyColor(data, input.info);
   const threshold = 34;
   const softness = 22;
+  for (let y = 0; y < input.info.height; y += 1) {
+    for (let x = 0; x < input.info.width; x += 1) {
+      const i = (y * input.info.width + x) * 4;
+      const alpha = alphaForPixel(data[i], data[i + 1], data[i + 2], data[i + 3], key, threshold, softness);
+      data[i + 3] = alpha;
+    }
+  }
+  defringeRgba(data, input.info, key, { apply_unmix: true });
   let visible = 0;
   let minX = input.info.width;
   let minY = input.info.height;
@@ -73,17 +81,12 @@ async function extractAlpha(cfg, sourceRel) {
   let maxY = -1;
   for (let y = 0; y < input.info.height; y += 1) {
     for (let x = 0; x < input.info.width; x += 1) {
-      const i = (y * input.info.width + x) * 4;
-      const alpha = alphaForPixel(data[i], data[i + 1], data[i + 2], data[i + 3], key, threshold, softness);
-      data[i + 3] = alpha;
-      if (alpha >= 12) {
-        visible += 1;
-        minX = Math.min(minX, x); minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
-      }
+      if (data[(y * input.info.width + x) * 4 + 3] < 12) continue;
+      visible += 1;
+      minX = Math.min(minX, x); minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
     }
   }
-  defringeRgba(data, input.info, key, { apply_unmix: true });
   const alphaRel = sourceRel.replace(/(\.[a-zA-Z0-9]+)?$/, '') + '-alpha.png';
   await sharp(data, { raw: input.info }).png().toFile(path.join(root, alphaRel));
   const total = input.info.width * input.info.height;

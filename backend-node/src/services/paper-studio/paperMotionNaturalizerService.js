@@ -165,6 +165,7 @@ function injectPropLag(tracks, resolveValue, durationFrames) {
  */
 function naturalize(motionPlan, quality, resolveValue) {
   if (!quality || !motionPlan) return motionPlan;
+  if (motionPlan.naturalized) return motionPlan;
   const durationFrames = Math.max(2, Number(motionPlan.duration_frames || 0));
   const plan = {
     ...motionPlan,

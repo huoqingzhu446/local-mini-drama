@@ -2,7 +2,7 @@ const FOREGROUND_OCCLUSION_PATTERN = /(后方|后面|遮挡|遮住|桌后|案后
 const REGISTERED_BOUNDARY_PATTERN = /(穿过|越过|跨过|进入|离开|岸边|河岸|水边|浅滩|涉水|踏入水|走入水|湖边|海边|水面|浪花|潮水|门框|门洞|洞口|窗口|幕帘)/i;
 const ATTACHED_PROP_PATTERN = /(拿起|拿着|握住|手持|高举|举起|递给|接过|放下|拔出|挥动|端起|捧起|抓住|抱住)/i;
 const MULTI_SUBJECT_INTERACTION_PATTERN = /(对话|交谈|争执|质问|回答|说道|开口|交代|低语|喊道|问道|答道)/i;
-const MAP_ROUTE_PATTERN = /(战略地图|地图|路线逐段|路线.*延伸|地形标记|战线|包围.*合拢|由.{0,12}向.{0,12}(平移|推进))/i;
+const PATH_REVEAL_PATTERN = /(?:地图|平面图|示意图|流程图|线路图|管线图).{0,100}(?:路线|路径|线路|轨迹|流程线|管线|箭头|连线|标记).{0,100}(?:亮起|推进|延伸|展开|显现|到达|连接|合拢|闭合|包围)|(?:路线|路径|线路|轨迹|流程线|管线).{0,80}(?:推进|延伸|展开|显现|到达|连接|合拢|闭合)/i;
 const OBJECT_SEQUENCE_PATTERN = /(?:击打|敲击|撞击|砸击|击碎|砸碎|切割|撕裂|破坏|碎裂|破碎|断裂|燃烧|点燃|作用|操作).{0,80}(?:依次|甩镜|再甩|切镜|随后|接着|继而|最后|转向|移焦|转场)|(?:依次|甩镜|再甩|切镜|随后|接着|继而).{0,80}(?:击打|敲击|撞击|砸击|击碎|砸碎|切割|撕裂|破坏|碎裂|破碎|断裂|燃烧|点燃|显现|进入画面)/i;
 
 function frameAt(durationFrames, ratio) {
@@ -164,7 +164,7 @@ function environmentalDepthPlan(context, config = {}) {
   return { catalog_key: 'environmental-depth-motion-v1', semanticContract, families, root, motionPlan, proofTargets, summary: { catalog_key: 'environmental-depth-motion-v1', primary_action: motionPlan.primary_action, camera_only: false, clean_plate_required: true, source_family_count: 1, required_asset_count: 1, required_states: ['quiet', 'drift', 'settle'], relation_contracts: ['procedural atmosphere over clean environment'], proof_targets: proofTargets } };
 }
 
-function mapRouteRevealPlan(context, config = {}) {
+function pathRevealPlan(context, config = {}) {
   const { fps, durationFrames } = duration(context, config, 4);
   const routeFrame = frameAt(durationFrames, 0.62);
   const finalFrame = durationFrames - 1;
@@ -172,41 +172,41 @@ function mapRouteRevealPlan(context, config = {}) {
     schema_version: 3,
     storyboard_id: Number(context.storyboard.id),
     environment: { description: environmentDescription(context), clean_plate_required: true, registered_boundaries: [] },
-    subjects: [{ key: 'strategic_route', kind: 'effect', identity: '旧绢地图上的无文字推进路线、战区节点和包围闭环', support_key: null, required_states: ['hidden', 'advancing', 'encircled'] }],
+    subjects: [{ key: 'path_subject', kind: 'effect', identity: '平面底图上逐步显现的路径与终点标记', support_key: null, required_states: ['hidden', 'revealing', 'complete'] }],
     action_beats: [
-      { key: 'route_advance', start_frame: 0, peak_frame: routeFrame, end_frame: finalFrame, subject_key: 'strategic_route', action: 'reveal_route' },
-      { key: 'encirclement_close', start_frame: routeFrame, peak_frame: finalFrame, end_frame: finalFrame, subject_key: 'strategic_route', action: 'close_encirclement' },
+      { key: 'path_advance', start_frame: 0, peak_frame: routeFrame, end_frame: finalFrame, subject_key: 'path_subject', action: 'reveal_path' },
+      { key: 'path_complete', start_frame: routeFrame, peak_frame: finalFrame, end_frame: finalFrame, subject_key: 'path_subject', action: 'show_completion' },
     ],
   };
   const families = [cleanEnvironmentFamily()];
   const root = rootNode([
     cleanEnvironmentNode(),
-    { key: 'route_reveal', kind: 'procedural', pattern: 'free', slot: null, asset_version_id: null, transform: { x: 0.5, y: 0.51, width: 0.92, height: 0.82, anchor_x: 0.5, anchor_y: 0.5 }, relation: { procedural_kind: 'route-reveal', appearance: 'ink-route', role: 'map-subject', points: [[0.18, 0.82], [0.34, 0.66], [0.46, 0.52], [0.62, 0.38], [0.78, 0.24]] }, clip: {}, local_z: 20, children: [] },
-    { key: 'encirclement', kind: 'procedural', pattern: 'free', slot: null, asset_version_id: null, transform: { x: 0.5, y: 0.51, width: 0.92, height: 0.82, anchor_x: 0.5, anchor_y: 0.5 }, relation: { procedural_kind: 'route-reveal', appearance: 'encirclement', role: 'map-subject', points: [[0.7, 0.2], [0.84, 0.24], [0.87, 0.39], [0.76, 0.48], [0.64, 0.39], [0.65, 0.26], [0.7, 0.2]] }, clip: {}, local_z: 21, children: [] },
+    { key: 'path_reveal', kind: 'procedural', pattern: 'free', slot: null, asset_version_id: null, transform: { x: 0.5, y: 0.51, width: 0.92, height: 0.82, anchor_x: 0.5, anchor_y: 0.5 }, relation: { procedural_kind: 'path-reveal', appearance: 'ink-route', role: 'path-subject', points: [[0.18, 0.82], [0.34, 0.66], [0.46, 0.52], [0.62, 0.38], [0.78, 0.24]] }, clip: {}, local_z: 20, children: [] },
+    { key: 'path_completion', kind: 'procedural', pattern: 'free', slot: null, asset_version_id: null, transform: { x: 0.5, y: 0.51, width: 0.92, height: 0.82, anchor_x: 0.5, anchor_y: 0.5 }, relation: { procedural_kind: 'path-reveal', appearance: 'completion-ring', role: 'path-subject', points: [[0.7, 0.2], [0.84, 0.24], [0.87, 0.39], [0.76, 0.48], [0.64, 0.39], [0.65, 0.26], [0.7, 0.2]] }, clip: {}, local_z: 21, children: [] },
   ]);
   const motionPlan = {
-    schema_version: 1, fps, duration_frames: durationFrames, primary_action: 'map_route_reveal', camera_only: false,
+    schema_version: 1, fps, duration_frames: durationFrames, primary_action: 'path_reveal', camera_only: false,
     subject_tracks: [
-      { target: 'route_reveal', property: 'state', keyframes: [{ frame: 0, value: 'hidden' }, { frame: routeFrame, value: 'advancing' }, { frame: finalFrame, value: 'encircled' }] },
-      { target: 'route_reveal', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 1, easing: 'ease-in-out' }, { frame: finalFrame, value: 1 }] },
-      { target: 'encirclement', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 0 }, { frame: finalFrame, value: 1, easing: 'ease-in-out' }] },
-      { target: 'encirclement', property: 'procedural_amount', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 0.12 }, { frame: finalFrame, value: 1, easing: 'ease-out' }] },
+      { target: 'path_reveal', property: 'state', keyframes: [{ frame: 0, value: 'hidden' }, { frame: routeFrame, value: 'revealing' }, { frame: finalFrame, value: 'complete' }] },
+      { target: 'path_reveal', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 1, easing: 'ease-in-out' }, { frame: finalFrame, value: 1 }] },
+      { target: 'path_completion', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 0 }, { frame: finalFrame, value: 1, easing: 'ease-in-out' }] },
+      { target: 'path_completion', property: 'procedural_amount', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 0.12 }, { frame: finalFrame, value: 1, easing: 'ease-out' }] },
     ],
     camera_tracks: [{ target: 'camera', property: 'x', keyframes: [{ frame: 0, value: -0.025 }, { frame: finalFrame, value: 0.025, easing: 'ease-in-out' }] }],
-    cues: [{ key: 'route_arrival', frame: routeFrame, kind: 'semantic' }, { key: 'encirclement_closed', frame: finalFrame, kind: 'semantic' }],
+    cues: [{ key: 'path_arrival', frame: routeFrame, kind: 'semantic' }, { key: 'path_completed', frame: finalFrame, kind: 'semantic' }],
     gate_requirements: [
-      { key: 'route_reveal_range', metric: 'numeric_range', target: 'route_reveal', property: 'clip_progress', min: 0.95 },
-      { key: 'encirclement_reveal_range', metric: 'numeric_range', target: 'encirclement', property: 'clip_progress', min: 0.95 },
-      { key: 'encirclement_final', metric: 'final_value', target: 'encirclement', property: 'procedural_amount', min: 0.9 },
-      { key: 'route_arrival_cue', metric: 'cue_exists', cue: 'route_arrival' },
+      { key: 'path_reveal_range', metric: 'numeric_range', target: 'path_reveal', property: 'clip_progress', min: 0.95 },
+      { key: 'path_completion_range', metric: 'numeric_range', target: 'path_completion', property: 'clip_progress', min: 0.95 },
+      { key: 'path_completion_final', metric: 'final_value', target: 'path_completion', property: 'procedural_amount', min: 0.9 },
+      { key: 'path_arrival_cue', metric: 'cue_exists', cue: 'path_arrival' },
     ],
   };
   const proofTargets = [
-    { key: 'map_start', frame: 0, target_node_key: 'route_reveal', crop: proofCrop(0.04, 0.05, 0.92, 0.9), assertions: [{ type: 'camera_only', expected: false }] },
-    { key: 'route_arrival', frame: routeFrame, target_node_key: 'route_reveal', crop: proofCrop(0.04, 0.05, 0.92, 0.9), assertions: [{ type: 'track_range', target: 'route_reveal', property: 'clip_progress', min: 0.95 }] },
-    { key: 'encirclement_final', frame: finalFrame, target_node_key: 'encirclement', crop: proofCrop(0.04, 0.05, 0.92, 0.9), assertions: [{ type: 'final_track_value', target: 'encirclement', property: 'procedural_amount', min: 0.9 }, { type: 'track_range', target: 'encirclement', property: 'clip_progress', min: 0.95 }] },
+    { key: 'path_start', frame: 0, target_node_key: 'path_reveal', crop: proofCrop(0.04, 0.05, 0.92, 0.9), assertions: [{ type: 'camera_only', expected: false }] },
+    { key: 'path_arrival', frame: routeFrame, target_node_key: 'path_reveal', crop: proofCrop(0.04, 0.05, 0.92, 0.9), assertions: [{ type: 'track_range', target: 'path_reveal', property: 'clip_progress', min: 0.95 }] },
+    { key: 'path_completion_final', frame: finalFrame, target_node_key: 'path_completion', crop: proofCrop(0.04, 0.05, 0.92, 0.9), assertions: [{ type: 'final_track_value', target: 'path_completion', property: 'procedural_amount', min: 0.9 }, { type: 'track_range', target: 'path_completion', property: 'clip_progress', min: 0.95 }] },
   ];
-  return { catalog_key: 'map-route-reveal-v1', semanticContract, families, root, motionPlan, proofTargets, summary: { catalog_key: 'map-route-reveal-v1', primary_action: motionPlan.primary_action, camera_only: false, clean_plate_required: true, source_family_count: 1, required_asset_count: 1, required_states: ['hidden', 'advancing', 'encircled'], relation_contracts: ['route overlay registered to map canvas', 'no generated text'], proof_targets: proofTargets } };
+  return { catalog_key: 'path-reveal-v1', semanticContract, families, root, motionPlan, proofTargets, summary: { catalog_key: 'path-reveal-v1', primary_action: motionPlan.primary_action, camera_only: false, clean_plate_required: true, source_family_count: 1, required_asset_count: 1, required_states: ['hidden', 'revealing', 'complete'], relation_contracts: ['path overlay registered to flat canvas', 'no generated text'], proof_targets: proofTargets } };
 }
 
 function replaceTrack(plan, target, property, keyframes) {
@@ -711,7 +711,7 @@ function selectCapability(context) {
   const hasCharacter = Array.isArray(context.characters) && context.characters.length > 0;
   const hasTwoCharacters = hasCharacter && context.characters.length > 1;
   const hasProp = Array.isArray(context.props) && context.props.length > 0;
-  if (!hasCharacter && MAP_ROUTE_PATTERN.test(text)) return 'map-route-reveal-v1';
+  if (!hasCharacter && PATH_REVEAL_PATTERN.test(text)) return 'path-reveal-v1';
   if (!hasCharacter && (context.props || []).length >= 2 && OBJECT_SEQUENCE_PATTERN.test(text)) return 'object-sequence-transition-v1';
   if (!hasCharacter && !hasProp && !String(context.storyboard.action || '').trim()) return 'environmental-depth-motion-v1';
   if (hasCharacter && hasProp && FOREGROUND_OCCLUSION_PATTERN.test(`${text}\n${context.props.map((prop) => `${prop.name || ''} ${prop.type || ''}`).join('\n')}`)) return 'foreground-occlusion-v1';
@@ -724,7 +724,7 @@ function selectCapability(context) {
 function buildCapabilityPlan(context, config = {}) {
   switch (selectCapability(context)) {
     case 'environmental-depth-motion-v1': return environmentalDepthPlan(context, config);
-    case 'map-route-reveal-v1': return mapRouteRevealPlan(context, config);
+    case 'path-reveal-v1': return pathRevealPlan(context, config);
     case 'object-sequence-transition-v1': return objectSequencePlan(context, config);
     case 'multi-subject-interaction-v1': return multiSubjectInteractionPlan(context, config);
     case 'attached-prop-action-v1': return attachedPropActionPlan(context, config);
@@ -739,7 +739,7 @@ module.exports = {
   REGISTERED_BOUNDARY_PATTERN,
   ATTACHED_PROP_PATTERN,
   MULTI_SUBJECT_INTERACTION_PATTERN,
-  MAP_ROUTE_PATTERN,
+  PATH_REVEAL_PATTERN,
   OBJECT_SEQUENCE_PATTERN,
   selectCapability,
   buildCapabilityPlan,
@@ -748,7 +748,7 @@ module.exports = {
   foregroundOcclusionPlan,
   registeredBoundaryCrossingPlan,
   environmentalDepthPlan,
-  mapRouteRevealPlan,
+  pathRevealPlan,
   objectSequencePlan,
   applyObjectSequenceStaging,
 };

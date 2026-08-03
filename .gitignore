@@ -4,6 +4,9 @@ backend-node/scripts
 !backend-node/scripts/
 backend-node/scripts/*
 !backend-node/scripts/render-paper-storyboard.mjs
+!backend-node/scripts/render-paper-studio.mjs
+!backend-node/scripts/dry-run-paper-plan-history-migration.js
+!backend-node/scripts/migrate-paper-history-45.js
 !backend-node/scripts/verify-paper-render.js
 backend-node/configs/ai-configs-stary.json
 backend-node/configs/ai-configs-qudao.json

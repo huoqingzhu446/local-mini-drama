@@ -8,6 +8,7 @@ const continuityService = require('./paperContinuityService');
 const sourceService = require('./paperStudioSourceService');
 const eventService = require('./paperStudioEventService');
 const storyboardAudioService = require('./paperStoryboardAudioService');
+const reuseFingerprintService = require('./paperAssetReuseFingerprintService');
 const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStudioPlannerVersion');
 const {
   PaperStudioError,
@@ -326,7 +327,9 @@ function buildPlan(context, config) {
         authored_duration_seconds: normalizedContext.audio_timing.authored_duration_seconds,
         effective_duration_seconds: normalizedContext.audio_timing.effective_duration_seconds,
         speech_end_seconds: normalizedContext.audio_timing.speech_end_seconds,
-        audio_driven_duration: Boolean(normalizedContext.audio_timing.duration_extended),
+        audio_driven_duration: Boolean(normalizedContext.audio_timing.duration_adjusted),
+        audio_duration_extended: Boolean(normalizedContext.audio_timing.duration_extended),
+        audio_duration_shortened: Boolean(normalizedContext.audio_timing.duration_shortened),
       };
     }
     plan.blueprint = blueprintCompiler.withGenerationSlots(inferredBlueprint, plan);
@@ -340,60 +343,104 @@ function buildPlan(context, config) {
   );
 }
 
-function insertNodeTree(db, shotId, node, parentNodeId, now) {
+function insertNodeTree(db, shotId, planRevisionId, node, parentNodeId, now) {
   const result = db.prepare(
     `INSERT INTO paper_composition_nodes
-      (shot_id, node_key, parent_node_id, node_kind, pattern, slot, asset_version_id,
+      (shot_id, plan_revision_id, node_key, parent_node_id, node_kind, pattern, slot, asset_version_id,
        transform_json, relation_json, clip_json, local_z, status, version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', 1, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', 1, ?, ?)`,
   ).run(
-    Number(shotId), node.key, parentNodeId, node.kind, node.pattern || null,
+    Number(shotId), Number(planRevisionId), node.key, parentNodeId, node.kind, node.pattern || null,
     node.slot || null, node.asset_version_id || null, JSON.stringify(node.transform || {}),
     JSON.stringify(node.relation || {}), JSON.stringify(node.clip || {}),
     Number(node.local_z || 0), now, now,
   );
   const nodeId = Number(result.lastInsertRowid);
-  for (const child of node.children || []) insertNodeTree(db, shotId, child, nodeId, now);
+  for (const child of node.children || []) insertNodeTree(db, shotId, planRevisionId, child, nodeId, now);
 }
 
 function persistPlan(db, run, shot, plan) {
   const now = nowIso();
   const planHash = sha256(canonicalJson({ source_revision_hash: shot.source_revision_hash, plan }));
-  const oldFamilies = db.prepare('SELECT id FROM paper_source_families WHERE shot_id = ?').all(Number(shot.id));
-  if (oldFamilies.length) {
-    const ids = oldFamilies.map((row) => Number(row.id));
-    db.prepare(`DELETE FROM paper_asset_slots WHERE family_id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+  const blueprint = plan.blueprint
+    ? blueprintService.persist(db, shot, plan.blueprint, planHash, plan.blueprint_created_from || 'analysis')
+    : null;
+  const previousPlanRevisionId = shot.current_plan_revision_id == null
+    ? db.prepare('SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?').get(Number(shot.id))?.current_plan_revision_id
+    : shot.current_plan_revision_id;
+  const nextRevision = db.prepare(
+    'SELECT COALESCE(MAX(revision_number), 0) + 1 AS revision_number FROM paper_plan_revisions WHERE shot_id = ?',
+  ).get(Number(shot.id));
+  const revisionResult = db.prepare(
+    `INSERT INTO paper_plan_revisions
+      (shot_id, revision_number, blueprint_revision_id, plan_hash, status,
+       transition_report_json, created_from, created_at)
+     VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)`,
+  ).run(
+    Number(shot.id), Number(nextRevision.revision_number),
+    blueprint?.id || shot.blueprint_revision_id || null, planHash,
+    JSON.stringify(plan.transition_report || {}), plan.blueprint_created_from || 'analysis', now,
+  );
+  const planRevisionId = Number(revisionResult.lastInsertRowid);
+  if (previousPlanRevisionId) {
+    db.prepare(
+      `UPDATE paper_plan_revisions
+       SET status = 'superseded', superseded_at = ?
+       WHERE id = ? AND status != 'superseded'`,
+    ).run(now, Number(previousPlanRevisionId));
+    const oldFamilies = db.prepare(
+      'SELECT id FROM paper_source_families WHERE plan_revision_id = ?',
+    ).all(Number(previousPlanRevisionId));
+    if (oldFamilies.length) {
+      const ids = oldFamilies.map((row) => Number(row.id));
+      db.prepare(`UPDATE paper_asset_slots SET status = 'superseded', updated_at = ? WHERE family_id IN (${ids.map(() => '?').join(',')}) AND status != 'superseded'`)
+        .run(now, ...ids);
+    }
+    db.prepare("UPDATE paper_source_families SET status = 'superseded', updated_at = ? WHERE plan_revision_id = ? AND status != 'superseded'")
+      .run(now, Number(previousPlanRevisionId));
+    db.prepare("UPDATE paper_composition_nodes SET status = 'superseded', updated_at = ? WHERE plan_revision_id = ? AND status != 'superseded'")
+      .run(now, Number(previousPlanRevisionId));
+    db.prepare("UPDATE paper_motion_plans SET status = 'superseded', updated_at = ? WHERE plan_revision_id = ? AND status != 'superseded'")
+      .run(now, Number(previousPlanRevisionId));
+    db.prepare("UPDATE paper_job_steps SET status = 'superseded', lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE plan_revision_id = ? AND status != 'superseded'")
+      .run(now, Number(previousPlanRevisionId));
   }
-  db.prepare('DELETE FROM paper_source_families WHERE shot_id = ?').run(Number(shot.id));
-  db.prepare('DELETE FROM paper_composition_nodes WHERE shot_id = ?').run(Number(shot.id));
-  db.prepare('DELETE FROM paper_motion_plans WHERE shot_id = ?').run(Number(shot.id));
-  db.prepare('DELETE FROM paper_job_steps WHERE run_id = ? AND shot_id = ?').run(Number(run.id), Number(shot.id));
 
   for (const family of plan.families) {
     const familyResult = db.prepare(
       `INSERT INTO paper_source_families
-        (shot_id, family_key, pattern, registration_canvas_json, contract_json,
+        (shot_id, plan_revision_id, family_key, pattern, registration_canvas_json, contract_json,
          status, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'planned', 1, ?, ?)`,
-    ).run(Number(shot.id), family.family_key, family.pattern, JSON.stringify(family.registration_canvas || {}), JSON.stringify(family.contract || {}), now, now);
+       VALUES (?, ?, ?, ?, ?, ?, 'planned', 1, ?, ?)`,
+    ).run(Number(shot.id), planRevisionId, family.family_key, family.pattern, JSON.stringify(family.registration_canvas || {}), JSON.stringify(family.contract || {}), now, now);
     const familyId = Number(familyResult.lastInsertRowid);
     const insertSlot = db.prepare(
       `INSERT INTO paper_asset_slots
         (family_id, slot_key, asset_type, generation_purpose, constraints_json,
-         required_for_gate, status, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'planned', 1, ?, ?)`,
+         required_for_gate, reuse_fingerprint, status, version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', 1, ?, ?)`,
     );
     for (const slot of family.slots) {
-      insertSlot.run(familyId, slot.slot_key, slot.asset_type, slot.generation_purpose, JSON.stringify(slot.constraints || {}), slot.required_for_gate === false ? 0 : 1, now, now);
+      const reuseFingerprint = reuseFingerprintService.computeReuseFingerprint({
+        run,
+        shot,
+        family: {
+          ...family,
+          registration_canvas_json: family.registration_canvas || {},
+          contract_json: family.contract || {},
+        },
+        slot: { ...slot, constraints_json: slot.constraints || {} },
+      });
+      insertSlot.run(familyId, slot.slot_key, slot.asset_type, slot.generation_purpose, JSON.stringify(slot.constraints || {}), slot.required_for_gate === false ? 0 : 1, reuseFingerprint, now, now);
     }
   }
-  insertNodeTree(db, shot.id, plan.root, null, now);
+  insertNodeTree(db, shot.id, planRevisionId, plan.root, null, now);
   db.prepare(
     `INSERT INTO paper_motion_plans
-      (shot_id, schema_version, semantic_contract_hash, timing_hash, plan_json,
+      (shot_id, plan_revision_id, schema_version, semantic_contract_hash, timing_hash, plan_json,
        compiled_tracks_json, status, version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'draft', 1, ?, ?)`,
-  ).run(Number(shot.id), Number(plan.motionPlan.schema_version || 1), sha256(canonicalJson(plan.semanticContract)), sha256(canonicalJson({ fps: plan.motionPlan.fps, duration_frames: plan.motionPlan.duration_frames, cues: plan.motionPlan.cues })), JSON.stringify(plan.motionPlan), JSON.stringify({ subject_tracks: plan.motionPlan.subject_tracks, camera_tracks: plan.motionPlan.camera_tracks, scene_tracks: plan.motionPlan.scene_tracks || [], transition_tracks: plan.motionPlan.transition_tracks || [] }), now, now);
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', 1, ?, ?)`,
+  ).run(Number(shot.id), planRevisionId, Number(plan.motionPlan.schema_version || 1), sha256(canonicalJson(plan.semanticContract)), sha256(canonicalJson({ fps: plan.motionPlan.fps, duration_frames: plan.motionPlan.duration_frames, cues: plan.motionPlan.cues })), JSON.stringify(plan.motionPlan), JSON.stringify({ subject_tracks: plan.motionPlan.subject_tracks, camera_tracks: plan.motionPlan.camera_tracks, scene_tracks: plan.motionPlan.scene_tracks || [], transition_tracks: plan.motionPlan.transition_tracks || [] }), now, now);
 
   const steps = [
     ['analyze_shot', [], 'completed'],
@@ -401,8 +448,9 @@ function persistPlan(db, run, shot, plan) {
     ['generate_layout_master', ['plan_families'], 'blocked_user_authorization'],
     ['generate_required_slots', ['generate_layout_master'], 'queued'],
     ['matte_assets', ['generate_required_slots'], 'queued'],
-    ['register_assets', ['generate_required_slots'], 'queued'],
-    ['asset_gate', ['matte_assets', 'register_assets'], 'queued'],
+    ['register_assets', ['matte_assets'], 'queued'],
+    ['technical_asset_gate', ['register_assets'], 'queued'],
+    ['asset_gate', ['technical_asset_gate'], 'queued'],
     ['plan_motion', ['asset_gate'], 'queued'],
     ['compile_snapshot', ['plan_motion'], 'queued'],
     ['render_proof', ['compile_snapshot'], 'queued'],
@@ -414,26 +462,23 @@ function persistPlan(db, run, shot, plan) {
   ];
   const insertStep = db.prepare(
     `INSERT INTO paper_job_steps
-      (run_id, shot_id, step_key, input_hash, depends_on_json, status, attempt,
+      (run_id, shot_id, plan_revision_id, step_key, input_hash, depends_on_json, status, attempt,
        max_attempts, result_json, error_json, started_at, completed_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, 2, ?, '{}', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 2, ?, '{}', ?, ?, ?, ?)`,
   );
   for (const [stepKey, dependsOn, status] of steps) {
     const completed = status === 'completed' ? now : null;
-    insertStep.run(Number(run.id), Number(shot.id), stepKey, sha256(canonicalJson({ plan_hash: planHash, step_key: stepKey })), JSON.stringify(dependsOn), status, status === 'completed' ? JSON.stringify({ plan_hash: planHash, catalog_key: plan.catalog_key }) : '{}', completed, completed, now, now);
-  }
-
-  if (plan.blueprint) {
-    blueprintService.persist(db, shot, plan.blueprint, planHash, plan.blueprint_created_from || 'analysis');
+    insertStep.run(Number(run.id), Number(shot.id), planRevisionId, stepKey, sha256(canonicalJson({ plan_hash: planHash, step_key: stepKey })), JSON.stringify(dependsOn), status, status === 'completed' ? JSON.stringify({ plan_hash: planHash, catalog_key: plan.catalog_key }) : '{}', completed, completed, now, now);
   }
 
   db.prepare(
     `UPDATE paper_studio_shots
      SET semantic_contract_json = ?, plan_summary_json = ?, status = 'analyzed',
+         current_plan_revision_id = ?,
          current_snapshot_id = NULL, approved_snapshot_id = NULL,
          last_error_json = '{}', version = version + 1, updated_at = ?
      WHERE id = ?`,
-  ).run(JSON.stringify(plan.semanticContract), JSON.stringify({ ...plan.summary, plan_hash: planHash }), now, Number(shot.id));
+  ).run(JSON.stringify(plan.semanticContract), JSON.stringify({ ...plan.summary, plan_hash: planHash }), planRevisionId, now, Number(shot.id));
   return planHash;
 }
 
@@ -445,6 +490,20 @@ function selectedShots(run, body) {
     throw new PaperStudioError('PAPER_STUDIO_SHOT_OWNERSHIP_MISMATCH', '部分镜头不属于当前生产版本', { run_id: Number(run.id), shot_ids: body.shot_ids }, 409);
   }
   return selected;
+}
+
+function withTransitionRecoveryContext(error, shot, context = {}) {
+  if (error.code !== 'PAPER_STUDIO_TRANSITION_GATE_FAILED') return error;
+  error.details = {
+    ...(error.details || {}),
+    recovery_context: {
+      shot_id: Number(shot.id),
+      paper_storyboard_id: Number(shot.paper_storyboard_id || context.storyboard?.id || 0) || null,
+      shot_number: Number(shot.shot_index || 0) + 1,
+      title: context.storyboard?.title || '',
+    },
+  };
+  return error;
 }
 
 function analyzeRun(db, log, runId, body = {}, config = {}) {
@@ -472,7 +531,13 @@ function analyzeRun(db, log, runId, body = {}, config = {}) {
       422,
     );
   }
-  const plans = contexts.map(({ shot, context }) => ({ shot, plan: buildPlan(context, config) }));
+  const plans = contexts.map(({ shot, context }) => {
+    try {
+      return { shot, plan: buildPlan(context, config) };
+    } catch (error) {
+      throw withTransitionRecoveryContext(error, shot, context);
+    }
+  });
   const analyze = db.transaction(() => {
     const now = nowIso();
     db.prepare("UPDATE paper_studio_runs SET status = 'analyzing', progress = 2, version = version + 1, updated_at = ? WHERE id = ?").run(now, Number(run.id));
@@ -519,15 +584,17 @@ function confirmPlan(db, log, runId, body = {}) {
     for (const shot of shots) {
       updateShot.run(now, Number(shot.id));
       if (shot.blueprint_revision_id) blueprintService.confirm(db, shot.id);
-      db.prepare("UPDATE paper_source_families SET status = 'confirmed', version = version + 1, updated_at = ? WHERE shot_id = ?").run(now, Number(shot.id));
-      db.prepare("UPDATE paper_composition_nodes SET status = 'confirmed', version = version + 1, updated_at = ? WHERE shot_id = ?").run(now, Number(shot.id));
-      db.prepare("UPDATE paper_motion_plans SET status = 'confirmed', version = version + 1, updated_at = ? WHERE shot_id = ?").run(now, Number(shot.id));
+      db.prepare("UPDATE paper_plan_revisions SET status = 'confirmed', confirmed_at = ? WHERE id = ? AND status = 'draft'")
+        .run(now, Number(shot.current_plan_revision_id));
+      db.prepare("UPDATE paper_source_families SET status = 'confirmed', version = version + 1, updated_at = ? WHERE plan_revision_id = ?").run(now, Number(shot.current_plan_revision_id));
+      db.prepare("UPDATE paper_composition_nodes SET status = 'confirmed', version = version + 1, updated_at = ? WHERE plan_revision_id = ?").run(now, Number(shot.current_plan_revision_id));
+      db.prepare("UPDATE paper_motion_plans SET status = 'confirmed', version = version + 1, updated_at = ? WHERE plan_revision_id = ?").run(now, Number(shot.current_plan_revision_id));
     }
     const remaining = db.prepare("SELECT COUNT(*) AS count FROM paper_studio_shots WHERE run_id = ? AND deleted_at IS NULL AND status != 'plan_confirmed'").get(Number(run.id));
     const allConfirmed = Number(remaining.count) === 0;
     const status = allConfirmed ? 'awaiting_generation_authorization' : 'plan_review';
-    db.prepare("UPDATE paper_job_steps SET status = 'blocked_user_authorization', blocked_reason = 'user_authorization_required', user_visible_status = 'waiting_for_authorization', authorization_id = NULL, updated_at = ? WHERE run_id = ? AND shot_id IN (" + shots.map(() => '?').join(',') + ") AND step_key = 'generate_layout_master'")
-      .run(now, Number(run.id), ...shots.map((shot) => Number(shot.id)));
+    db.prepare("UPDATE paper_job_steps SET status = 'blocked_user_authorization', blocked_reason = 'user_authorization_required', user_visible_status = 'waiting_for_authorization', authorization_id = NULL, updated_at = ? WHERE run_id = ? AND shot_id IN (" + shots.map(() => '?').join(',') + ") AND plan_revision_id IN (" + shots.map(() => '?').join(',') + ") AND step_key = 'generate_layout_master'")
+      .run(now, Number(run.id), ...shots.map((shot) => Number(shot.id)), ...shots.map((shot) => Number(shot.current_plan_revision_id)));
     db.prepare("UPDATE paper_studio_shots SET attention_required = 'authorize_generation' WHERE id IN (" + shots.map(() => '?').join(',') + ")")
       .run(...shots.map((shot) => Number(shot.id)));
     db.prepare('UPDATE paper_studio_runs SET status = ?, progress = ?, attention_required = ?, active_authorization_id = NULL, version = version + 1, updated_at = ? WHERE id = ?')
@@ -566,7 +633,12 @@ function updateBlueprint(db, log, shotId, body = {}, config = {}) {
     );
   }
   const context = storyboardContext(db, shot);
-  const plan = finalizePlan(blueprintCompiler.compile(body.blueprint, context, config));
+  let plan;
+  try {
+    plan = finalizePlan(blueprintCompiler.compile(body.blueprint, context, config));
+  } catch (error) {
+    throw withTransitionRecoveryContext(error, shot, context);
+  }
   plan.blueprint = blueprintCompiler.withGenerationSlots(body.blueprint, plan);
   plan.blueprint_created_from = 'user_edit';
   schemaService.assertValid('paperBlueprint', plan.blueprint, '更新后的生产蓝图不符合 Schema');
@@ -619,6 +691,7 @@ module.exports = {
   buildPlan,
   supportedBoundaryTransitionPlan,
   genericPlan,
+  withTransitionRecoveryContext,
   analyzeRun,
   confirmPlan,
   getBlueprint,

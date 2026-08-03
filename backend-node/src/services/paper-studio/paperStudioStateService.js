@@ -56,7 +56,10 @@ function nextActionForRun(status) {
   return runActions[status] || { type: 'inspect_run', label: '检查运行状态', blocking: true };
 }
 
-function nextActionForShot(status) {
+function nextActionForShot(status, lastError = {}) {
+  if (lastError?.step_key === 'render_preview' && ['proof_ready', 'proof_failed'].includes(status)) {
+    return { type: 'render_preview', label: '重试预览渲染', blocking: true };
+  }
   return shotActions[status] || { type: 'inspect_shot', label: '检查分镜状态', blocking: true };
 }
 

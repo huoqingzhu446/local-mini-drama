@@ -2,6 +2,7 @@ const schemaService = require('./paperStudioSchemaService');
 const spatialContractService = require('./paperSpatialContractService');
 const visualSceneCompiler = require('./paperVisualSceneCompilerService');
 const transitionGateService = require('./paperTransitionGateService');
+const mobilityContractService = require('./paperMobilityContractService');
 const { CURRENT_PLANNER_VERSION } = require('./paperStudioPlannerVersion');
 const { PaperStudioError } = require('./paperStudioUtils');
 
@@ -11,22 +12,17 @@ const ACTOR_WORDS = [
 ];
 const PROP_WORDS = [
   '行李箱', '手提箱', '箱子', '背包', '雨伞', '书包', '书本', '杯子', '篮子',
-  '粮袋', '粮车', '马车', '战车', '车辆', '车队', '包裹', '武器', '长剑', '木箱',
-  '手机', '信件', '道具',
+  '物资袋', '马车', '车辆', '运输队', '包裹', '工具', '木箱',
+  '手推车', '独轮车', '板车', '搬运车', '运输车', '汽车', '卡车', '货车', '摩托车',
+  '自行车', '大型器械', '多人操作平台', '轿子', '担架', '手机', '信件', '道具',
 ];
 const SUPPORT_WORDS = [
   '长椅', '椅子', '沙发', '床边', '床', '台阶', '凳子', '座位', '桌旁', '桌子',
   '门口', '站台', '岸边', '窗边',
 ];
-const MAP_ROUTE_PATTERN = /(战役地图|战略地图|地图上|地图展开|黑色箭头|地图.{0,40}(?:箭头|路线|地名|包围|围城)|(?:路线|战线).{0,30}(?:推进|延伸|合拢)|由.{0,12}向.{0,12}推进)/i;
-const SIEGE_SUPPLY_PATTERN = /(?:粮袋|粮尽|缺粮)[\s\S]{0,180}(?:粮车|运粮|甬道|补给)[\s\S]{0,180}(?:包围|军阵|城墙|围城)/i;
-const GROUND_VEHICLE_PATTERN = /(粮车|马车|战车|车辆|车队|辎重车|运输车)/;
-const MAP_PLACE_LAYOUTS = [
-  { key: 'dingtao', name: '定陶', x: 0.405, y: 0.91, width: 0.11 },
-  { key: 'yellow_river', name: '黄河', x: 0.37, y: 0.42, width: 0.11 },
-  { key: 'handan', name: '邯郸', x: 0.49, y: 0.12, width: 0.11 },
-  { key: 'julu', name: '巨鹿', x: 0.61, y: 0.52, width: 0.11 },
-];
+const PATH_REVEAL_PATTERN = /(?:地图|平面图|示意图|流程图|线路图|管线图).{0,100}(?:路线|路径|线路|轨迹|流程线|管线|箭头|连线|标记).{0,100}(?:亮起|推进|延伸|展开|显现|到达|连接|合拢|闭合|包围)|(?:路线|路径|线路|轨迹|流程线|管线).{0,80}(?:推进|延伸|展开|显现|到达|连接|合拢|闭合)/i;
+const MULTI_BEAT_GROUNDED_PATTERN = /(?:滑落|掉落|落地|坠落)[\s\S]{0,160}(?:前行|驶入|移动|推进|穿过|进入)[\s\S]{0,160}(?:逼近|合拢|收紧|靠近|聚拢)/i;
+const GROUND_VEHICLE_PATTERN = mobilityContractService.GROUND_MOBILITY_PATTERN;
 
 function frameAt(durationFrames, ratio) {
   return Math.max(0, Math.min(durationFrames - 1, Math.round((durationFrames - 1) * ratio)));
@@ -75,7 +71,7 @@ function sourceMentionedAsProp(text, source) {
   const name = String(source?.name || '').trim();
   if (!name) return false;
   if (text.includes(name)) return true;
-  const shortened = name.replace(/^(?:秦军|楚军|赵军|军用|一辆|一队)/, '');
+  const shortened = name.replace(/^(?:一辆|一队|一箱|一捆|一名|一位)/, '');
   return shortened.length >= 2 && text.includes(shortened);
 }
 
@@ -95,7 +91,8 @@ function inferPropName(text, context) {
   if (source?.name) return source.name;
   const carried = text.match(/(?:提起|提着|拿起|拿着|抱起|抱着|拖着|拉着|推着)([^，。；]{1,10}?)(?=从|向|往|走|跑|来到|到达|并|后|，|。|；|$)/);
   const captured = cleanCapturedName(carried?.[1] || '');
-  return captured || firstMatch(text, PROP_WORDS) || context.props?.[0]?.name || '';
+  const groundVehicle = text.match(/(?:^|[，。；\s])(?:近景中)?(?:一辆|一队|一组)?([\p{Script=Han}]{1,8}?车(?:队)?)(?=从|沿|向|往|驶|前行|行进|移动|推进|穿过|进入|离开|运送|运输|开往)/u);
+  return captured || groundVehicle?.[1] || firstMatch(text, PROP_WORDS) || context.props?.[0]?.name || '';
 }
 
 function matchingActorSource(text, context, actorName) {
@@ -152,6 +149,26 @@ function quotedTitleForCharacter(text, name) {
   return match?.[1]?.trim() || String(name);
 }
 
+function cleanRouteLabel(value, fallback) {
+  const label = String(value || '')
+    .replace(/^(?:地图上|平面图上|示意图上|路线|路径|包裹|车辆|人物|由|从|向|到)+/, '')
+    .replace(/(?:路线|路径|线路|轨迹|推进|延伸|展开|显现|到达|连接|合拢|逐步|最终)+$/g, '')
+    .trim();
+  return label.slice(0, 16) || fallback;
+}
+
+function inferRouteWaypoints(text) {
+  const between = String(text || '').match(/(?:从|由)([^，。；]{1,16}?)(?:向|到|至|通往|延伸到)([^，。；]{1,16}?)(?=推进|延伸|展开|显现|到达|连接|合拢|，|。|；|$)/);
+  const destination = String(text || '').match(/(?:在|到达|连接到|延伸到)([^，。；]{1,16}?)(?=合拢|停止|完成|，|。|；|$)/);
+  const start = cleanRouteLabel(between?.[1], '起点');
+  const end = cleanRouteLabel(destination?.[1] || between?.[2], '终点');
+  return [
+    { key: 'path_start', label: start, x: -0.32, y: 0.24 },
+    { key: 'path_mid', label: '中间节点', x: 0, y: 0 },
+    { key: 'path_end', label: end, x: 0.3, y: -0.18 },
+  ];
+}
+
 function defaultPlacementRegions({ protectRight = false } = {}) {
   return [
     {
@@ -172,47 +189,101 @@ function placementAttributes({ regionKey = 'foreground_ground', contactKind = 'b
   };
 }
 
-function siegeSupplyBlueprint(context, storyboard) {
-  const cartSource = (context.props || []).find((source) => sourceMentionedAsProp('粮车', source))
-    || (context.props || []).find((source) => GROUND_VEHICLE_PATTERN.test(String(source.name || '')))
-    || null;
-  const bagSource = (context.props || []).find((source) => /粮袋/.test(String(source.name || ''))) || null;
-  const entities = [
-    sourceIdentity({
-      key: 'supply_bag', type: 'prop', name: bagSource?.name || '空粮袋', role: 'ground_prop',
-      independent_layer: true, reusable: true, identity_version_id: null,
-      source_library_type: null, source_library_id: null,
-      states: ['held', 'falling', 'grounded'],
-      attributes: {
-        inferred_from: 'storyboard_text',
-        source_evidence: '空粮袋从守城士兵手中滑落',
-        placement: { ...placementAttributes({ contactKind: 'base' }), grounded_states: ['grounded'] },
-      },
-    }, bagSource),
-    sourceIdentity({
-      key: 'supply_cart', type: 'prop', name: cartSource?.name || '秦军粮车', role: 'ground_vehicle',
-      independent_layer: true, reusable: true, identity_version_id: null,
-      source_library_type: null, source_library_id: null,
-      states: ['approach', 'passing', 'continue'],
-      attributes: {
-        inferred_from: 'storyboard_text',
-        source_evidence: '秦军甬道上的运粮车队',
-        placement: placementAttributes({ contactKind: 'wheels' }),
-      },
-    }, cartSource),
-    {
-      key: 'siege_line', type: 'effect', name: '逼近城墙的秦军阵线', role: 'army_formation',
-      independent_layer: true, reusable: false, states: ['hidden', 'advancing', 'settle'],
-      attributes: { procedural: true, source_evidence: '王离军包围圈逐渐缩小' },
-    },
-  ];
-  const captions = [...(storyboard.audio_captions || [])].sort((left, right) => Number(left.start_frame || 0) - Number(right.start_frame || 0));
-  const insideDescription = '巨鹿城内，困守的石路与城墙内侧，空粮袋落地，冷灰战争烟尘色调';
-  const outsideDescription = '巨鹿城外秦军甬道，接地运粮车队沿土路前行，远处秦军阵线围城，与城内保持相同年代、天气和冷灰战争色调';
-  const blueprint = {
+function finalizeBlueprint(blueprint, context, validationMessage) {
+  mobilityContractService.annotateBlueprint(blueprint, context);
+  schemaService.assertValid('paperBlueprint', blueprint, validationMessage);
+  return blueprint;
+}
+
+function pathRevealBlueprint(context, storyboard, text) {
+  const markers = (context.characters || []).slice(0, 4).map((source, index) => sourceIdentity({
+    key: `path_subject_${index + 1}`,
+    type: 'character',
+    name: source.name || `主体${index + 1}`,
+    role: 'path_subject_marker',
+    independent_layer: true,
+    reusable: true,
+    identity_version_id: null,
+    source_library_type: null,
+    source_library_id: null,
+    states: ['path_marker'],
+    attributes: { inferred_from: 'path_storyboard_entity_links', title_card: quotedTitleForCharacter(text, source.name), reveal_order: index },
+  }, source));
+  const waypoints = inferRouteWaypoints(text);
+  return finalizeBlueprint({
     schema_version: 1,
     environment: {
-      description: insideDescription,
+      description: [storyboard.title, storyboard.description, storyboard.action].filter(Boolean).join('；') || '俯视平面信息图',
+      clean_plate_required: true,
+      camera_intent: storyboard.camera_motion || 'static',
+      registered_boundaries: [],
+    },
+    entities: [{
+      key: 'path_subject', type: 'effect', name: '逐步揭示的路径', role: 'path_reveal',
+      independent_layer: false, reusable: false, states: ['hidden', 'revealing', 'complete'], attributes: { procedural: true },
+    }, ...markers],
+    relations: [],
+    action_contract: {
+      primary_action: 'path_reveal', actor_key: 'path_subject', object_key: null, support_key: null,
+      direction: 'forward', start_state: 'hidden', end_state: 'complete', waypoints,
+      phases: [
+        phase('hidden', '底图静置', 0, 0.12, 'hidden'),
+        phase('reveal', '路径逐步揭示', 0.12, 0.72, 'revealing'),
+        phase('complete', '终点与关联主体显现', 0.72, 1, 'complete'),
+      ],
+      contact_events: [], occlusion_events: [],
+    },
+    generation_slots: [],
+  }, context, '路径揭示生产蓝图无效');
+}
+
+function sequenceSubjectName(text, matcher, fallback) {
+  const match = String(text || '').match(matcher);
+  const value = String(match?.[1] || '')
+    .split(/[，。；]/).at(-1)
+    .replace(/^(?:一个|一只|一辆|一队|一名|一位|随后|接着|同时|远处|近处|画面中)+/, '')
+    .trim();
+  return value.slice(-12) || fallback;
+}
+
+function multiBeatGroundedSequenceBlueprint(context, storyboard, text) {
+  const transportSource = (context.props || []).find((source) => (
+    GROUND_VEHICLE_PATTERN.test(String(source.name || '')) && sourceMentionedAsProp(text, source)
+  )) || null;
+  const fallingName = sequenceSubjectName(text, /([^，。；]{1,18}?)(?=(?:从[^，。；]{0,16})?(?:滑落|掉落|落地|坠落))/, '落地主体');
+  const transportName = transportSource?.name || sequenceSubjectName(
+    text,
+    /([^，。；]{1,18}?)(?=(?:沿[^，。；]{0,12})?(?:前行|驶入|移动|推进|穿过|进入))/,
+    '接地移动主体',
+  );
+  const fallingSource = (context.props || []).find((source) => String(source.name || '') === fallingName) || null;
+  const captions = [...(storyboard.audio_captions || [])].sort((left, right) => Number(left.start_frame || 0) - Number(right.start_frame || 0));
+  const segments = String(text || '').split(/[。；]/).map((item) => item.trim()).filter(Boolean);
+  const firstDescription = segments[0] || storyboard.description || storyboard.title || '第一动作区域';
+  const followupDescription = segments.slice(1).join('；') || storyboard.action || storyboard.description || '后续动作区域';
+  const entities = [
+    sourceIdentity({
+      key: 'ground_subject_1', type: 'prop', name: fallingName, role: 'ground_prop', independent_layer: true,
+      reusable: true, identity_version_id: null, source_library_type: null, source_library_id: null,
+      states: ['suspended', 'falling', 'grounded'],
+      attributes: { inferred_from: 'storyboard_text', source_evidence: firstDescription, placement: { ...placementAttributes({ contactKind: 'base' }), grounded_states: ['grounded'] } },
+    }, fallingSource),
+    sourceIdentity({
+      key: 'ground_transport_1', type: 'prop', name: transportName, role: 'ground_vehicle', independent_layer: true,
+      reusable: true, identity_version_id: null, source_library_type: null, source_library_id: null,
+      states: ['approach', 'moving', 'arrived'],
+      attributes: { inferred_from: 'storyboard_text', source_evidence: followupDescription, placement: placementAttributes({ contactKind: 'wheels' }) },
+    }, transportSource),
+    {
+      key: 'ground_effect_1', type: 'effect', name: '后续空间变化', role: 'grounded_crowd_effect',
+      independent_layer: true, reusable: false, states: ['hidden', 'changing', 'settled'],
+      attributes: { procedural: true, source_evidence: segments.at(-1) || followupDescription },
+    },
+  ];
+  return finalizeBlueprint({
+    schema_version: 1,
+    environment: {
+      description: firstDescription,
       clean_plate_required: true,
       camera_intent: storyboard.camera_motion || 'static',
       registered_boundaries: [],
@@ -222,99 +293,41 @@ function siegeSupplyBlueprint(context, storyboard) {
     relations: [],
     visual_scenes: [
       {
-        key: 'scene_inside_city', label: '巨鹿城内', description: insideDescription, location: '巨鹿城内',
-        time_context: 'continuous', camera_signature: '近景低机位', environment_family_key: 'city_inside_environment',
-        subject_keys: ['supply_bag'], source_caption_keys: captions[0]?.key ? [String(captions[0].key)] : [], confidence: 0.98,
+        key: 'scene_primary', label: '第一动作区域', description: firstDescription, location: '第一动作区域',
+        time_context: 'continuous', camera_signature: '近景低机位', environment_family_key: 'primary_environment',
+        subject_keys: ['ground_subject_1'], source_caption_keys: captions[0]?.key ? [String(captions[0].key)] : [], confidence: 0.9,
         placement_regions: defaultPlacementRegions({ protectRight: true }),
       },
       {
-        key: 'scene_outside_road', label: '巨鹿城外甬道', description: outsideDescription, location: '巨鹿城外',
-        time_context: 'continuous', camera_signature: '中远景平视', environment_family_key: 'city_outside_road_environment',
-        subject_keys: ['supply_cart', 'siege_line'], source_caption_keys: captions[1]?.key ? [String(captions[1].key)] : [], confidence: 0.98,
+        key: 'scene_followup', label: '后续动作区域', description: followupDescription, location: '后续动作区域',
+        time_context: 'continuous', camera_signature: '中远景平视', environment_family_key: 'followup_environment',
+        subject_keys: ['ground_transport_1', 'ground_effect_1'], source_caption_keys: captions[1]?.key ? [String(captions[1].key)] : [], confidence: 0.9,
         placement_regions: defaultPlacementRegions({ protectRight: true }),
       },
     ],
     transition_contracts: [{
-      key: 'inside_to_outside', from_scene_key: 'scene_inside_city', to_scene_key: 'scene_outside_road',
+      key: 'primary_to_followup', from_scene_key: 'scene_primary', to_scene_key: 'scene_followup',
       relation: 'location_change', kind: 'dust_whip_pan', duration_seconds: 0.6, direction: 'left',
       requires_new_plate: true, hard_cut_allowed: false, hard_cut_reason: null,
-      source_caption_key: captions[1]?.key ? String(captions[1].key) : null, confidence: 0.98,
+      source_caption_key: captions[1]?.key ? String(captions[1].key) : null, confidence: 0.9,
     }],
     action_contract: {
-      primary_action: 'siege_supply_sequence', actor_key: 'supply_bag', object_key: 'supply_cart', support_key: null,
-      direction: 'left_to_right', start_state: 'held', end_state: 'settle',
+      primary_action: 'multi_beat_grounded_sequence', actor_key: 'ground_subject_1', object_key: 'ground_transport_1', support_key: null,
+      direction: 'left_to_right', start_state: 'suspended', end_state: 'settled',
       waypoints: [
-        { key: 'bag_contact', label: '左侧石路粮袋落点', x: -0.14, y: 0, region_key: 'foreground_ground' },
-        { key: 'cart_lane', label: '中部石路粮车通道', x: 0.05, y: 0, region_key: 'foreground_ground' },
-        { key: 'siege_depth', label: '远处城墙与军阵', x: 0.08, y: -0.2, region_key: 'foreground_ground' },
+        { key: 'ground_contact', label: '落地点', x: -0.14, y: 0, region_key: 'foreground_ground' },
+        { key: 'transport_lane', label: '接地移动通道', x: 0.05, y: 0, region_key: 'foreground_ground' },
+        { key: 'depth_change', label: '后续空间变化区', x: 0.08, y: -0.2, region_key: 'foreground_ground' },
       ],
       phases: [
-        phase('bag_fall', '空粮袋落地', 0, 0.32, 'falling'),
-        phase('cart_advance', '粮车沿甬道前行', 0.32, 0.7, 'grounded', 'passing'),
-        phase('siege_close', '秦军阵线收紧', 0.7, 1, 'grounded', 'continue'),
+        phase('ground_contact', '主体落地', 0, 0.32, 'falling'),
+        phase('ground_move', '接地主体前行', 0.32, 0.7, 'grounded', 'moving'),
+        phase('depth_change', '后续空间变化', 0.7, 1, 'grounded', 'arrived'),
       ],
-      contact_events: ['bag_contacts_ground'], occlusion_events: [],
+      contact_events: ['subject_contacts_ground'], occlusion_events: [],
     },
     generation_slots: [],
-  };
-  schemaService.assertValid('paperBlueprint', blueprint, '巨鹿危城多阶段生产蓝图无效');
-  return blueprint;
-}
-
-function mapRouteBlueprint(context, storyboard, text) {
-  const characters = (context.characters || []).slice(0, 4).map((source, index) => sourceIdentity({
-    key: `map_character_${index + 1}`,
-    type: 'character',
-    name: source.name || `人物${index + 1}`,
-    role: 'map_character_marker',
-    independent_layer: true,
-    reusable: true,
-    identity_version_id: null,
-    source_library_type: null,
-    source_library_id: null,
-    states: ['map_marker'],
-    attributes: {
-      inferred_from: 'map_storyboard_entity_links',
-      title_card: quotedTitleForCharacter(text, source.name),
-      reveal_order: index,
-    },
-  }, source));
-  const blueprint = {
-    schema_version: 1,
-    environment: {
-      description: [storyboard.title, storyboard.description, storyboard.action].filter(Boolean).join('；') || '俯拍战略地图',
-      clean_plate_required: true,
-      camera_intent: storyboard.camera_motion || 'static',
-      registered_boundaries: [],
-    },
-    entities: [
-      {
-        key: 'strategic_route', type: 'effect', name: '地图推进路线与包围圈', role: 'map_route',
-        independent_layer: false, reusable: false, states: ['hidden', 'advancing', 'encircled'],
-        attributes: { procedural: true },
-      },
-      ...characters,
-    ],
-    relations: [],
-    action_contract: {
-      primary_action: 'map_route_reveal', actor_key: 'strategic_route', object_key: null, support_key: null,
-      direction: 'forward', start_state: 'hidden', end_state: 'encircled',
-      waypoints: [
-        { key: 'route_start', label: '推进起点', x: -0.08, y: 0.38 },
-        { key: 'encirclement', label: '巨鹿包围圈', x: 0.12, y: 0.02 },
-      ],
-      phases: [
-        phase('hidden', '地图静置', 0, 0.12, 'hidden'),
-        phase('advance', '路线推进', 0.12, 0.58, 'advancing'),
-        phase('encircle', '包围合拢', 0.58, 0.72, 'encircled'),
-        phase('reveal_commanders', '将领与题签显现', 0.72, 1, 'encircled'),
-      ],
-      contact_events: [], occlusion_events: [],
-    },
-    generation_slots: [],
-  };
-  schemaService.assertValid('paperBlueprint', blueprint, '地图镜头生产蓝图无效');
-  return blueprint;
+  }, context, '多节拍接地序列生产蓝图无效');
 }
 
 function infer(context = {}) {
@@ -324,8 +337,8 @@ function infer(context = {}) {
     .join('，');
   const environmentDescription = context.scene?.prompt || storyboard.location || storyboard.description || storyboard.title || '分镜干净背景';
   const environmentOnly = Boolean(storyboard.environment_only);
-  if (MAP_ROUTE_PATTERN.test(text)) return mapRouteBlueprint(context, storyboard, text);
-  if (SIEGE_SUPPLY_PATTERN.test(text)) return siegeSupplyBlueprint(context, storyboard);
+  if (PATH_REVEAL_PATTERN.test(text)) return pathRevealBlueprint(context, storyboard, text);
+  if (MULTI_BEAT_GROUNDED_PATTERN.test(text)) return multiBeatGroundedSequenceBlueprint(context, storyboard, text);
   if (environmentOnly) {
     const blueprint = {
       schema_version: 1,
@@ -341,8 +354,7 @@ function infer(context = {}) {
       },
       generation_slots: [],
     };
-    schemaService.assertValid('paperBlueprint', blueprint, '环境镜头生产蓝图无效');
-    return blueprint;
+    return finalizeBlueprint(blueprint, context, '环境镜头生产蓝图无效');
   }
 
   const actorName = inferActorName(text, context);
@@ -350,19 +362,26 @@ function infer(context = {}) {
   const actorSource = matchingActorSource(text, context, actorName);
   const propSource = matchingPropSource(text, context, propName);
   const supportName = inferSupportName(text);
-  const hasCarry = Boolean(propName) && /提起|提着|拿起|拿着|抱起|抱着|拖着|拉着|推着/.test(text);
-  const hasMove = /走|跑|移动|来到|到达|靠近|穿过|进入|离开|前行|驶向|推进/.test(text);
+  const propIsGroundVehicle = Boolean(propName) && GROUND_VEHICLE_PATTERN.test(propName);
+  const explicitVehicleOperator = propIsGroundVehicle
+    && /(推着|推动|推行|拉着|拖着|牵着|驾驶|驾着|骑着|抬着|操作)/.test(text);
+  const hasCarry = Boolean(propName) && !propIsGroundVehicle && /提起|提着|拿起|拿着|抱起|抱着|拖着|拉着|推着/.test(text);
+  const hasMove = /走|跑|移动|来到|到达|靠近|穿过|掠过|飞过|飞向|落在|进入|离开|前行|驶向|驶入|驶出|行进|推进|开往/.test(text);
   const hasSit = /坐下|落座|坐到|坐在/.test(text);
   const hasRelease = Boolean(propName) && /放下|放到|放在|松开|卸下|搁下|丢下/.test(text);
   const direction = inferDirection(text);
-  const primaryAction = hasCarry && hasMove && hasSit
+  const primaryAction = propIsGroundVehicle && hasMove
+    ? 'transport_move'
+    : hasCarry && hasMove && hasSit
     ? 'carry_move_sit'
     : hasMove
       ? 'directed_move'
       : hasSit
         ? 'state_transition'
         : 'generic_subject_action';
-  const actorStates = primaryAction === 'carry_move_sit'
+  const actorStates = primaryAction === 'transport_move'
+    ? (explicitVehicleOperator ? ['engage', 'moving', 'arrived'] : ['watching', 'observing', 'settle'])
+    : primaryAction === 'carry_move_sit'
     ? ['standing_holding', 'walking_holding', 'seated']
     : primaryAction === 'directed_move'
       ? ['start', 'moving', 'arrived']
@@ -380,12 +399,12 @@ function infer(context = {}) {
   }, actorSource)];
   if (propName) entities.push(sourceIdentity({
     key: 'prop_1', type: 'prop', name: propName,
-    role: hasCarry ? 'carried_object' : GROUND_VEHICLE_PATTERN.test(propName) ? 'ground_vehicle' : 'prop', independent_layer: true,
+    role: hasCarry ? 'carried_object' : propIsGroundVehicle ? 'ground_vehicle' : 'prop', independent_layer: true,
     reusable: true, identity_version_id: null, source_library_type: null, source_library_id: null,
-    states: hasCarry ? ['held', 'carried', 'released'] : ['stable'], attributes: {
+    states: hasCarry ? ['held', 'carried', 'released'] : propIsGroundVehicle && hasMove ? ['approach', 'moving', 'arrived'] : ['stable'], attributes: {
       inferred_from: 'storyboard_text',
       source_evidence: propSource?.name || propName,
-      ...(!hasCarry ? { placement: placementAttributes({ contactKind: GROUND_VEHICLE_PATTERN.test(propName) ? 'wheels' : 'base' }) } : {}),
+      ...(!hasCarry ? { placement: placementAttributes({ contactKind: propIsGroundVehicle ? 'wheels' : 'base' }) } : {}),
     },
   }, propSource));
   if (supportName) entities.push({
@@ -394,23 +413,36 @@ function infer(context = {}) {
     states: ['registered'], attributes: { included_in_clean_plate: true },
   });
 
-  const objectKey = propName ? 'prop_1' : null;
+  const propKey = propName ? 'prop_1' : null;
+  const actionActorKey = primaryAction === 'transport_move' ? propKey : 'actor_1';
+  const actionObjectKey = primaryAction === 'transport_move'
+    ? (explicitVehicleOperator ? 'actor_1' : null)
+    : propKey;
   const supportKey = supportName ? 'support_1' : null;
   const relations = [];
-  if (objectKey && hasCarry) {
-    relations.push({ key: 'actor_holds_prop', subject_key: 'actor_1', predicate: 'holds', object_key: objectKey, start_phase: primaryAction === 'carry_move_sit' ? 'lift' : 'start', end_phase: 'arrive', attributes: { attachment: 'hand' } });
-    relations.push({ key: 'prop_follows_actor', subject_key: objectKey, predicate: 'follows', object_key: 'actor_1', start_phase: 'move', end_phase: 'arrive', attributes: { synchronized: true } });
-    if (hasRelease && !supportKey) relations.push({ key: 'prop_released_at_destination', subject_key: objectKey, predicate: 'released_beside', object_key: 'actor_1', start_phase: 'arrive', end_phase: 'arrive', attributes: { destination_waypoint: 'destination' } });
+  if (primaryAction === 'transport_move' && explicitVehicleOperator) {
+    relations.push({ key: 'operator_moves_transport', subject_key: 'actor_1', predicate: 'interacts_with', object_key: propKey, start_phase: 'engage', end_phase: 'arrive', attributes: { mobility_relation: 'power_source', synchronized: true } });
+  }
+  if (propKey && hasCarry) {
+    relations.push({ key: 'actor_holds_prop', subject_key: 'actor_1', predicate: 'holds', object_key: propKey, start_phase: primaryAction === 'carry_move_sit' ? 'lift' : 'start', end_phase: 'arrive', attributes: { attachment: 'hand' } });
+    relations.push({ key: 'prop_follows_actor', subject_key: propKey, predicate: 'follows', object_key: 'actor_1', start_phase: 'move', end_phase: 'arrive', attributes: { synchronized: true } });
+    if (hasRelease && !supportKey) relations.push({ key: 'prop_released_at_destination', subject_key: propKey, predicate: 'released_beside', object_key: 'actor_1', start_phase: 'arrive', end_phase: 'arrive', attributes: { destination_waypoint: 'destination' } });
   }
   if (supportKey) relations.push({ key: 'actor_moves_to_support', subject_key: 'actor_1', predicate: 'moves_to', object_key: supportKey, start_phase: 'move', end_phase: 'arrive', attributes: {} });
   if (supportKey && hasSit) {
     relations.push({ key: 'actor_sits_on_support', subject_key: 'actor_1', predicate: 'sits_on', object_key: supportKey, start_phase: 'sit', end_phase: 'settle', attributes: {} });
     relations.push({ key: 'actor_occluded_by_support', subject_key: 'actor_1', predicate: 'occluded_by', object_key: supportKey, start_phase: 'sit', end_phase: 'settle', attributes: { part: 'lower_body' } });
   }
-  if (objectKey && supportKey && primaryAction === 'carry_move_sit') relations.push({ key: 'prop_released_beside_support', subject_key: objectKey, predicate: 'released_beside', object_key: supportKey, start_phase: 'release', end_phase: 'settle', attributes: {} });
+  if (propKey && supportKey && primaryAction === 'carry_move_sit') relations.push({ key: 'prop_released_beside_support', subject_key: propKey, predicate: 'released_beside', object_key: supportKey, start_phase: 'release', end_phase: 'settle', attributes: {} });
 
   let phases;
-  if (primaryAction === 'carry_move_sit') {
+  if (primaryAction === 'transport_move') {
+    phases = [
+      phase('engage', explicitVehicleOperator ? '动力角色接触运输工具' : '运输单位入场', 0, 0.15, 'approach', explicitVehicleOperator ? 'engage' : null),
+      phase('move', '运输单位持续前行', 0.15, 0.82, 'moving', explicitVehicleOperator ? 'moving' : null),
+      phase('arrive', '运输单位到达并稳定', 0.82, 1, 'arrived', explicitVehicleOperator ? 'arrived' : null),
+    ];
+  } else if (primaryAction === 'carry_move_sit') {
     phases = [
       phase('lift', '提起道具', 0, 0.16, 'standing_holding', 'held'),
       phase('move', '携带移动', 0.16, 0.64, 'walking_holding', 'carried'),
@@ -445,25 +477,25 @@ function infer(context = {}) {
     relations,
     action_contract: {
       primary_action: primaryAction,
-      actor_key: 'actor_1', object_key: objectKey, support_key: supportKey, direction,
-      start_state: actorStates[0], end_state: actorStates[actorStates.length - 1],
+      actor_key: actionActorKey, object_key: actionObjectKey, support_key: primaryAction === 'transport_move' ? null : supportKey, direction,
+      start_state: primaryAction === 'transport_move' ? 'approach' : actorStates[0], end_state: primaryAction === 'transport_move' ? 'arrived' : actorStates[actorStates.length - 1],
       waypoints: [
         { key: 'start', label: direction === 'right_to_left' ? '画面右侧' : '画面左侧', x: startX, y: 0 },
         { key: supportKey ? 'support' : 'destination', label: supportName || '目标位置', x: endX, y: 0 },
       ],
       phases,
       contact_events: [
-        ...(objectKey && hasCarry ? ['grip_prop'] : []),
+        ...(primaryAction === 'transport_move' && explicitVehicleOperator ? ['operator_contacts_vehicle'] : []),
+        ...(propKey && hasCarry ? ['grip_prop'] : []),
         ...(supportKey ? ['reach_support'] : []),
         ...(supportKey && hasSit ? ['sit_on_support'] : []),
-        ...(objectKey && (primaryAction === 'carry_move_sit' || hasRelease) ? ['release_prop'] : []),
+        ...(propKey && (primaryAction === 'carry_move_sit' || hasRelease) ? ['release_prop'] : []),
       ],
       occlusion_events: supportKey && hasSit ? ['lower_body_behind_support_front'] : [],
     },
     generation_slots: [],
   };
-  schemaService.assertValid('paperBlueprint', blueprint, '自然语言生产蓝图无效');
-  return blueprint;
+  return finalizeBlueprint(blueprint, context, '自然语言生产蓝图无效');
 }
 
 function sourceConstraints(entity) {
@@ -481,6 +513,93 @@ function sourceConstraints(entity) {
 
 function node(key, kind, pattern, slot, transform, relation, localZ, children = []) {
   return { key, kind, pattern, slot, asset_version_id: null, transform, relation, clip: {}, local_z: localZ, children };
+}
+
+function transportUnitLayouts(count) {
+  if (count <= 1) return [{ x: 0.5, y: 0.5, width: 0.24, height: 0.3 }];
+  if (count === 2) return [
+    { x: 0.43, y: 0.515, width: 0.22, height: 0.29 },
+    { x: 0.57, y: 0.48, width: 0.18, height: 0.25 },
+  ];
+  return [
+    { x: 0.4, y: 0.525, width: 0.22, height: 0.29 },
+    { x: 0.5, y: 0.49, width: 0.18, height: 0.25 },
+    { x: 0.58, y: 0.465, width: 0.15, height: 0.22 },
+  ];
+}
+
+function transportFamily(entity, contract, { familyKey, slotKey }) {
+  return {
+    family_key: familyKey,
+    pattern: 'free',
+    registration_canvas: { width: 1920, height: 1080 },
+    slots: [{
+      slot_key: slotKey,
+      asset_type: 'transport-prop-cutout',
+      generation_purpose: 'complete_powered_transport_unit',
+      required_for_gate: true,
+      constraints: {
+        transparent_background: true,
+        single_subject: false,
+        composite_subject: true,
+        ensemble_kind: 'transport_unit',
+        subject_key: entity.key,
+        identity: entity.name,
+        vehicle_identity: entity.name,
+        propulsion_mode: contract.propulsion_mode,
+        allow_self_motion: contract.allow_self_motion,
+        required_movers: contract.required_movers,
+        operator_entity_key: contract.operator_entity_key,
+        contact_kind: 'wheels',
+        allow_source_import: false,
+        review_checks: ['required_movers_visible', 'physical_contact_visible', 'no_unmanned_motion'],
+      },
+    }],
+    contract: {
+      subject_key: entity.key,
+      identity: entity.name,
+      mobility_contract: contract,
+      subject_slots: { default: slotKey },
+    },
+  };
+}
+
+function transportGroupNode(entity, family, contract, { groundY = 0.82, localZ = 22 } = {}) {
+  const slot = family.slots[0].slot_key;
+  const unitCount = Math.max(1, Math.min(3, Number(contract.unit_count?.target_visible || 1)));
+  const layouts = transportUnitLayouts(unitCount);
+  const children = layouts.map((layout, index) => node(
+    `${entity.key}__unit_${index + 1}`,
+    'asset',
+    'free',
+    slot,
+    { ...layout, anchor_x: 0.5, anchor_y: 0.92 },
+    {
+      family_key: family.family_key,
+      role: 'transport_unit',
+      subject_key: entity.key,
+      propulsion_mode: contract.propulsion_mode,
+      embedded_movers: contract.required_movers,
+      composite_members: ['vehicle', ...contract.required_movers.map((item) => item.role)],
+      unit_index: index + 1,
+    },
+    localZ + layouts.length - index,
+  ));
+  return node(
+    entity.key,
+    'group',
+    'free',
+    null,
+    { x: 0.5, y: groundY, width: 1, height: 1, anchor_x: 0.5, anchor_y: 0.5 },
+    {
+      role: 'ground_vehicle',
+      mobility_contract: contract,
+      placement: entity.attributes?.placement || placementAttributes({ contactKind: 'wheels' }),
+      contact_anchor: { x: 0.5, y: 0.5, derived_from: 'transport_group' },
+    },
+    localZ,
+    children,
+  );
 }
 
 function baseEnvironmentFamily(blueprint, { includeSupportMask = false, reuseStoryboardReference = false } = {}) {
@@ -590,255 +709,63 @@ function environmentPlan(blueprint, context, config) {
   };
 }
 
-function mapRoutePlan(blueprint, context, config) {
+function transportPlan(blueprint, context, config) {
   const storyboard = context.storyboard || {};
-  const route = blueprint.entities.find((entity) => entity.key === blueprint.action_contract.actor_key);
-  const characters = blueprint.entities.filter((entity) => entity.type === 'character' && entity.role === 'map_character_marker');
-  if (!route) {
-    throw new PaperStudioError('PAPER_STUDIO_BLUEPRINT_MAP_ROUTE_MISSING', '地图镜头缺少程序化推进路线', null, 422);
+  const vehicle = blueprint.entities.find((entity) => entity.key === blueprint.action_contract.actor_key && entity.role === 'ground_vehicle');
+  if (!vehicle) {
+    throw new PaperStudioError('PAPER_STUDIO_TRANSPORT_ENTITY_MISSING', '运输动作缺少可移动运输实体', null, 422);
   }
+  const contract = vehicle.attributes?.mobility_contract;
+  if (!contract) {
+    throw new PaperStudioError('PAPER_STUDIO_MOBILITY_CONTRACT_MISSING', '运动车辆缺少动力来源与数量合同', { subject_key: vehicle.key }, 422);
+  }
+  const operator = contract.operator_entity_key
+    ? blueprint.entities.find((entity) => entity.key === contract.operator_entity_key && entity.type === 'character')
+    : null;
+  const storyboardText = [storyboard.title, storyboard.description, storyboard.action, storyboard.narration].filter(Boolean).join('，');
+  const observer = !operator && /(看着|望着|注视|目送|观察)/.test(storyboardText)
+    ? blueprint.entities.find((entity) => entity.type === 'character')
+    : null;
   const fps = Number(config.fps || 30);
   const durationFrames = Math.max(fps * 4, Math.round(Number(storyboard.duration || 6) * fps));
   const finalFrame = durationFrames - 1;
-  const audioCaptions = Array.isArray(storyboard.audio_captions) ? storyboard.audio_captions : [];
-  const routeFrame = captionFrame(audioCaptions, [/渡河北上|北上攻赵/, /退入巨鹿|巨鹿城外/], 'end', frameAt(durationFrames, 0.56), durationFrames);
-  const encircleFrame = Math.max(
-    Math.min(finalFrame, routeFrame + 1),
-    captionFrame(audioCaptions, [/围死|围城|团团包围/, /输送粮草|甬道/], 'end', frameAt(durationFrames, 0.7), durationFrames),
-  );
-  const characterRevealFrames = characters.map((character, index) => captionFrame(
-    audioCaptions,
-    [
-      new RegExp(`${String(character.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:出身|则是|负责|驻军)`),
-      String(character.name || ''),
-    ],
-    'start',
-    frameAt(durationFrames, Math.min(0.92, 0.74 + index * 0.11)),
-    durationFrames,
-  ));
-  const storyboardText = [storyboard.title, storyboard.description, storyboard.action].filter(Boolean).join('；');
-  const places = MAP_PLACE_LAYOUTS.filter((item) => storyboardText.includes(item.name));
-  const mapFamily = baseEnvironmentFamily(blueprint);
-  mapFamily.slots = mapFamily.slots.map((slot) => slot.slot_key === 'clean_plate' ? {
-    ...slot,
-    generation_purpose: 'map_clean_background',
-    constraints: {
-      ...slot.constraints,
-      label: '干净战役地图底图',
-      map_base: true,
-      remove_map_overlays: true,
-      allow_source_import: false,
-    },
-  } : slot);
-  mapFamily.contract = {
-    ...mapFamily.contract,
-    role: 'strategic_map_canvas',
-    excludes: ['route_arrows', 'encirclement', 'character_markers', 'title_cards', 'readable_text'],
-  };
-  const characterFamilies = characters.map((character, index) => {
-    const familyKey = `${character.key}_family`;
-    const slotKey = `${character.key}_cutout`;
-    return {
-      family_key: familyKey,
-      pattern: 'free',
-      registration_canvas: { width: 1920, height: 1080 },
-      slots: [{
-        slot_key: slotKey,
-        asset_type: 'character-cutout',
-        generation_purpose: 'map_character_marker',
-        required_for_gate: true,
-        constraints: {
-          label: `${character.name} · 地图人物剪影`,
-          transparent_background: true,
-          single_subject: true,
-          complete_silhouette: true,
-          subject_key: character.key,
-          state: 'map_marker',
-          identity: character.name,
-          map_role: 'commander_marker',
-          reveal_order: index,
-          ...sourceConstraints(character),
-        },
-      }],
-      contract: {
-        subject_key: character.key,
-        identity: character.name,
-        subject_slots: { map_marker: slotKey },
-        title_card: character.attributes?.title_card || character.name,
-        order: index,
-      },
-    };
+  const moveStart = frameAt(durationFrames, 0.15);
+  const moveEnd = frameAt(durationFrames, 0.78);
+  const start = blueprint.action_contract.waypoints[0] || { x: -0.3 };
+  const end = blueprint.action_contract.waypoints.at(-1) || { x: 0.3 };
+  let xStart = Number(start.x || 0);
+  let xEnd = Number(end.x || 0);
+  if (Math.abs(xEnd - xStart) < 0.12) {
+    if (blueprint.action_contract.direction === 'backward') [xStart, xEnd] = [0.12, -0.18];
+    else [xStart, xEnd] = [-0.18, 0.12];
+  }
+  const transportAssetFamily = transportFamily(vehicle, contract, {
+    familyKey: `${vehicle.key}_transport_family`,
+    slotKey: `${vehicle.key}_transport_unit_cutout`,
   });
-  const characterLayouts = [
-    { x: 0.84, y: 0.49, width: 0.18, height: 0.42, label_x: 0.84, label_y: 0.67 },
-    { x: 0.5, y: 0.82, width: 0.19, height: 0.38, label_x: 0.68, label_y: 0.8 },
-    { x: 0.18, y: 0.5, width: 0.18, height: 0.4, label_x: 0.18, label_y: 0.7 },
-    { x: 0.76, y: 0.22, width: 0.16, height: 0.34, label_x: 0.78, label_y: 0.34 },
-  ];
-  const characterNodes = characters.flatMap((character, index) => {
-    const layout = characterLayouts[index] || characterLayouts.at(-1);
-    const family = characterFamilies[index];
-    const slot = family.slots[0].slot_key;
-    return [
-      node(character.key, 'asset', 'free', slot, {
-        x: layout.x, y: layout.y, width: layout.width, height: layout.height, anchor_x: 0.5, anchor_y: 0.86, opacity: 1,
-      }, { family_key: family.family_key, role: 'map-character-marker', identity: character.name }, 30 + index * 2),
-      node(`${character.key}_title`, 'procedural', 'free', null, {
-        x: layout.label_x, y: layout.label_y, width: 0.24, height: 0.09, anchor_x: 0.5, anchor_y: 0.5, opacity: 1,
-      }, {
-        procedural_kind: 'map-title-card', appearance: 'commander', role: 'map-label',
-        text: character.attributes?.title_card || character.name, subject_key: character.key,
-      }, 31 + index * 2),
-    ];
-  });
-  const placeNodes = places.map((place, index) => node(`map_place_${place.key}`, 'procedural', 'free', null, {
-    x: place.x, y: place.y, width: place.width, height: 0.055, anchor_x: 0.5, anchor_y: 0.5, opacity: 1,
-  }, {
-    procedural_kind: 'map-title-card', appearance: 'place', role: 'map-place-label', text: place.name, reveal_order: index,
-  }, 14 + index));
+  const observerFamily = observer ? {
+    family_key: `${observer.key}_observer_family`, pattern: 'supported-subject', registration_canvas: { width: 1920, height: 1080 },
+    slots: [{
+      slot_key: `${observer.key}_observer_cutout`, asset_type: 'character-cutout', generation_purpose: 'transport_observer', required_for_gate: true,
+      constraints: { transparent_background: true, single_subject: true, subject_key: observer.key, identity: observer.name, state: 'watching', ...sourceConstraints(observer) },
+    }],
+    contract: { subject_key: observer.key, identity: observer.name, subject_slots: { watching: `${observer.key}_observer_cutout` } },
+  } : null;
+  const families = [baseEnvironmentFamily(blueprint), transportAssetFamily, ...(observerFamily ? [observerFamily] : [])];
+  const groundY = Number((blueprint.environment.placement_regions || []).find((region) => region.key === vehicle.attributes?.placement?.region_key)?.ground_y || 0.82);
   const root = node('root', 'group', 'free', null, { x: 0.5, y: 0.5, width: 1, height: 1 }, {}, 0, [
     node('clean_environment', 'registered-environment', 'registered-environment', null, { x: 0.5, y: 0.5, width: 1, height: 1 }, { family_key: 'clean_environment' }, 0, [
       node('clean_plate', 'asset', 'registered-environment', 'clean_plate', { x: 0.5, y: 0.5, width: 1, height: 1 }, { family_key: 'clean_environment', fit: 'cover' }, 0),
     ]),
-    ...placeNodes,
-    node('route_reveal', 'procedural', 'free', null, { x: 0.5, y: 0.5, width: 1, height: 1, anchor_x: 0.5, anchor_y: 0.5 }, {
-      procedural_kind: 'route-reveal', appearance: 'ink-route', role: 'map-route',
-      points: [[0.42, 0.93], [0.46, 0.76], [0.52, 0.62], [0.49, 0.43], [0.48, 0.3], [0.5, 0.13]],
-    }, 20),
-    node('encirclement', 'procedural', 'free', null, { x: 0.5, y: 0.5, width: 1, height: 1, anchor_x: 0.5, anchor_y: 0.5 }, {
-      procedural_kind: 'route-reveal', appearance: 'encirclement', role: 'map-encirclement',
-      points: [[0.53, 0.47], [0.62, 0.43], [0.7, 0.48], [0.72, 0.57], [0.66, 0.64], [0.56, 0.64], [0.51, 0.56], [0.53, 0.47]],
-    }, 21),
-    ...characterNodes,
+    transportGroupNode(vehicle, transportAssetFamily, contract, { groundY, localZ: 22 }),
+    ...(observer ? [node(
+      observer.key, 'asset', 'supported-subject', observerFamily.slots[0].slot_key,
+      { x: blueprint.action_contract.direction === 'right_to_left' ? 0.18 : 0.82, y: groundY, width: 0.24, height: 0.5, anchor_x: 0.5, anchor_y: 0.9 },
+      { family_key: observerFamily.family_key, role: 'observer', placement: observer.attributes?.placement || placementAttributes({ contactKind: 'feet' }) },
+      30,
+    )] : []),
   ]);
-  const characterRevealTracks = characters.flatMap((character, index) => {
-    const revealFrame = characterRevealFrames[index];
-    const fadeFrames = Math.max(2, Math.round(fps * 0.3));
-    const preReveal = Math.max(0, revealFrame - fadeFrames);
-    return [
-      { target: character.key, property: 'opacity', keyframes: [{ frame: 0, value: 0 }, { frame: preReveal, value: 0 }, { frame: revealFrame, value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }] },
-      { target: `${character.key}_title`, property: 'opacity', keyframes: [{ frame: 0, value: 0 }, { frame: revealFrame, value: 0 }, { frame: Math.min(finalFrame, revealFrame + fadeFrames), value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }] },
-    ];
-  });
-  const placeTracks = places.map((place, index) => {
-    const revealFrame = captionFrame(audioCaptions, place.name, 'start', frameAt(durationFrames, 0.16 + index * 0.09), durationFrames);
-    const fadeFrames = Math.max(2, Math.round(fps * 0.3));
-    return {
-      target: `map_place_${place.key}`,
-      property: 'opacity',
-      keyframes: [{ frame: 0, value: 0 }, { frame: Math.max(0, revealFrame - fadeFrames), value: 0 }, { frame: revealFrame, value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }],
-    };
-  });
-  const motionPlan = {
-    schema_version: 1,
-    fps,
-    duration_frames: durationFrames,
-    primary_action: 'map_route_reveal',
-    camera_only: false,
-    subject_tracks: [
-      { target: route.key, property: 'state', keyframes: [{ frame: 0, value: 'hidden' }, { frame: routeFrame, value: 'advancing' }, { frame: finalFrame, value: 'encircled' }] },
-      { target: 'route_reveal', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 1, easing: 'ease-in-out' }, { frame: finalFrame, value: 1 }] },
-      { target: 'encirclement', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 0 }, { frame: encircleFrame, value: 1, easing: 'ease-in-out' }, { frame: finalFrame, value: 1 }] },
-      { target: 'encirclement', property: 'procedural_amount', keyframes: [{ frame: 0, value: 0 }, { frame: routeFrame, value: 0 }, { frame: encircleFrame, value: 1, easing: 'ease-out' }, { frame: finalFrame, value: 1 }] },
-      ...placeTracks,
-      ...characterRevealTracks,
-    ],
-    camera_tracks: [{ target: 'camera', property: 'scale', keyframes: [{ frame: 0, value: 1 }, { frame: finalFrame, value: 1.018, easing: 'ease-in-out' }] }],
-    cues: [
-      { key: 'route_arrival', frame: routeFrame, kind: 'semantic' },
-      { key: 'encirclement_closed', frame: encircleFrame, kind: 'semantic' },
-      ...characters.map((character, index) => ({ key: `${character.key}_revealed`, frame: characterRevealFrames[index], kind: 'semantic' })),
-    ],
-    gate_requirements: [
-      { key: 'route_reveal_range', metric: 'numeric_range', target: 'route_reveal', property: 'clip_progress', min: 0.95 },
-      { key: 'encirclement_reveal_range', metric: 'numeric_range', target: 'encirclement', property: 'clip_progress', min: 0.95 },
-      { key: 'encirclement_final', metric: 'final_value', target: 'encirclement', property: 'procedural_amount', min: 0.9 },
-      ...characters.map((character) => ({ key: `${character.key}_visible`, metric: 'final_value', target: character.key, property: 'opacity', min: 0.95 })),
-      { key: 'route_arrival_cue', metric: 'cue_exists', cue: 'route_arrival' },
-    ],
-  };
-  const proofTargets = [
-    { key: 'map_start', frame: 0, target_node_key: 'route_reveal', assertions: [{ type: 'camera_only', expected: false }] },
-    { key: 'route_arrival', frame: routeFrame, target_node_key: 'route_reveal', assertions: [{ type: 'track_range', target: 'route_reveal', property: 'clip_progress', min: 0.95 }] },
-    { key: 'encirclement_final', frame: encircleFrame, target_node_key: 'encirclement', assertions: [{ type: 'track_range', target: 'encirclement', property: 'clip_progress', min: 0.95 }] },
-    ...characters.map((character, index) => ({
-      key: `${character.key}_final`, frame: finalFrame, target_node_key: character.key,
-      assertions: [{ type: 'final_track_value', target: character.key, property: 'opacity', min: 0.95 }, { type: 'track_range', target: `${character.key}_title`, property: 'opacity', min: 0.95 }],
-      crop: index === 0 ? { x: 0.68, y: 0.25, width: 0.31, height: 0.55 } : { x: 0.36, y: 0.58, width: 0.48, height: 0.4 },
-    })),
-  ];
-  const families = [mapFamily, ...characterFamilies];
-  return {
-    catalog_key: 'blueprint-map-route-reveal-v2',
-    semanticContract: {
-      schema_version: 3,
-      storyboard_id: Number(storyboard.id),
-      environment: { description: blueprint.environment.description, clean_plate_required: true, registered_boundaries: [] },
-      subjects: [
-        { key: route.key, kind: 'effect', identity: route.name, support_key: null, required_states: route.states },
-        ...characters.map((character) => ({ key: character.key, kind: 'character', identity: character.name, support_key: null, required_states: character.states })),
-      ],
-      action_beats: [
-        { key: 'route_advance', start_frame: 0, peak_frame: routeFrame, end_frame: encircleFrame, subject_key: route.key, action: 'reveal_route_and_encircle' },
-        ...characters.map((character, index) => ({ key: `${character.key}_reveal`, start_frame: Math.max(0, characterRevealFrames[index] - Math.round(fps * 0.2)), peak_frame: characterRevealFrames[index], end_frame: finalFrame, subject_key: character.key, action: 'reveal_map_character_marker' })),
-      ],
-    },
-    families,
-    root,
-    motionPlan,
-    proofTargets,
-    summary: {
-      catalog_key: 'blueprint-map-route-reveal-v2', primary_action: 'map_route_reveal', camera_only: false,
-      map_route: true, clean_plate_required: true, source_family_count: families.length,
-      required_asset_count: families.flatMap((family) => family.slots).filter((slot) => slot.required_for_gate).length,
-      entity_keys: [route.key, ...characters.map((character) => character.key)],
-      required_states: Object.fromEntries([[route.key, route.states], ...characters.map((character) => [character.key, character.states])]),
-      relation_contracts: ['route overlay registered to clean map', 'character markers revealed independently', 'all labels rendered procedurally'],
-      map_character_names: characters.map((character) => character.name),
-      map_place_names: places.map((place) => place.name),
-      proof_targets: proofTargets,
-    },
-  };
-}
-
-function siegeSupplyPlan(blueprint, context, config) {
-  const storyboard = context.storyboard || {};
-  const bag = blueprint.entities.find((entity) => entity.key === 'supply_bag');
-  const cart = blueprint.entities.find((entity) => entity.key === 'supply_cart');
-  const siege = blueprint.entities.find((entity) => entity.key === 'siege_line');
-  if (!bag || !cart || !siege) {
-    throw new PaperStudioError('PAPER_STUDIO_SIEGE_SEQUENCE_ENTITY_MISSING', '巨鹿危城多阶段镜头缺少粮袋、粮车或军阵实体', null, 422);
-  }
-  const fps = Number(config.fps || 30);
-  const durationFrames = Math.max(fps * 5, Math.round(Number(storyboard.duration || 6) * fps));
-  const finalFrame = durationFrames - 1;
-  const captions = Array.isArray(storyboard.audio_captions) ? storyboard.audio_captions : [];
-  const bagMatch = visualSceneCompiler.orderedCaptionMatch(captions, [/兵少粮尽/, /粮尽/, /补给却没有断/], {
-    edge: 'end', fallback_frame: frameAt(durationFrames, 0.3),
-  });
-  const cartCaptionMatch = visualSceneCompiler.orderedCaptionMatch(captions, [/城池一旦陷落/, /反秦力量/, /秦军补给/], {
-    edge: 'start', after_frame: bagMatch.frame - 1, after_caption_key: bagMatch.caption_key,
-    exclude_caption_keys: bagMatch.caption_key ? [bagMatch.caption_key] : [], fallback_frame: frameAt(durationFrames, 0.42),
-  });
-  if (captions.length >= 2 && !cartCaptionMatch.caption) {
-    throw new PaperStudioError(
-      'PAPER_STUDIO_SCENE_CAPTION_ALIGNMENT_UNCERTAIN',
-      '无法把第二视觉场景可靠地对齐到后续字幕，已阻止生成可能倒序或突切的时间轴',
-      { first_caption_key: bagMatch.caption_key, available_caption_keys: captions.map((caption) => caption.key || null) },
-      422,
-    );
-  }
-  const transitionFrames = Math.max(Math.round(fps * 0.6), Math.round(fps * 0.5));
-  const boundaryFrame = Math.max(Math.round(fps * 1.2), Math.min(finalFrame - Math.round(fps * 2.1), cartCaptionMatch.frame));
-  const transitionStart = Math.max(0, boundaryFrame - Math.floor(transitionFrames / 2));
-  const transitionEnd = Math.min(finalFrame - Math.round(fps * 1.8), transitionStart + transitionFrames);
-  const bagFrame = Math.max(1, Math.min(bagMatch.frame, transitionStart - Math.max(1, Math.round(fps * 0.1))));
-  const cartMoveStart = Math.min(finalFrame - Math.round(fps), transitionEnd + Math.round(fps * 0.1));
-  const cartFrame = Math.min(
-    finalFrame - Math.round(fps * 1.2),
-    Math.max(cartMoveStart + Math.round(fps * 1.9), frameAt(durationFrames, 0.62)),
-  );
-  const siegeRevealStart = Math.min(finalFrame - Math.round(fps * 0.8), cartFrame + Math.round(fps * 0.2));
+  const mobilityContracts = mobilityContractService.contractsFromBlueprint(blueprint);
   const semanticContract = {
     schema_version: 3,
     storyboard_id: Number(storyboard.id),
@@ -849,103 +776,318 @@ function siegeSupplyPlan(blueprint, context, config) {
       placement_regions: blueprint.environment.placement_regions || [],
     },
     subjects: [
-      { key: bag.key, kind: 'prop', identity: bag.name, support_key: null, required_states: bag.states, placement: bag.attributes?.placement || null },
-      { key: cart.key, kind: 'vehicle', identity: cart.name, support_key: null, required_states: cart.states, placement: cart.attributes?.placement || null },
-      { key: siege.key, kind: 'effect', identity: siege.name, support_key: null, required_states: siege.states },
+      { key: vehicle.key, kind: 'vehicle', identity: vehicle.name, support_key: null, required_states: vehicle.states, placement: vehicle.attributes?.placement || null },
+      ...(operator ? [{ key: operator.key, kind: 'character', identity: operator.name, support_key: vehicle.key, required_states: operator.states }] : []),
+      ...(observer ? [{ key: observer.key, kind: 'character', identity: observer.name, support_key: null, required_states: observer.states, placement: observer.attributes?.placement || null }] : []),
     ],
-    action_beats: [
-      { key: 'bag_fall', start_frame: 0, peak_frame: Math.max(1, bagFrame - Math.round(fps * 0.2)), end_frame: bagFrame, subject_key: bag.key, action: 'fall_and_contact_ground' },
-      { key: 'cart_advance', start_frame: cartMoveStart, peak_frame: Math.max(cartMoveStart + 1, cartFrame - Math.round(fps * 0.16)), end_frame: cartFrame, subject_key: cart.key, action: 'advance_on_ground' },
-      { key: 'siege_close', start_frame: siegeRevealStart, peak_frame: Math.max(siegeRevealStart, finalFrame - Math.round(fps * 0.8)), end_frame: finalFrame, subject_key: siege.key, action: 'close_encirclement' },
+    mobility_contracts: mobilityContracts,
+    action_beats: [{ key: 'transport_advance', start_frame: moveStart, peak_frame: moveEnd, end_frame: finalFrame, subject_key: vehicle.key, action: 'advance_with_visible_power_source' }],
+  };
+  const displacement = Math.abs(xEnd - xStart);
+  const motionPlan = {
+    schema_version: 1, fps, duration_frames: durationFrames, primary_action: 'transport_move', camera_only: false,
+    subject_tracks: [
+      { target: vehicle.key, property: 'x', keyframes: [{ frame: 0, value: xStart }, { frame: moveStart, value: xStart }, { frame: moveEnd, value: xEnd, easing: 'ease-in-out' }, { frame: finalFrame, value: xEnd }] },
+      { target: vehicle.key, property: 'state', keyframes: [{ frame: 0, value: 'approach' }, { frame: moveStart, value: 'moving' }, { frame: moveEnd, value: 'arrived' }, { frame: finalFrame, value: 'arrived' }] },
+    ],
+    camera_tracks: [],
+    cues: [
+      { key: 'transport_engages', frame: moveStart, kind: 'contact' },
+      { key: 'transport_arrives', frame: moveEnd, kind: 'semantic' },
+    ],
+    gate_requirements: [
+      { key: 'transport_ground_translation', metric: 'numeric_range', target: vehicle.key, property: 'x', min: Math.max(0.12, displacement * 0.8) },
+      { key: 'transport_state_progression', metric: 'distinct_states', target: vehicle.key, property: 'state', min: 3 },
+      { key: 'transport_contact_cue', metric: 'cue_exists', cue: 'transport_engages' },
     ],
   };
+  const proofTargets = [
+    { key: 'transport_start', frame: 0, target_node_key: vehicle.key, assertions: [{ type: 'state_equals', target: vehicle.key, value: 'approach' }] },
+    { key: 'transport_advance', frame: moveEnd, target_node_key: vehicle.key, assertions: [{ type: 'track_range', target: vehicle.key, property: 'x', min: Math.max(0.12, displacement * 0.8) }] },
+    { key: 'transport_final', frame: finalFrame, target_node_key: vehicle.key, assertions: [{ type: 'state_equals', target: vehicle.key, value: 'arrived' }, { type: 'camera_only', expected: false }] },
+  ];
+  return {
+    catalog_key: 'blueprint-transport-move-v1', semanticContract, families, root, motionPlan, proofTargets,
+    summary: {
+      catalog_key: 'blueprint-transport-move-v1', primary_action: 'transport_move', camera_only: false,
+      clean_plate_required: true, source_family_count: families.length,
+      required_asset_count: families.flatMap((family) => family.slots).filter((slot) => slot.required_for_gate).length,
+      entity_keys: blueprint.entities.map((entity) => entity.key),
+      required_states: { [vehicle.key]: vehicle.states },
+      relation_contracts: blueprint.relations.map((relation) => `${relation.subject_key}:${relation.predicate}:${relation.object_key}`),
+      mobility_contracts: mobilityContracts,
+      proof_targets: proofTargets,
+    },
+  };
+}
+
+function pathRevealPlan(blueprint, context, config) {
+  const storyboard = context.storyboard || {};
+  const pathEntity = blueprint.entities.find((entity) => entity.key === blueprint.action_contract.actor_key);
+  const markers = blueprint.entities.filter((entity) => entity.type === 'character' && ['path_subject_marker', 'map_character_marker'].includes(entity.role));
+  if (!pathEntity) {
+    throw new PaperStudioError('PAPER_STUDIO_BLUEPRINT_PATH_REVEAL_MISSING', '路径揭示镜头缺少程序化路径主体', null, 422);
+  }
+  const fps = Number(config.fps || 30);
+  const durationFrames = Math.max(fps * 4, Math.round(Number(storyboard.duration || 6) * fps));
+  const finalFrame = durationFrames - 1;
+  const captions = Array.isArray(storyboard.audio_captions) ? storyboard.audio_captions : [];
+  const labels = blueprint.action_contract.waypoints.map((item) => item.label).filter(Boolean);
+  const revealFrame = captionFrame(captions, [...labels, /路线|路径|线路|轨迹|流程|管线/], 'end', frameAt(durationFrames, 0.58), durationFrames);
+  const completionFrame = Math.max(
+    Math.min(finalFrame, revealFrame + 1),
+    captionFrame(captions, [/到达|完成|连接|合拢|终点/, labels.at(-1)], 'end', frameAt(durationFrames, 0.74), durationFrames),
+  );
+  const points = blueprint.action_contract.waypoints.map((item) => [
+    Math.max(0.08, Math.min(0.92, 0.5 + Number(item.x || 0) * 0.9)),
+    Math.max(0.08, Math.min(0.92, 0.5 + Number(item.y || 0) * 0.9)),
+  ]);
   const environmentFamily = baseEnvironmentFamily(blueprint);
-  const bagFamily = {
-    family_key: 'supply_bag_family', pattern: 'free', registration_canvas: { width: 1920, height: 1080 },
-    slots: [{
-      slot_key: 'supply_bag_cutout', asset_type: 'prop-cutout', generation_purpose: 'empty_supply_bag', required_for_gate: true,
-      constraints: { transparent_background: true, single_subject: true, subject_key: bag.key, identity: bag.name, contact_kind: 'base', ...sourceConstraints(bag) },
-    }],
-    contract: { subject_key: bag.key, identity: bag.name, placement: bag.attributes?.placement, contact_states: bag.states },
+  environmentFamily.slots = environmentFamily.slots.map((slot) => slot.slot_key === 'clean_plate' ? {
+    ...slot,
+    generation_purpose: 'flat_diagram_clean_background',
+    constraints: {
+      ...slot.constraints,
+      label: '干净平面底图',
+      path_base: true,
+      remove_path_overlays: true,
+      allow_source_import: false,
+    },
+  } : slot);
+  environmentFamily.contract = {
+    ...environmentFamily.contract,
+    role: 'flat_information_canvas',
+    excludes: ['path_overlays', 'subject_markers', 'label_cards', 'readable_text'],
   };
-  const cartFamily = {
-    family_key: 'supply_cart_family', pattern: 'free', registration_canvas: { width: 1920, height: 1080 },
+  const markerFamilies = markers.map((marker, index) => ({
+    family_key: `${marker.key}_family`, pattern: 'free', registration_canvas: { width: 1920, height: 1080 },
     slots: [{
-      slot_key: 'supply_cart_cutout', asset_type: 'prop-cutout', generation_purpose: 'grounded_supply_cart', required_for_gate: true,
-      constraints: { transparent_background: true, single_subject: true, subject_key: cart.key, identity: cart.name, contact_kind: 'wheels', ...sourceConstraints(cart) },
+      slot_key: `${marker.key}_cutout`, asset_type: 'character-cutout', generation_purpose: 'path_subject_marker', required_for_gate: true,
+      constraints: { label: `${marker.name} · 路径主体标记`, transparent_background: true, single_subject: true, complete_silhouette: true, subject_key: marker.key, state: 'path_marker', identity: marker.name, reveal_order: index, ...sourceConstraints(marker) },
     }],
-    contract: { subject_key: cart.key, identity: cart.name, placement: cart.attributes?.placement, contact_states: cart.states },
-  };
+    contract: { subject_key: marker.key, identity: marker.name, subject_slots: { path_marker: `${marker.key}_cutout` }, title_card: marker.attributes?.title_card || marker.name, order: index },
+  }));
+  const markerLayouts = [
+    { x: 0.82, y: 0.5 }, { x: 0.62, y: 0.78 }, { x: 0.2, y: 0.52 }, { x: 0.74, y: 0.24 },
+  ];
+  const markerNodes = markers.flatMap((marker, index) => {
+    const layout = markerLayouts[index] || markerLayouts.at(-1);
+    return [
+      node(marker.key, 'asset', 'free', `${marker.key}_cutout`, { x: layout.x, y: layout.y, width: 0.17, height: 0.38, anchor_x: 0.5, anchor_y: 0.86 }, { family_key: `${marker.key}_family`, role: 'path-subject-marker', identity: marker.name }, 30 + index * 2),
+      node(`${marker.key}_label`, 'procedural', 'free', null, { x: layout.x, y: Math.min(0.92, layout.y + 0.18), width: 0.22, height: 0.08, anchor_x: 0.5, anchor_y: 0.5 }, { procedural_kind: 'label-card', appearance: 'subject', role: 'path-label', text: marker.attributes?.title_card || marker.name, subject_key: marker.key }, 31 + index * 2),
+    ];
+  });
+  const waypointNodes = blueprint.action_contract.waypoints.map((waypoint, index) => node(
+    `path_waypoint_${index + 1}`, 'procedural', 'free', null,
+    { x: points[index][0], y: points[index][1], width: 0.13, height: 0.055, anchor_x: 0.5, anchor_y: 0.5 },
+    { procedural_kind: 'label-card', appearance: 'place', role: 'path-waypoint-label', text: waypoint.label, reveal_order: index },
+    14 + index,
+  ));
   const root = node('root', 'group', 'free', null, { x: 0.5, y: 0.5, width: 1, height: 1 }, {}, 0, [
     node('clean_environment', 'registered-environment', 'registered-environment', null, { x: 0.5, y: 0.5, width: 1, height: 1 }, { family_key: 'clean_environment' }, 0, [
       node('clean_plate', 'asset', 'registered-environment', 'clean_plate', { x: 0.5, y: 0.5, width: 1, height: 1 }, { family_key: 'clean_environment', fit: 'cover' }, 0),
     ]),
-    node(bag.key, 'asset', 'free', 'supply_bag_cutout', { x: 0.34, y: 0.82, width: 0.18, height: 0.22, anchor_x: 0.5, anchor_y: 0.9 }, {
-      family_key: bagFamily.family_key, role: bag.role, placement: bag.attributes?.placement,
-    }, 20),
-    node(cart.key, 'asset', 'free', 'supply_cart_cutout', { x: 0.5, y: 0.82, width: 0.26, height: 0.3, anchor_x: 0.5, anchor_y: 0.9 }, {
-      family_key: cartFamily.family_key, role: cart.role, placement: cart.attributes?.placement,
-    }, 22),
-    node(siege.key, 'procedural', 'free', null, { x: 0.48, y: 0.57, width: 0.82, height: 0.3, anchor_x: 0.5, anchor_y: 0.5 }, {
-      procedural_kind: 'army-formation', appearance: 'qin-silhouette', role: siege.role,
-    }, 18),
+    ...waypointNodes,
+    node('path_reveal_layer', 'procedural', 'free', null, { x: 0.5, y: 0.5, width: 1, height: 1, anchor_x: 0.5, anchor_y: 0.5 }, { procedural_kind: 'path-reveal', appearance: 'ink-route', role: 'path-overlay', points }, 20),
+    node('path_completion', 'procedural', 'free', null, { x: 0.5, y: 0.5, width: 1, height: 1, anchor_x: 0.5, anchor_y: 0.5 }, { procedural_kind: 'path-reveal', appearance: 'completion-ring', role: 'path-completion', points: [...points.slice(-1), ...points.slice(-1)] }, 21),
+    ...markerNodes,
   ]);
+  const markerRevealTracks = markers.flatMap((marker, index) => {
+    const reveal = frameAt(durationFrames, Math.min(0.94, 0.76 + index * 0.08));
+    const fade = Math.max(2, Math.round(fps * 0.3));
+    return [
+      { target: marker.key, property: 'opacity', keyframes: [{ frame: 0, value: 0 }, { frame: Math.max(0, reveal - fade), value: 0 }, { frame: reveal, value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }] },
+      { target: `${marker.key}_label`, property: 'opacity', keyframes: [{ frame: 0, value: 0 }, { frame: reveal, value: 0 }, { frame: Math.min(finalFrame, reveal + fade), value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }] },
+    ];
+  });
   const motionPlan = {
-    schema_version: 1, fps, duration_frames: durationFrames, primary_action: 'siege_supply_sequence', camera_only: false,
+    schema_version: 1, fps, duration_frames: durationFrames, primary_action: 'path_reveal', camera_only: false,
     subject_tracks: [
-      { target: bag.key, property: 'y', keyframes: [{ frame: 0, value: -0.18 }, { frame: Math.max(1, bagFrame - Math.round(fps * 0.2)), value: 0, easing: 'ease-in' }, { frame: bagFrame, value: 0 }, { frame: finalFrame, value: 0 }] },
-      { target: bag.key, property: 'rotation', keyframes: [{ frame: 0, value: -12 }, { frame: Math.max(1, bagFrame - Math.round(fps * 0.2)), value: 6, easing: 'ease-in' }, { frame: bagFrame, value: 0, easing: 'ease-out' }, { frame: finalFrame, value: 0 }] },
-      { target: bag.key, property: 'opacity', keyframes: [{ frame: 0, value: 1 }, { frame: finalFrame, value: 1 }] },
-      { target: bag.key, property: 'state', keyframes: [{ frame: 0, value: 'held' }, { frame: Math.max(1, bagFrame - Math.round(fps * 0.2)), value: 'falling' }, { frame: bagFrame, value: 'grounded' }, { frame: finalFrame, value: 'grounded' }] },
-      { target: cart.key, property: 'x', keyframes: [{ frame: 0, value: -0.3 }, { frame: cartMoveStart, value: -0.3 }, { frame: cartFrame, value: 0.08, easing: 'ease-in-out' }, { frame: finalFrame, value: 0.08 }] },
-      { target: cart.key, property: 'opacity', keyframes: [{ frame: 0, value: 1 }, { frame: finalFrame, value: 1 }] },
-      { target: cart.key, property: 'state', keyframes: [{ frame: 0, value: 'approach' }, { frame: cartMoveStart, value: 'approach' }, { frame: cartFrame, value: 'passing' }, { frame: finalFrame, value: 'continue' }] },
-      { target: siege.key, property: 'procedural_amount', keyframes: [{ frame: 0, value: 0 }, { frame: siegeRevealStart, value: 0 }, { frame: finalFrame, value: 1, easing: 'ease-in-out' }] },
-      { target: siege.key, property: 'opacity', keyframes: [{ frame: 0, value: 0 }, { frame: siegeRevealStart, value: 0 }, { frame: Math.min(finalFrame, siegeRevealStart + Math.round(fps * 0.3)), value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }] },
+      { target: pathEntity.key, property: 'state', keyframes: [{ frame: 0, value: 'hidden' }, { frame: revealFrame, value: 'revealing' }, { frame: finalFrame, value: 'complete' }] },
+      { target: 'path_reveal_layer', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: revealFrame, value: 1, easing: 'ease-in-out' }, { frame: finalFrame, value: 1 }] },
+      { target: 'path_completion', property: 'clip_progress', keyframes: [{ frame: 0, value: 0 }, { frame: revealFrame, value: 0 }, { frame: completionFrame, value: 1, easing: 'ease-out' }, { frame: finalFrame, value: 1 }] },
+      ...blueprint.action_contract.waypoints.map((unused, index) => ({ target: `path_waypoint_${index + 1}`, property: 'opacity', keyframes: [{ frame: 0, value: 0 }, { frame: frameAt(durationFrames, 0.16 + index * 0.12), value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }] })),
+      ...markerRevealTracks,
     ],
-    camera_tracks: [],
-    cues: [
-      { key: 'bag_contacts_ground', frame: bagFrame, kind: 'contact' },
-      { key: 'cart_enters_lane', frame: cartMoveStart, kind: 'semantic', matched_transition: 'inside_to_outside' },
-      { key: 'siege_closes', frame: siegeRevealStart, kind: 'semantic' },
-    ],
+    camera_tracks: [{ target: 'camera', property: 'scale', keyframes: [{ frame: 0, value: 1 }, { frame: finalFrame, value: 1.018, easing: 'ease-in-out' }] }],
+    cues: [{ key: 'path_revealed', frame: revealFrame, kind: 'semantic' }, { key: 'path_completed', frame: completionFrame, kind: 'semantic' }],
     gate_requirements: [
-      { key: 'bag_fall_range', metric: 'numeric_range', target: bag.key, property: 'y', min: 0.16 },
-      { key: 'cart_ground_translation', metric: 'numeric_range', target: cart.key, property: 'x', min: 0.24 },
-      { key: 'siege_formation_change', metric: 'numeric_range', target: siege.key, property: 'procedural_amount', min: 0.9 },
-      { key: 'bag_contact_cue', metric: 'cue_exists', cue: 'bag_contacts_ground' },
+      { key: 'path_reveal_range', metric: 'numeric_range', target: 'path_reveal_layer', property: 'clip_progress', min: 0.95 },
+      { key: 'path_completion_range', metric: 'numeric_range', target: 'path_completion', property: 'clip_progress', min: 0.95 },
+      { key: 'path_reveal_cue', metric: 'cue_exists', cue: 'path_revealed' },
     ],
   };
   const proofTargets = [
-    { key: 'supply_bag_fall', frame: Math.max(1, bagFrame - Math.round(fps * 0.2)), target_node_key: bag.key, assertions: [{ type: 'track_range', target: bag.key, property: 'y', min: 0.16 }, { type: 'camera_only', expected: false }] },
-    { key: 'supply_cart_lane', frame: cartFrame, target_node_key: cart.key, assertions: [{ type: 'track_range', target: cart.key, property: 'x', min: 0.24 }] },
-    { key: 'siege_line_final', frame: finalFrame, target_node_key: siege.key, assertions: [{ type: 'track_range', target: siege.key, property: 'procedural_amount', min: 0.9 }] },
+    { key: 'path_start', frame: 0, target_node_key: 'path_reveal_layer', assertions: [{ type: 'camera_only', expected: false }] },
+    { key: 'path_revealed', frame: revealFrame, target_node_key: 'path_reveal_layer', assertions: [{ type: 'track_range', target: 'path_reveal_layer', property: 'clip_progress', min: 0.95 }] },
+    { key: 'path_complete', frame: completionFrame, target_node_key: 'path_completion', assertions: [{ type: 'track_range', target: 'path_completion', property: 'clip_progress', min: 0.95 }] },
   ];
+  const families = [environmentFamily, ...markerFamilies];
   return {
-    catalog_key: 'siege-supply-sequence-v2', semanticContract,
-    families: [environmentFamily, bagFamily, cartFamily], root, motionPlan, proofTargets,
-    sceneBoundaryFrames: [boundaryFrame],
-    timingAlignment: {
-      bag: { caption_key: bagMatch.caption_key, confidence: bagMatch.confidence },
-      cart: { caption_key: cartCaptionMatch.caption_key, confidence: cartCaptionMatch.confidence },
+    catalog_key: 'blueprint-path-reveal-v1',
+    semanticContract: {
+      schema_version: 3, storyboard_id: Number(storyboard.id),
+      environment: { description: blueprint.environment.description, clean_plate_required: true, registered_boundaries: [] },
+      subjects: [{ key: pathEntity.key, kind: 'effect', identity: pathEntity.name, support_key: null, required_states: pathEntity.states }, ...markers.map((marker) => ({ key: marker.key, kind: 'character', identity: marker.name, support_key: null, required_states: marker.states }))],
+      action_beats: [{ key: 'path_reveal', start_frame: 0, peak_frame: revealFrame, end_frame: completionFrame, subject_key: pathEntity.key, action: 'reveal_path' }],
     },
+    families, root, motionPlan, proofTargets,
+    summary: {
+      catalog_key: 'blueprint-path-reveal-v1', primary_action: 'path_reveal', camera_only: false, path_reveal: true,
+      clean_plate_required: true, source_family_count: families.length,
+      required_asset_count: families.flatMap((family) => family.slots).filter((slot) => slot.required_for_gate).length,
+      entity_keys: [pathEntity.key, ...markers.map((marker) => marker.key)],
+      required_states: Object.fromEntries([[pathEntity.key, pathEntity.states], ...markers.map((marker) => [marker.key, marker.states])]),
+      relation_contracts: ['path overlay registered to flat canvas', 'subject markers revealed independently', 'labels rendered procedurally'],
+      path_subject_names: markers.map((marker) => marker.name),
+      path_waypoint_names: blueprint.action_contract.waypoints.map((item) => item.label), proof_targets: proofTargets,
+    },
+  };
+}
+
+function multiBeatGroundedSequencePlan(blueprint, context, config) {
+  const storyboard = context.storyboard || {};
+  const falling = blueprint.entities.find((entity) => entity.key === blueprint.action_contract.actor_key);
+  const transport = blueprint.entities.find((entity) => entity.key === blueprint.action_contract.object_key);
+  const effect = blueprint.entities.find((entity) => entity.role === 'grounded_crowd_effect')
+    || blueprint.entities.find((entity) => entity.type === 'effect');
+  if (!falling || !transport || !effect) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_GROUNDED_SEQUENCE_ENTITY_MISSING',
+      '多阶段接地序列缺少必要的接地主体或场景主体',
+      { falling: falling?.key || null, transport: transport?.key || null, effect: effect?.key || null },
+      422,
+    );
+  }
+  const mobilityContracts = mobilityContractService.contractsFromBlueprint(blueprint);
+  const transportMobility = mobilityContracts.find((item) => item.subject_key === transport.key);
+  if (!transportMobility) {
+    throw new PaperStudioError('PAPER_STUDIO_MOBILITY_CONTRACT_MISSING', '运输主体缺少动力来源与运输规模合同', { subject_key: transport.key }, 422);
+  }
+  if (effect && transportMobility.unit_count) {
+    transportMobility.unit_count = {
+      ...transportMobility.unit_count,
+      min_visible: Math.max(3, Number(transportMobility.unit_count.min_visible || 1)),
+      target_visible: Math.max(3, Number(transportMobility.unit_count.target_visible || 1)),
+      reason: 'multi_beat_depth_scale',
+    };
+    transportMobility.formation = 'staggered_convoy';
+  }
+  const fps = Number(config.fps || 30);
+  const durationFrames = Math.max(fps * 5, Math.round(Number(storyboard.duration || 6) * fps));
+  const finalFrame = durationFrames - 1;
+  const captions = Array.isArray(storyboard.audio_captions) ? storyboard.audio_captions : [];
+  const fallingMatch = visualSceneCompiler.orderedCaptionMatch(captions, [falling.name, /滑落|掉落|落地|坠落/], {
+    edge: 'end', fallback_frame: frameAt(durationFrames, 0.3),
+  });
+  const transportMatch = visualSceneCompiler.orderedCaptionMatch(captions, [transport.name, /前行|驶入|移动|推进|穿过|进入/], {
+    edge: 'start', after_frame: fallingMatch.frame - 1, after_caption_key: fallingMatch.caption_key,
+    exclude_caption_keys: fallingMatch.caption_key ? [fallingMatch.caption_key] : [], fallback_frame: frameAt(durationFrames, 0.44),
+  });
+  const transitionFrames = Math.max(Math.round(fps * 0.6), Math.round(fps * 0.5));
+  const boundaryFrame = Math.max(Math.round(fps * 1.2), Math.min(finalFrame - Math.round(fps * 2.1), transportMatch.frame));
+  const transitionStart = Math.max(0, boundaryFrame - Math.floor(transitionFrames / 2));
+  const transitionEnd = Math.min(finalFrame - Math.round(fps * 1.8), transitionStart + transitionFrames);
+  const contactFrame = Math.max(1, Math.min(fallingMatch.frame, transitionStart - Math.max(1, Math.round(fps * 0.1))));
+  const moveStart = Math.min(finalFrame - Math.round(fps), transitionEnd + Math.round(fps * 0.1));
+  const moveEnd = Math.min(finalFrame - Math.round(fps * 1.2), Math.max(moveStart + Math.round(fps * 1.9), frameAt(durationFrames, 0.66)));
+  const effectStart = Math.min(finalFrame - Math.round(fps * 0.8), moveEnd + Math.round(fps * 0.2));
+  const semanticContract = {
+    schema_version: 3,
+    storyboard_id: Number(storyboard.id),
+    environment: {
+      description: blueprint.environment.description, clean_plate_required: true,
+      registered_boundaries: blueprint.environment.registered_boundaries || [],
+      placement_regions: blueprint.environment.placement_regions || [],
+    },
+    subjects: [
+      { key: falling.key, kind: 'prop', identity: falling.name, support_key: null, required_states: falling.states, placement: falling.attributes?.placement || null },
+      { key: transport.key, kind: 'vehicle', identity: transport.name, support_key: null, required_states: transport.states, placement: transport.attributes?.placement || null },
+      { key: effect.key, kind: 'effect', identity: effect.name, support_key: null, required_states: effect.states },
+    ],
+    mobility_contracts: mobilityContracts,
+    action_beats: [
+      { key: 'ground_contact', start_frame: 0, peak_frame: Math.max(1, contactFrame - Math.round(fps * 0.2)), end_frame: contactFrame, subject_key: falling.key, action: 'fall_and_contact_ground' },
+      { key: 'ground_move', start_frame: moveStart, peak_frame: Math.max(moveStart + 1, moveEnd - Math.round(fps * 0.16)), end_frame: moveEnd, subject_key: transport.key, action: 'advance_on_ground' },
+      { key: 'depth_change', start_frame: effectStart, peak_frame: Math.max(effectStart, finalFrame - Math.round(fps * 0.8)), end_frame: finalFrame, subject_key: effect.key, action: 'change_spatial_formation' },
+    ],
+  };
+  const environmentFamily = baseEnvironmentFamily(blueprint);
+  const fallingFamily = {
+    family_key: `${falling.key}_family`, pattern: 'free', registration_canvas: { width: 1920, height: 1080 },
+    slots: [{
+      slot_key: `${falling.key}_cutout`, asset_type: 'prop-cutout', generation_purpose: 'ground_contact_subject', required_for_gate: true,
+      constraints: { transparent_background: true, single_subject: true, subject_key: falling.key, identity: falling.name, contact_kind: 'base', ...sourceConstraints(falling) },
+    }],
+    contract: { subject_key: falling.key, identity: falling.name, placement: falling.attributes?.placement, contact_states: falling.states },
+  };
+  const transportFamily = transportFamilyForSequence(transport, transportMobility);
+  const root = node('root', 'group', 'free', null, { x: 0.5, y: 0.5, width: 1, height: 1 }, {}, 0, [
+    node('clean_environment', 'registered-environment', 'registered-environment', null, { x: 0.5, y: 0.5, width: 1, height: 1 }, { family_key: 'clean_environment' }, 0, [
+      node('clean_plate', 'asset', 'registered-environment', 'clean_plate', { x: 0.5, y: 0.5, width: 1, height: 1 }, { family_key: 'clean_environment', fit: 'cover' }, 0),
+    ]),
+    node(falling.key, 'asset', 'free', `${falling.key}_cutout`, { x: 0.34, y: 0.82, width: 0.18, height: 0.22, anchor_x: 0.5, anchor_y: 0.9 }, { family_key: fallingFamily.family_key, role: falling.role, placement: falling.attributes?.placement }, 20),
+    transportGroupNode(transport, transportFamily, transportMobility, { groundY: 0.82, localZ: 22 }),
+    node(effect.key, 'procedural', 'free', null, { x: 0.48, y: 0.57, width: 0.82, height: 0.3, anchor_x: 0.5, anchor_y: 0.5 }, { procedural_kind: 'crowd-formation', appearance: 'neutral-silhouette', role: effect.role }, 18),
+  ]);
+  const motionPlan = {
+    schema_version: 1, fps, duration_frames: durationFrames, primary_action: 'multi_beat_grounded_sequence', camera_only: false,
+    subject_tracks: [
+      { target: falling.key, property: 'y', keyframes: [{ frame: 0, value: -0.18 }, { frame: Math.max(1, contactFrame - Math.round(fps * 0.2)), value: 0, easing: 'ease-in' }, { frame: contactFrame, value: 0 }, { frame: finalFrame, value: 0 }] },
+      { target: falling.key, property: 'rotation', keyframes: [{ frame: 0, value: -12 }, { frame: Math.max(1, contactFrame - Math.round(fps * 0.2)), value: 6, easing: 'ease-in' }, { frame: contactFrame, value: 0, easing: 'ease-out' }, { frame: finalFrame, value: 0 }] },
+      { target: falling.key, property: 'state', keyframes: [{ frame: 0, value: 'suspended' }, { frame: Math.max(1, contactFrame - Math.round(fps * 0.2)), value: 'falling' }, { frame: contactFrame, value: 'grounded' }, { frame: finalFrame, value: 'grounded' }] },
+      { target: transport.key, property: 'x', keyframes: [{ frame: 0, value: -0.3 }, { frame: moveStart, value: -0.3 }, { frame: moveEnd, value: 0.06, easing: 'ease-in-out' }, { frame: finalFrame, value: 0.06 }] },
+      { target: transport.key, property: 'state', keyframes: [{ frame: 0, value: 'approach' }, { frame: moveStart, value: 'moving' }, { frame: moveEnd, value: 'arrived' }, { frame: finalFrame, value: 'arrived' }] },
+      { target: effect.key, property: 'procedural_amount', keyframes: [{ frame: 0, value: 0 }, { frame: effectStart, value: 0 }, { frame: finalFrame, value: 1, easing: 'ease-in-out' }] },
+      { target: effect.key, property: 'opacity', keyframes: [{ frame: 0, value: 0 }, { frame: effectStart, value: 0 }, { frame: Math.min(finalFrame, effectStart + Math.round(fps * 0.3)), value: 1, easing: 'linear' }, { frame: finalFrame, value: 1 }] },
+    ],
+    camera_tracks: [],
+    cues: [
+      { key: 'subject_contacts_ground', frame: contactFrame, kind: 'contact' },
+      { key: 'ground_transport_enters', frame: moveStart, kind: 'semantic', matched_transition: blueprint.transition_contracts?.[0]?.key || 'primary_to_followup' },
+      { key: 'depth_formation_changes', frame: effectStart, kind: 'semantic' },
+    ],
+    gate_requirements: [
+      { key: 'ground_contact_range', metric: 'numeric_range', target: falling.key, property: 'y', min: 0.16 },
+      { key: 'ground_transport_translation', metric: 'numeric_range', target: transport.key, property: 'x', min: 0.24 },
+      { key: 'depth_formation_change', metric: 'numeric_range', target: effect.key, property: 'procedural_amount', min: 0.9 },
+      { key: 'ground_contact_cue', metric: 'cue_exists', cue: 'subject_contacts_ground' },
+    ],
+  };
+  const proofTargets = [
+    { key: 'ground_contact', frame: Math.max(1, contactFrame - Math.round(fps * 0.2)), target_node_key: falling.key, assertions: [{ type: 'track_range', target: falling.key, property: 'y', min: 0.16 }, { type: 'camera_only', expected: false }] },
+    { key: 'ground_transport_move', frame: moveEnd, target_node_key: transport.key, assertions: [{ type: 'track_range', target: transport.key, property: 'x', min: 0.24 }] },
+    { key: 'depth_formation_final', frame: finalFrame, target_node_key: effect.key, assertions: [{ type: 'track_range', target: effect.key, property: 'procedural_amount', min: 0.9 }] },
+  ];
+  const primarySceneKey = blueprint.visual_scenes?.[0]?.key || 'scene_primary';
+  const followupSceneKey = blueprint.visual_scenes?.[1]?.key || primarySceneKey;
+  return {
+    catalog_key: 'multi-beat-grounded-sequence-v1', semanticContract,
+    families: [environmentFamily, fallingFamily, transportFamily], root, motionPlan, proofTargets,
+    sceneBoundaryFrames: [boundaryFrame],
+    timingAlignment: { primary: { caption_key: fallingMatch.caption_key, confidence: fallingMatch.confidence }, followup: { caption_key: transportMatch.caption_key, confidence: transportMatch.confidence } },
     visualBeats: [
-      { key: 'bag_fall', scene_key: 'scene_inside_city', subject_keys: [bag.key], source_caption_keys: bagMatch.caption_key ? [String(bagMatch.caption_key)] : [], start_frame: 0, peak_frame: Math.max(1, bagFrame - Math.round(fps * 0.3)), end_frame: bagFrame, minimum_hold_frames: Math.round(fps * 0.3), motion_verb: 'drop_and_settle' },
-      { key: 'cart_advance', scene_key: 'scene_outside_road', subject_keys: [cart.key], source_caption_keys: cartCaptionMatch.caption_key ? [String(cartCaptionMatch.caption_key)] : [], start_frame: cartMoveStart, peak_frame: cartFrame, end_frame: Math.min(finalFrame, cartFrame + Math.round(fps * 0.3)), minimum_hold_frames: Math.round(fps * 0.3), motion_verb: 'enter_and_advance' },
-      { key: 'siege_close', scene_key: 'scene_outside_road', subject_keys: [siege.key], source_caption_keys: cartCaptionMatch.caption_key ? [String(cartCaptionMatch.caption_key)] : [], start_frame: siegeRevealStart, peak_frame: Math.max(siegeRevealStart, finalFrame - Math.round(fps * 0.8)), end_frame: finalFrame, minimum_hold_frames: Math.round(fps * 0.8), motion_verb: 'close_encirclement' },
+      { key: 'ground_contact', scene_key: primarySceneKey, subject_keys: [falling.key], source_caption_keys: fallingMatch.caption_key ? [String(fallingMatch.caption_key)] : [], start_frame: 0, peak_frame: Math.max(1, contactFrame - Math.round(fps * 0.3)), end_frame: contactFrame, minimum_hold_frames: Math.round(fps * 0.3), motion_verb: 'drop_and_settle' },
+      { key: 'ground_move', scene_key: followupSceneKey, subject_keys: [transport.key], source_caption_keys: transportMatch.caption_key ? [String(transportMatch.caption_key)] : [], start_frame: moveStart, peak_frame: moveEnd, end_frame: Math.min(finalFrame, moveEnd + Math.round(fps * 0.3)), minimum_hold_frames: Math.round(fps * 0.3), motion_verb: 'enter_and_advance' },
+      { key: 'depth_change', scene_key: followupSceneKey, subject_keys: [effect.key], source_caption_keys: transportMatch.caption_key ? [String(transportMatch.caption_key)] : [], start_frame: effectStart, peak_frame: Math.max(effectStart, finalFrame - Math.round(fps * 0.8)), end_frame: finalFrame, minimum_hold_frames: Math.round(fps * 0.8), motion_verb: 'change_formation' },
     ],
     summary: {
-      catalog_key: 'siege-supply-sequence-v2', primary_action: 'siege_supply_sequence', camera_only: false,
+      catalog_key: 'multi-beat-grounded-sequence-v1', primary_action: 'multi_beat_grounded_sequence', camera_only: false,
       clean_plate_required: true, source_family_count: 3, required_asset_count: 3,
       entity_keys: blueprint.entities.map((entity) => entity.key),
       required_states: Object.fromEntries(blueprint.entities.map((entity) => [entity.key, entity.states])),
-      relation_contracts: [], placement_regions: blueprint.environment.placement_regions || [], proof_targets: proofTargets,
-      timing_alignment: {
-        bag: { caption_key: bagMatch.caption_key, confidence: bagMatch.confidence },
-        cart: { caption_key: cartCaptionMatch.caption_key, confidence: cartCaptionMatch.confidence },
-      },
+      relation_contracts: [], placement_regions: blueprint.environment.placement_regions || [], mobility_contracts: mobilityContracts,
+      proof_targets: proofTargets,
+      timing_alignment: { primary: { caption_key: fallingMatch.caption_key, confidence: fallingMatch.confidence }, followup: { caption_key: transportMatch.caption_key, confidence: transportMatch.confidence } },
     },
   };
+}
+
+function transportFamilyForSequence(transport, mobility) {
+  return transportFamily(transport, mobility, {
+    familyKey: `${transport.key}_family`,
+    slotKey: `${transport.key}_transport_unit_cutout`,
+  });
 }
 
 function compoundPlan(blueprint, context, config) {
@@ -1056,6 +1198,8 @@ function genericPlan(blueprint, context, config) {
   const subject = blueprint.entities.find((entity) => entity.key === actorKey) || blueprint.entities.find((entity) => entity.independent_layer) || blueprint.entities[0];
   const auxiliaryEntities = blueprint.entities.filter((entity) => entity.independent_layer && entity.key !== subject.key);
   const actionObject = auxiliaryEntities.find((entity) => entity.key === blueprint.action_contract.object_key) || null;
+  const actionObjectMobility = actionObject?.attributes?.mobility_contract || null;
+  const stationaryActionObject = Boolean(actionObjectMobility && actionObjectMobility.movement_expected === false);
   const declaredHold = Boolean(actionObject) && blueprint.relations.some((relation) => (
     relation.predicate === 'holds' && relation.subject_key === subject.key && relation.object_key === actionObject.key
   ));
@@ -1086,7 +1230,7 @@ function genericPlan(blueprint, context, config) {
     ],
     action_beats: [
       { key: 'primary_action', start_frame: 0, peak_frame: actionFrame, end_frame: finalFrame, subject_key: subject.key, action: blueprint.action_contract.primary_action },
-      ...(actionObject ? [{ key: 'object_relation', start_frame: 0, peak_frame: actionFrame, end_frame: finalFrame, subject_key: actionObject.key, action: attachedObject ? (releaseRequested ? 'follow_and_release' : 'follow_subject') : 'move_independently_on_ground' }] : []),
+      ...(actionObject ? [{ key: 'object_relation', start_frame: 0, peak_frame: actionFrame, end_frame: finalFrame, subject_key: actionObject.key, action: stationaryActionObject ? 'remain_stationary_on_ground' : attachedObject ? (releaseRequested ? 'follow_and_release' : 'follow_subject') : 'move_independently_on_ground' }] : []),
     ],
   };
   const assetType = subject.type === 'prop' ? 'prop-cutout' : subject.type === 'effect' ? 'effect-cutout' : 'character-cutout';
@@ -1165,11 +1309,15 @@ function genericPlan(blueprint, context, config) {
     ];
   })();
   const objectStates = actionObject
-    ? (actionObject.states.length >= 3 ? actionObject.states.slice(0, 3) : [actionObject.states[0] || 'held', releaseRequested ? 'carried' : 'active', releaseRequested ? 'released' : actionObject.states.at(-1) || 'settle'])
+    ? (stationaryActionObject
+      ? [actionObject.states[0] || 'stable', actionObject.states[0] || 'stable', actionObject.states[0] || 'stable']
+      : actionObject.states.length >= 3 ? actionObject.states.slice(0, 3) : [actionObject.states[0] || 'held', releaseRequested ? 'carried' : 'active', releaseRequested ? 'released' : actionObject.states.at(-1) || 'settle'])
     : [];
   const independentObjectX = actionObject?.role === 'ground_vehicle' ? [-0.18, 0.1] : [-0.08, 0.08];
   const objectTracks = actionObject ? [
-    { target: actionObject.key, property: 'x', keyframes: attachedObject
+    { target: actionObject.key, property: 'x', keyframes: stationaryActionObject
+      ? [{ frame: 0, value: 0 }, { frame: finalFrame, value: 0 }]
+      : attachedObject
       ? [{ frame: 0, value: xValues[0] - 0.03 }, { frame: actionFrame, value: xValues[1] - 0.03, easing: 'ease-in-out' }, ...(releaseRequested ? [{ frame: releaseFrame, value: xValues[1] + 0.08, easing: 'ease-out' }] : []), { frame: finalFrame, value: releaseRequested ? xValues[1] + 0.08 : xValues[1] - 0.03 }]
       : [{ frame: 0, value: independentObjectX[0] }, { frame: actionFrame, value: independentObjectX[1], easing: 'ease-in-out' }, { frame: finalFrame, value: independentObjectX[1] }] },
     { target: actionObject.key, property: 'state', keyframes: [{ frame: 0, value: objectStates[0] }, { frame: actionFrame, value: objectStates[1] }, ...(releaseRequested ? [{ frame: releaseFrame, value: objectStates[2] }] : []), { frame: finalFrame, value: objectStates[releaseRequested ? 2 : 1] }] },
@@ -1198,8 +1346,8 @@ function genericPlan(blueprint, context, config) {
         : motionAction === 'generic_subject_action'
           ? [{ key: 'subject_action_range', metric: 'numeric_range', target: subject.key, property: 'rotation', min: 8 }]
           : [{ key: 'subject_translation', metric: 'numeric_range', target: subject.key, property: 'x', min: translationThreshold }]),
-      ...(actionObject ? [{ key: attachedObject ? 'action_object_follows_subject' : 'independent_object_ground_translation', metric: 'numeric_range', target: actionObject.key, property: 'x', min: attachedObject ? translationThreshold : 0.12 }] : []),
-      ...(actionObject && objectStates.length >= 3 ? [{ key: 'action_object_state_progression', metric: 'distinct_states', target: actionObject.key, property: 'state', min: releaseRequested ? 3 : 2 }] : []),
+      ...(actionObject && !stationaryActionObject ? [{ key: attachedObject ? 'action_object_follows_subject' : 'independent_object_ground_translation', metric: 'numeric_range', target: actionObject.key, property: 'x', min: attachedObject ? translationThreshold : 0.12 }] : []),
+      ...(actionObject && !stationaryActionObject && objectStates.length >= 3 ? [{ key: 'action_object_state_progression', metric: 'distinct_states', target: actionObject.key, property: 'state', min: releaseRequested ? 3 : 2 }] : []),
       ...(releaseRequested ? [{ key: 'release_cue_exists', metric: 'cue_exists', cue: 'release_prop' }] : []),
     ],
   };
@@ -1210,7 +1358,7 @@ function genericPlan(blueprint, context, config) {
       : { type: 'track_range', target: subject.key, property: 'x', min: translationThreshold };
   const proofTargets = [
     { key: 'subject_start', frame: 0, target_node_key: subject.key, assertions: [{ type: 'state_equals', target: subject.key, value: states[0] }, ...(attachedObject ? [{ type: 'relation_exists', node: actionObject.key, predicate: 'held-by' }] : [])] },
-    { key: 'subject_action', frame: actionFrame, target_node_key: subject.key, assertions: [actionAssertion, ...(actionObject ? [{ type: 'track_range', target: actionObject.key, property: 'x', min: attachedObject ? translationThreshold : 0.12 }] : [])] },
+    { key: 'subject_action', frame: actionFrame, target_node_key: subject.key, assertions: [actionAssertion, ...(actionObject && !stationaryActionObject ? [{ type: 'track_range', target: actionObject.key, property: 'x', min: attachedObject ? translationThreshold : 0.12 }] : [])] },
     { key: 'subject_final', frame: finalFrame, target_node_key: subject.key, assertions: [{ type: 'state_equals', target: subject.key, value: states[2] }, ...(actionObject ? [{ type: 'state_equals', target: actionObject.key, value: objectStates[releaseRequested ? 2 : 1] }] : []), { type: 'camera_only', expected: false }] },
   ];
   return {
@@ -1258,7 +1406,27 @@ function assertCompiledRelationProvenance(blueprint, plan) {
   }
 }
 
+function normalizeLegacyBlueprint(blueprint) {
+  const action = blueprint?.action_contract?.primary_action;
+  if (!['map_route_reveal', 'siege_supply_sequence'].includes(action)) return blueprint;
+  const normalized = JSON.parse(JSON.stringify(blueprint));
+  if (action === 'map_route_reveal') {
+    normalized.action_contract.primary_action = 'path_reveal';
+    for (const entity of normalized.entities || []) {
+      if (entity.type === 'character' && entity.role === 'map_character_marker') entity.role = 'path_subject_marker';
+      if (entity.key === normalized.action_contract.actor_key) entity.role = 'path_reveal';
+    }
+  } else {
+    normalized.action_contract.primary_action = 'multi_beat_grounded_sequence';
+    const effect = (normalized.entities || []).find((entity) => entity.type === 'effect');
+    if (effect) effect.role = 'grounded_crowd_effect';
+  }
+  return normalized;
+}
+
 function compile(blueprint, context = {}, config = {}) {
+  blueprint = normalizeLegacyBlueprint(blueprint);
+  mobilityContractService.annotateBlueprint(blueprint, context);
   schemaService.assertValid('paperBlueprint', blueprint, '生产蓝图不符合 Schema');
   const entityKeys = new Set(blueprint.entities.map((entity) => entity.key));
   const duplicateKeys = blueprint.entities.length !== entityKeys.size;
@@ -1281,18 +1449,23 @@ function compile(blueprint, context = {}, config = {}) {
   }
   let plan;
   if (contract.primary_action === 'environmental_depth_motion') plan = environmentPlan(blueprint, context, config);
-  else if (contract.primary_action === 'map_route_reveal') plan = mapRoutePlan(blueprint, context, config);
-  else if (contract.primary_action === 'siege_supply_sequence') plan = siegeSupplyPlan(blueprint, context, config);
+  else if (contract.primary_action === 'path_reveal') plan = pathRevealPlan(blueprint, context, config);
+  else if (contract.primary_action === 'multi_beat_grounded_sequence') plan = multiBeatGroundedSequencePlan(blueprint, context, config);
+  else if (contract.primary_action === 'transport_move') plan = transportPlan(blueprint, context, config);
   else plan = contract.primary_action === 'carry_move_sit'
     ? compoundPlan(blueprint, context, config)
     : genericPlan(blueprint, context, config);
   assertCompiledRelationProvenance(blueprint, plan);
   visualSceneCompiler.applySceneContinuity(plan, blueprint, context);
+  const compiledMobilityContracts = mobilityContractService.contractsFromBlueprint(blueprint);
+  const mobilityAssemblies = mobilityContractService.runtimeAssemblies(plan.root, plan.families, compiledMobilityContracts);
   plan.summary = {
     ...(plan.summary || {}),
     planner_version: CURRENT_PLANNER_VERSION,
     spatial_contract: {
       placement_regions: blueprint.environment.placement_regions || [],
+      mobility_contracts: compiledMobilityContracts,
+      mobility_assemblies: mobilityAssemblies,
       scenes: (plan.visualScenes || []).map((scene) => ({
         scene_key: scene.key,
         environment_family_key: scene.environment_family_key,
@@ -1310,6 +1483,7 @@ function compile(blueprint, context = {}, config = {}) {
     transition_contracts: plan.transitionContracts,
     root: plan.root,
     families: plan.families,
+    semantic_contract: plan.semanticContract,
     spatial_contract: plan.summary.spatial_contract,
     visual_beats: plan.visualBeats,
     captions: context.storyboard?.audio_captions || [],
@@ -1322,6 +1496,7 @@ function slotReason(slot, family) {
   if (slot.constraints?.label) return slot.constraints.label;
   if (slot.slot_key === 'clean_plate') return '提供不含可动主体的干净背景';
   if (slot.asset_type === 'occlusion-mask') return '在动作阶段恢复正确的前后遮挡关系';
+  if (slot.constraints?.ensemble_kind === 'transport_unit') return '车辆、动力角色和接触关系必须形成完整运输单位';
   if (/character/.test(slot.asset_type)) return `角色动作状态：${slot.constraints?.state || slot.slot_key}`;
   if (/prop/.test(slot.asset_type)) return '道具必须作为独立纸片层跟随、释放或单独调整';
   if (/effect/.test(slot.asset_type)) return '环境或动作效果独立层';
@@ -1338,6 +1513,7 @@ function slotSource(slot) {
 }
 
 function withGenerationSlots(blueprint, plan) {
+  blueprint = normalizeLegacyBlueprint(blueprint);
   return visualSceneCompiler.withBlueprintSceneContracts({
     ...blueprint,
     generation_slots: plan.families.flatMap((family) => family.slots.map((slot) => ({

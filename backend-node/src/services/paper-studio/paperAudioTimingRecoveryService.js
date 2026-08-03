@@ -31,8 +31,8 @@ function reopen(db, cfg, log, shotId, body = {}) {
   db.transaction(() => {
     db.prepare("UPDATE paper_render_snapshots SET status = 'superseded' WHERE shot_id = ? AND status IN ('compiled','approved')").run(Number(shot.id));
     db.prepare("UPDATE paper_proof_runs SET status = 'superseded' WHERE shot_id = ? AND status IN ('pending','running','passed','completed')").run(Number(shot.id));
-    db.prepare("UPDATE paper_motion_plans SET status = 'confirmed', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ?")
-      .run(now, Number(shot.id));
+    db.prepare("UPDATE paper_motion_plans SET status = 'confirmed', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ? AND plan_revision_id = ?")
+      .run(now, Number(shot.id), Number(shot.current_plan_revision_id));
     db.prepare(
       `UPDATE paper_studio_shots
        SET status = 'asset_ready', current_snapshot_id = NULL, approved_snapshot_id = NULL,
@@ -44,10 +44,10 @@ function reopen(db, cfg, log, shotId, body = {}) {
        SET status = 'queued', result_json = '{}', error_json = '{}', lease_owner = NULL,
            lease_expires_at = NULL, started_at = NULL, completed_at = NULL,
            authorization_id = NULL, user_visible_status = NULL, updated_at = ?
-       WHERE run_id = ? AND shot_id = ? AND step_key IN
+       WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ? AND step_key IN
          ('plan_motion','compile_snapshot','render_proof','dynamic_gate','render_preview',
           'wait_preview_approval','render_formal','publish_video')`,
-    ).run(now, Number(shot.run_id), Number(shot.id));
+    ).run(now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id));
     db.prepare(
       `UPDATE paper_storyboards
        SET published_video_generation_id = NULL, status = 'in_production',

@@ -4,6 +4,9 @@
       <div>
         <span>SHOT {{ String(storyboard.shot_number).padStart(2, '0') }}</span>
         <h2>{{ form.title || '未命名分镜' }}</h2>
+        <small v-if="storyboard.working_copy_base_revision_number" class="history-base">
+          正在基于 S{{ storyboard.working_copy_base_revision_number }} 编辑 · 源历史和图片保持不变
+        </small>
       </div>
       <div class="editor-actions">
         <span class="save-state" :class="saveState">{{ saveStateLabel }}</span>
@@ -210,6 +213,7 @@ function mediaUrl(value) {
 .editor-heading > div:first-child { min-width: 0; }
 .editor-heading span { color: var(--paper-accent); font: 700 var(--paper-fs-sm) ui-monospace, monospace; letter-spacing: .12em; }
 .editor-heading h2 { margin: 4px 0 0; overflow: hidden; color: var(--paper-text); font: 600 19px/1.2 Georgia, 'Songti SC', serif; text-overflow: ellipsis; white-space: nowrap; }
+.editor-heading .history-base { display: block; margin-top: 4px; color: #b49a61; font-size: var(--paper-fs-xs); }
 .editor-actions { display: flex; align-items: center; gap: 7px; }
 .editor-actions .save-state { margin-right: 6px; color: #8c877d; font-size: var(--paper-fs-xs); letter-spacing: 0; }
 .editor-actions .save-state.unsaved, .editor-actions .save-state.failed { color: #c9956e; }

@@ -4,9 +4,11 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  findBestUnpublishedRun,
   isEnvironmentProductionShot,
   paperProductionActionDescription,
   paperProductionActionLabel,
+  unpublishedRunResumeLabel,
 } from '../src/utils/paperStudioProduction.js'
 import {
   paperAssetPurposeLabel,
@@ -18,6 +20,13 @@ import {
   isEditablePaperBlueprint,
   paperBlueprintCompatibility,
 } from '../src/utils/paperBlueprintCompatibility.js'
+import {
+  audioStatusLabel,
+  episodeStatusLabel,
+  mergeStatusLabel,
+  shotStatusLabel,
+  storyboardStatusLabel,
+} from '../src/utils/paperStudioLabels.js'
 
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 
@@ -29,7 +38,7 @@ test('environment production uses concrete user-facing step names', () => {
   }
   assert.equal(isEnvironmentProductionShot(shot), true)
   assert.equal(paperProductionActionLabel(shot), '生成环境动态')
-  assert.match(paperProductionActionDescription(shot), /寒雾漂移、空气流动和轻微运镜/)
+  assert.match(paperProductionActionDescription(shot), /环境氛围漂移、空气流动和轻微运镜/)
 })
 
 test('legacy missing environment state offers an automatic zero-cost recovery action', () => {
@@ -51,6 +60,24 @@ test('non-environment production preserves the backend action label', () => {
   assert.equal(paperProductionActionDescription(shot, '原说明'), '原说明')
 })
 
+test('unfinished production resumes the most advanced matching version instead of creating an empty duplicate', () => {
+  const selection = { paper_storyboard_ids: [17], paper_storyboard_revision_ids: [48] }
+  const runs = [
+    { id: 25, run_number: 12, paper_episode_id: 8, status: 'preview_ready', progress: 78, selection_json: selection, updated_at: '2026-07-31T10:04:21.723Z' },
+    { id: 26, run_number: 13, paper_episode_id: 8, status: 'draft', progress: 0, selection_json: selection, updated_at: '2026-07-31T10:07:25.024Z' },
+    { id: 27, run_number: 14, paper_episode_id: 8, status: 'draft', progress: 0, selection_json: selection, updated_at: '2026-07-31T10:07:59.874Z' },
+  ]
+  const recovered = findBestUnpublishedRun(runs, { paperEpisodeId: 8, storyboardIds: [17], revisionIds: [48] })
+  assert.equal(recovered.id, 25)
+  assert.equal(unpublishedRunResumeLabel(recovered), '预览视频已生成，等待批准')
+  assert.equal(findBestUnpublishedRun(runs, { paperEpisodeId: 8, storyboardIds: [17], revisionIds: [49] }), null)
+
+  const view = readFileSync(join(srcRoot, 'views', 'PaperStudio.vue'), 'utf8')
+  assert.match(view, /继续未发布版本/)
+  assert.match(view, /刷新不会删除/)
+  assert.match(view, /已恢复未发布版本/)
+})
+
 test('asset review labels identify the actual subject, state, type and purpose', () => {
   const slot = {
     slot_key: 'subject_start',
@@ -58,10 +85,10 @@ test('asset review labels identify the actual subject, state, type and purpose',
     generation_purpose: 'map_character_marker',
     constraints_json: { identity: '王离', state: 'map_marker' },
   }
-  assert.equal(paperAssetSlotLabel(slot), '王离 · 地图人物剪影')
-  assert.equal(paperAssetStateLabel('map_marker'), '地图人物剪影')
+  assert.equal(paperAssetSlotLabel(slot), '王离 · 平面标记剪影')
+  assert.equal(paperAssetStateLabel('map_marker'), '平面标记剪影')
   assert.equal(paperAssetTypeLabel(slot), '角色透明层')
-  assert.equal(paperAssetPurposeLabel(slot), '生成在战役地图上显现的人物剪影')
+  assert.equal(paperAssetPurposeLabel(slot), '生成在平面底图上显现的主体标记')
   assert.equal(paperAssetSlotLabel({ slot_key: 'clean_plate', asset_type: 'environment', constraints_json: { label: '干净战役地图底图' } }), '干净战役地图底图')
 })
 
@@ -69,9 +96,18 @@ test('blueprint editor exposes entity evidence and ground-contact safeguards wit
   const component = readFileSync(join(srcRoot, 'components', 'paper-studio', 'PaperBlueprintEditor.vue'), 'utf8')
   assert.match(component, /剧本证据/)
   assert.match(component, /落地区域/)
-  assert.match(component, /粮车、车辆等大型接地道具不能设置为手持关系/)
+  assert.match(component, /大型接地道具（车辆、推车、大型器物等）不能设置为手持关系/)
   assert.match(component, /function bindingWarning/)
   assert.match(component, /if \(!evidence \|\| !name\) return false/)
+})
+
+test('paper studio status labels remain centralized without conflating status domains', () => {
+  assert.equal(shotStatusLabel('plan_confirmed'), '计划已确认，等待生成授权')
+  assert.equal(shotStatusLabel('plan_confirmed', { compact: true }), '计划确认')
+  assert.equal(storyboardStatusLabel('ready'), '参考图就绪')
+  assert.equal(episodeStatusLabel('merging'), '合并中')
+  assert.equal(audioStatusLabel('superseded'), '历史版本')
+  assert.equal(mergeStatusLabel('stale'), '分镜已更新，需要重新合并')
 })
 
 test('recovered legacy blueprints remain viewable without entering the current editor contract', () => {

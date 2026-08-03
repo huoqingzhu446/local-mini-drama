@@ -54,6 +54,29 @@ test('action catalog rejects unknown actions and unsafe or out-of-range keyframe
   assert.ok(report.assertions.some((item) => !item.pass && item.key.includes('values')));
 });
 
+test('action catalog exposes only compiler-supported neutral actions for blueprint selection', () => {
+  const actions = actionCatalogService.list();
+  const selectable = actions.filter((action) => action.user_selectable && action.blueprint_supported);
+  assert.ok(selectable.some((action) => action.key === 'transport_move' && action.label === '接地运输移动'));
+  assert.equal(actions.some((action) => action.key === 'map_route_reveal'), false);
+  assert.equal(actions.some((action) => action.key === 'siege_supply_sequence'), false);
+  assert.ok(actions.every((action) => typeof action.label === 'string' && typeof action.user_selectable === 'boolean'));
+});
+
+test('legacy action, blueprint id, procedural kind and appearance aliases remain read-only compatible', () => {
+  assert.equal(actionCatalogService.normalizeAction('map_route_reveal'), 'path_reveal');
+  assert.equal(actionCatalogService.normalizeAction('siege_supply_sequence'), 'multi_beat_grounded_sequence');
+  assert.equal(actionCatalogService.normalizeBlueprintId('map-route-reveal-v1'), 'path-reveal-v1');
+  assert.equal(actionCatalogService.normalizeBlueprintId('blueprint-map-route-reveal-v2'), 'blueprint-path-reveal-v1');
+  assert.equal(actionCatalogService.normalizeBlueprintId('siege-supply-sequence-v3'), 'multi-beat-grounded-sequence-v1');
+  assert.equal(actionCatalogService.normalizeProceduralKind('route-reveal'), 'path-reveal');
+  assert.equal(actionCatalogService.normalizeProceduralKind('map-title-card'), 'label-card');
+  assert.equal(actionCatalogService.normalizeProceduralKind('army-formation'), 'crowd-formation');
+  assert.equal(actionCatalogService.normalizeProceduralKind('ember-field'), 'ember-drift');
+  assert.equal(actionCatalogService.normalizeAppearance('qin-silhouette'), 'neutral-silhouette');
+  assert.equal(actionCatalogService.isPathRevealSummary({ catalog_key: 'blueprint-map-route-reveal-v2' }), true);
+});
+
 test('natural-language revision changes only safe motion primitives and invalidates old snapshots', () => {
   const { db, run } = setup();
   let shot = shotService.get(db, run.shots[0].id);

@@ -25,7 +25,18 @@ function scalePlan(plan, newDuration) {
     ...(next.scene_tracks || []),
     ...(next.transition_tracks || []),
   ]) {
-    for (const keyframe of track.keyframes || []) keyframe.frame = scaleFrame(keyframe.frame, oldDuration, newDuration);
+    const original = track.keyframes || [];
+    const byFrame = new Map();
+    for (const keyframe of original) {
+      const scaled = scaleFrame(keyframe.frame, oldDuration, newDuration);
+      byFrame.set(scaled, { ...keyframe, frame: scaled });
+    }
+    if (byFrame.size < 2 && original.length >= 2) {
+      const finalFrame = Math.max(1, Number(newDuration) - 1);
+      byFrame.set(0, { ...original[0], frame: 0 });
+      byFrame.set(finalFrame, { ...original.at(-1), frame: finalFrame });
+    }
+    track.keyframes = [...byFrame.values()].sort((left, right) => left.frame - right.frame);
   }
   for (const cue of next.cues || []) cue.frame = scaleFrame(cue.frame, oldDuration, newDuration);
   for (const beat of next.visual_beats || []) {
@@ -98,7 +109,9 @@ function sync(db, shot, config = {}) {
     authored_duration_seconds: context.audio_timing.authored_duration_seconds,
     effective_duration_seconds: context.audio_timing.effective_duration_seconds,
     speech_end_seconds: context.audio_timing.speech_end_seconds,
-    audio_driven_duration: Boolean(context.audio_timing.duration_extended),
+    audio_driven_duration: Boolean(context.audio_timing.duration_adjusted),
+    audio_duration_extended: Boolean(context.audio_timing.duration_extended),
+    audio_duration_shortened: Boolean(context.audio_timing.duration_shortened),
   };
   schemaService.assertValid('semanticContract', semanticContract, '声音同步后的镜头语义合同不符合 Schema');
   schemaService.assertValid('motionPlan', motionPlan, '声音同步后的动作计划不符合 Schema');
@@ -122,8 +135,8 @@ function sync(db, shot, config = {}) {
       `UPDATE paper_motion_plans
        SET semantic_contract_hash = ?, timing_hash = ?, plan_json = ?, compiled_tracks_json = '{}',
            status = 'confirmed', version = version + 1, updated_at = ?
-       WHERE shot_id = ?`,
-    ).run(sha256(canonicalJson(semanticContract)), timingHash, JSON.stringify(motionPlan), now, Number(shot.id));
+       WHERE shot_id = ? AND plan_revision_id = ?`,
+    ).run(sha256(canonicalJson(semanticContract)), timingHash, JSON.stringify(motionPlan), now, Number(shot.id), Number(shot.current_plan_revision_id));
     db.prepare(
       `UPDATE paper_studio_shots
        SET semantic_contract_json = ?, plan_summary_json = ?, last_error_json = '{}',

@@ -13,6 +13,8 @@ const runAggregateService = require('./paperRunAggregateService');
 const continuityService = require('./paperContinuityService');
 const revisionService = require('./paperSourceRevisionService');
 const sourceService = require('./paperStudioSourceService');
+const matteThresholds = require('./paperMatteThresholds');
+const actionCatalogService = require('./paperActionCatalogService');
 const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStudioPlannerVersion');
 const {
   normalizeVisualBible,
@@ -65,10 +67,10 @@ function insertVersion(db, slot, derivationKind, provenance = {}) {
   const next = db.prepare('SELECT COALESCE(MAX(attempt_index), 0) + 1 AS attempt FROM paper_asset_versions WHERE slot_id = ?').get(Number(slot.id));
   const result = db.prepare(
     `INSERT INTO paper_asset_versions
-      (slot_id, source_family_id, attempt_index, derivation_kind, processing_json,
+      (slot_id, source_family_id, attempt_index, derivation_kind, reuse_fingerprint, processing_json,
        registration_json, provenance_json, quality_report_json, status, created_at)
-     VALUES (?, ?, ?, ?, '{}', '{}', ?, '{}', 'candidate', ?)`,
-  ).run(Number(slot.id), Number(slot.family_id), Number(next.attempt), derivationKind, JSON.stringify(provenance), nowIso());
+     VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, '{}', 'candidate', ?)`,
+  ).run(Number(slot.id), Number(slot.family_id), Number(next.attempt), derivationKind, slot.reuse_fingerprint || null, JSON.stringify(provenance), nowIso());
   return Number(result.lastInsertRowid);
 }
 
@@ -151,9 +153,11 @@ function ensureProceduralStateFallbacks(db, shotId) {
     `SELECT pas.*
      FROM paper_asset_slots pas
      JOIN paper_source_families psf ON psf.id = pas.family_id
-     WHERE psf.shot_id = ? AND psf.deleted_at IS NULL AND pas.deleted_at IS NULL
+     WHERE psf.shot_id = ?
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+       AND psf.deleted_at IS NULL AND pas.deleted_at IS NULL
      ORDER BY psf.id, pas.id`,
-  ).all(Number(shotId)).map((slot) => ({
+  ).all(Number(shotId), Number(shotId)).map((slot) => ({
     ...slot,
     id: Number(slot.id),
     family_id: Number(slot.family_id),
@@ -178,23 +182,30 @@ function ensureVersionPath(db, cfg, shot, versionId, slotKey, extension = 'png')
   return { relative, absolute };
 }
 
+function ensureSourceVersionPath(db, cfg, shot, versionId, slotKey, extension = 'png') {
+  return ensureVersionPath(db, cfg, shot, versionId, `${slotKey}-source`, extension);
+}
+
 async function alphaReport(inputPath, outputPath, { requireAlpha = true } = {}) {
   const source = await sharp(inputPath).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const data = Buffer.from(source.data);
-  const key = requireAlpha ? paperMatte.estimateBorderKeyColor(data, source.info) : null;
+  const keyEstimate = requireAlpha ? paperMatte.estimateBorderKey(data, source.info, 'auto') : null;
+  const key = keyEstimate?.key || null;
   const pixels = source.info.width * source.info.height;
   let inputTransparent = 0;
   for (let index = 3; index < data.length; index += 4) {
     if (data[index] < 245) inputTransparent += 1;
   }
-  let matteMethod = inputTransparent / pixels > 0.015 ? 'provider_alpha' : 'border_matte_v2';
-  if (requireAlpha && matteMethod === 'border_matte_v2') {
+  let matteMethod = inputTransparent / pixels > 0.015
+    ? 'provider_alpha'
+    : keyEstimate?.mode === 'dark_v1' ? 'border_matte_dark_v1' : 'border_matte_v2';
+  if (requireAlpha && matteMethod !== 'provider_alpha') {
     for (let index = 0; index < data.length; index += 4) {
       data[index + 3] = paperMatte.alphaForPixel(data[index], data[index + 1], data[index + 2], data[index + 3], key, 24, 48);
     }
   }
   const defringe = requireAlpha
-    ? paperMatte.defringeRgba(data, source.info, key, { apply_unmix: matteMethod === 'border_matte_v2' })
+    ? paperMatte.defringeRgba(data, source.info, key, { apply_unmix: matteMethod !== 'provider_alpha' })
     : null;
   let transparent = 0;
   let visible = 0;
@@ -222,12 +233,12 @@ async function alphaReport(inputPath, outputPath, { requireAlpha = true } = {}) 
     width: (maxX - minX + 1) / source.info.width,
     height: (maxY - minY + 1) / source.info.height,
   } : {};
-  const pass = !requireAlpha || (
-    transparentRatio >= 0.05
-    && visibleRatio >= 0.005
-    && visibleRatio <= 0.92
-    && (!defringe?.chroma_green || defringe.residual_key_edge_ratio <= 0.02)
-  );
+  const pass = !requireAlpha || matteThresholds.alphaGate({
+    transparentRatio,
+    visibleRatio,
+    residualKeyEdgeRatio: defringe?.residual_key_edge_ratio || 0,
+    checkResidualKey: Boolean(defringe?.chroma_green),
+  });
   return {
     pass,
     width: source.info.width,
@@ -235,6 +246,7 @@ async function alphaReport(inputPath, outputPath, { requireAlpha = true } = {}) 
     pixels,
     matte_method: matteMethod,
     key_color: key,
+    key_confidence: keyEstimate,
     defringe,
     residual_key_edge_ratio: defringe?.residual_key_edge_ratio || 0,
     transparent_ratio: Number(transparentRatio.toFixed(6)),
@@ -311,10 +323,12 @@ function referenceImagesForSlot(db, shot, slot, provider) {
          FROM paper_asset_versions pav
          JOIN paper_asset_slots pas ON pas.id = pav.slot_id
          JOIN paper_source_families psf ON psf.id = pas.family_id
-         WHERE psf.shot_id = ? AND pas.asset_type = 'environment'
+         WHERE psf.shot_id = ?
+           AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+           AND pas.asset_type = 'environment'
            AND pas.id != ? AND pav.status = 'accepted'
          ORDER BY pav.id DESC LIMIT 1`,
-      ).get(Number(shot.id), Number(slot.id));
+      ).get(Number(shot.id), Number(shot.id), Number(slot.id));
       add(acceptedEnvironment?.alpha_local_path || acceptedEnvironment?.source_local_path);
       add(sourceService.referenceMedia(db, shot));
     }
@@ -383,17 +397,20 @@ function referenceEvidence(cfg, referenceImages = []) {
 async function importSource(db, cfg, shot, slot, source) {
   const versionId = insertVersion(db, slot, 'source_import', source);
   const target = ensureVersionPath(db, cfg, shot, versionId, slot.slot_key);
+  const sourceTarget = ensureSourceVersionPath(db, cfg, shot, versionId, slot.slot_key);
   const sourceAbsolute = safeStorageFile(cfg, source.local_path);
   if (!fs.existsSync(sourceAbsolute)) throw new PaperStudioError('PAPER_STUDIO_SOURCE_ASSET_MISSING', '引用的正式素材文件不存在', { slot_id: slot.id, local_path: source.local_path }, 422);
+  fs.copyFileSync(sourceAbsolute, sourceTarget.absolute);
   const requireAlpha = slot.asset_type !== 'environment';
-  const report = await alphaReport(sourceAbsolute, target.absolute, { requireAlpha });
+  const report = await alphaReport(sourceTarget.absolute, target.absolute, { requireAlpha });
   if (!report.pass) throw new PaperStudioError('PAPER_STUDIO_ASSET_GATE_FAILED', '正式素材无法形成可用透明纸片', { slot_id: slot.id, report }, 422);
-  const hash = hashFile(target.absolute);
+  const sourceHash = hashFile(sourceTarget.absolute);
+  const outputHash = hashFile(target.absolute);
   db.prepare(
     `UPDATE paper_asset_versions SET source_local_path = ?, alpha_local_path = ?, source_hash = ?,
        alpha_hash = ?, processing_json = ?, quality_report_json = ?, status = 'accepted', accepted_at = ?
      WHERE id = ?`,
-  ).run(target.relative, requireAlpha ? target.relative : null, hash, requireAlpha ? hash : null, JSON.stringify({ derivation: 'immutable_copy', matte_method: report.matte_method }), JSON.stringify(report), nowIso(), versionId);
+  ).run(sourceTarget.relative, requireAlpha ? target.relative : null, sourceHash, requireAlpha ? outputHash : null, JSON.stringify({ derivation: 'immutable_copy', matte_method: report.matte_method }), JSON.stringify(report), nowIso(), versionId);
   db.prepare("UPDATE paper_asset_slots SET current_version_id = ?, status = 'ready', version = version + 1, updated_at = ? WHERE id = ?").run(versionId, nowIso(), Number(slot.id));
   return versionId;
 }
@@ -492,27 +509,28 @@ function promptForSlot(db, shot, slot) {
   const scene = sourceContext.scene;
   const constrainedSubject = (semantic.subjects || []).find((subject) => subject.key === slot.constraints_json?.subject_key);
   const primarySubject = constrainedSubject || (semantic.subjects || []).find((subject) => subject.key === 'primary_subject') || (semantic.subjects || [])[0] || {};
+  const transportUnit = slot.constraints_json?.ensemble_kind === 'transport_unit';
   if (slot.asset_type === 'environment') {
     const styleLock = styleLockForSlot(drama, 'scene');
     const environmentOnly = Boolean(summary.environment_only || storyboard?.environment_only);
-    const mapBase = Boolean(summary.map_route || /map-route-reveal/.test(String(summary.catalog_key || '')));
+    const pathBase = actionCatalogService.isPathRevealSummary(summary);
     const selectedReference = sourceService.isPaperShot(shot) ? sourceService.referenceMedia(db, shot) : null;
     const sceneDescription = String(slot.constraints_json?.environment_description || semantic.environment?.description || '').trim();
     const compositionReference = slot.constraints_json?.use_storyboard_composition_reference !== false;
     const fixedSceneContext = [scene?.location, scene?.time].filter(Boolean);
     const place = (fixedSceneContext.length ? fixedSceneContext : [storyboard?.location, storyboard?.time].filter(Boolean))
       .join('，') || 'the fixed storyboard location and time';
-    const cleanDescription = mapBase
-      ? `Create the clean unannotated strategic-map base shown by the selected storyboard reference. Preserve its exact top-down geography, river course, bridges, mountains, plains, city positions, paper boundary, tabletop framing, palette and camera composition. Remove every route arrow, dot, encirclement ring, army symbol, commander silhouette, title card, label and readable character; all strategic information and people will be added later as independent layers.`
+    const cleanDescription = pathBase
+      ? `Create the clean unannotated flat-diagram base shown by the selected storyboard reference. Preserve its exact top-down geometry, fixed landmarks, boundaries, paper framing, palette and camera composition. Remove every path line, arrow, moving marker, subject silhouette, title card, label and readable character; all changing information and people will be added later as independent layers.`
       : environmentOnly
         ? `Create the full environmental base frame at ${place}. Preserve the selected storyboard reference's visible environment storytelling, including its terrain, river or shoreline, fortifications, ruins, damaged structures, camps, fire and smoke, banners, vessels, distant silhouettes, debris, weather and atmospheric depth. These are part of this environment-only shot and must not be replaced by a generic empty landscape.`
         : `Create a clean environment plate for this exact visual scene: ${sceneDescription || place}. Preserve fixed terrain, shoreline, water, sky, permanent architecture, vegetation, damage to the location, weather, atmospheric depth, lighting and perspective. Remove only the characters or movable hero props that are explicitly planned as separate animation layers, then reconstruct the areas hidden behind them. Do not erase fixed story-world evidence such as ruined architecture or environmental damage.`;
-    const storyContext = uniqueTextBlocks(environmentOnly || mapBase
+    const storyContext = uniqueTextBlocks(environmentOnly || pathBase
       ? [storyboard?.description, storyboard?.action, storyboard?.atmosphere, storyboard?.visual_prompt, storyboard?.prompt]
       : [storyboard?.atmosphere, storyboard?.visual_prompt, storyboard?.prompt]).join('\n');
     return [
-      mapBase
-        ? 'Create the production clean strategic-map plate for layered paper animation, not a finished annotated map.'
+      pathBase
+        ? 'Create the production clean flat-diagram plate for layered paper animation, not a finished annotated diagram.'
         : environmentOnly
         ? 'Create the production environment plate for this paper-animation shot.'
         : 'Create a production clean plate for layered paper animation, not a finished storyboard frame.',
@@ -522,8 +540,8 @@ function promptForSlot(db, shot, slot) {
         : selectedReference
         ? `SELECTED STORYBOARD REFERENCE — STYLE ONLY: preserve its era, weather family, lighting direction, color palette, paper texture and rendering medium, but do not copy its location or composition. The required location and composition are: ${sceneDescription || place}.`
         : 'Keep the supplied reference composition, camera angle, lighting, perspective and visual style.',
-      mapBase
-        ? 'Keep the full map canvas and all fixed geographic features, but reconstruct clean paper and terrain underneath every removed arrow, person, title card and label. No blank cutout holes or erased smudges may remain.'
+      pathBase
+        ? 'Keep the full canvas and all fixed diagram features, but reconstruct the base underneath every removed path, marker, person, title card and label. No blank cutout holes or erased smudges may remain.'
         : environmentOnly
         ? 'Do not simplify, beautify, modernize, relight or relocate the scene. Do not turn a cold, damaged, smoky or war-torn environment into a sunny, clean or peaceful generic landscape.'
         : 'Reconstruct every area hidden by the removed animation subjects. Keep the storyboard atmosphere and environmental description; the final image must have no text, logo, unexplained holes or subject-shaped shadows.',
@@ -553,7 +571,7 @@ function promptForSlot(db, shot, slot) {
     broken: 'a fully broken settled state with separated readable fragments',
     raised: 'a raised preparation state before contact',
     released: 'a released state after contact',
-    map_marker: 'one iconic full-body ink silhouette designed to appear as a commander marker on a strategic map, matching the selected storyboard reference',
+    map_marker: 'one iconic full-body silhouette designed to appear as a neutral subject marker on the selected map or flat diagram, matching the selected storyboard reference',
   };
   const propSubject = primarySubject.kind === 'prop' || slot.asset_type.includes('prop');
   const styleScope = propSubject
@@ -565,16 +583,32 @@ function promptForSlot(db, shot, slot) {
   const groupSize = Array.isArray(slot.constraints_json?.group_size) ? slot.constraints_json.group_size : null;
   const groupHint = groupSize ? ` Keep the same group of ${groupSize[0]}${groupSize[1] !== groupSize[0] ? ` to ${groupSize[1]}` : ''} subjects across every state.` : '';
   const stateDirection = stateDirections[state] || `a clearly readable ${state} state derived from the storyboard action`;
-  const subjectLine = propSubject
+  const moverDescriptions = {
+    pusher: 'human pushers visibly leaning into and holding the vehicle handles',
+    puller: 'human pullers visibly connected to and pulling the vehicle',
+    draft_animal: 'draft animals visibly harnessed to the vehicle with complete shafts and harness',
+    rider: 'a visible rider correctly seated on and controlling the vehicle',
+    crew: 'visible crew members physically operating and moving the equipment',
+  };
+  const requiredMoverLine = (slot.constraints_json?.required_movers || []).map((mover) => (
+    `at least ${Number(mover.min_visible || 1)} ${moverDescriptions[mover.role] || mover.role}`
+  )).join('; ');
+  const subjectLine = transportUnit
+    ? `one complete ${slot.constraints_json?.vehicle_identity || primarySubject.identity || 'transport vehicle'} transport unit${requiredMoverLine ? ` together with ${requiredMoverLine}` : ''} as one coherent cutout`
+    : propSubject
     ? `${primarySubject.identity || storyboard?.title || 'the required prop'}, isolated as one complete object`
     : `${primarySubject.identity || storyboard?.title || 'the primary storyboard subject'} in ${stateDirection}.${groupHint}`;
-  const exclusions = 'No unrelated characters or props, no support object unless this slot explicitly represents it, no scenery, no ground, no cast shadow, no border, no text, no logo, no collage, no split panel, no duplicate limbs.';
+  const exclusions = transportUnit
+    ? 'Exactly one transport unit per asset. Keep the required people or animals and the vehicle in physical contact. No unmanned moving vehicle, missing harness, detached hands, floating wheels, unrelated bystanders, scenery, ground, cast shadow, border, text, logo, collage or split panel.'
+    : 'No unrelated characters or props, no support object unless this slot explicitly represents it, no scenery, no ground, no cast shadow, no border, no text, no logo, no collage, no split panel, no duplicate limbs.';
   const stateOverride = propSubject ? propStateInstruction(state) : '';
   return [
     'Create one production-ready paper animation cutout asset, not a finished scene.',
     `Subject: ${subjectLine}.`,
     stateOverride ? `STATE OVERRIDE — mandatory: ${stateOverride}` : '',
-    `Show the complete ${propSubject ? 'object' : 'subject'} with a clean separated silhouette. Preserve identity, proportions, facing, palette, mineral-pigment impasto and gongbi linework across all states.`,
+    transportUnit
+      ? 'Show the complete vehicle, every required mover, hands or harness contact, wheels and feet or hooves in one clean separated silhouette. The transport must have an obvious physical cause for its motion.'
+      : `Show the complete ${propSubject ? 'object' : 'subject'} with a clean separated silhouette. Preserve identity, proportions, facing, palette, mineral-pigment impasto and gongbi linework across all states.`,
     'Use a transparent background when the image endpoint supports it. If transparent output is unavailable, place the subject on one perfectly uniform technical chroma-green matte (#00FF00), edge to edge. The matte color is exempt from the project palette and will be removed locally. No gradient, texture, horizon, floor, contact shadow, halo or colored light spill on that matte.',
     exclusions,
     `Story context: ${storyboard?.title || ''}; ${storyboard?.action || storyboard?.description || ''}`,
@@ -591,13 +625,17 @@ function isTransparentBackgroundUnsupported(error) {
     .test(String(error?.message || error || ''));
 }
 
-function createImageGeneration(db, run, shot, slot, provider, prompt, requestFingerprint, referenceImages = []) {
+function createImageGeneration(db, run, shot, slot, provider, prompt, requestFingerprint, referenceImages = [], options = {}) {
   const columns = new Set(db.prepare('PRAGMA table_info(image_generations)').all().map((row) => row.name));
   const values = {
     storyboard_id: sourceService.legacyStoryboardId(shot), paper_storyboard_id: shot.paper_storyboard_id == null ? null : Number(shot.paper_storyboard_id), drama_id: Number(shot.drama_id), provider: provider.provider || 'openai',
     prompt, model: provider.model, frame_type: slot.slot_key, size: '1536x1024', quality: 'high',
     status: 'processing', generation_kind: 'paper_studio_asset', generation_purpose: slot.generation_purpose,
     request_fingerprint: requestFingerprint, reference_images: referenceImages.length ? JSON.stringify(referenceImages) : null,
+    paper_asset_version_id: options.version_id == null ? null : Number(options.version_id),
+    paper_studio_run_id: Number(run.id), paper_studio_shot_id: Number(shot.id), paper_asset_slot_id: Number(slot.id),
+    generation_authorization_id: options.authorization_id == null ? null : Number(options.authorization_id),
+    provider_call_count: 0,
     created_at: nowIso(), updated_at: nowIso(),
   };
   const entries = Object.entries(values).filter(([key]) => columns.has(key));
@@ -605,33 +643,80 @@ function createImageGeneration(db, run, shot, slot, provider, prompt, requestFin
   return Number(result.lastInsertRowid);
 }
 
+function usedImageCount(db, runId) {
+  return Number(db.prepare(
+    `SELECT COUNT(*) AS count
+     FROM image_generations
+     WHERE generation_kind = 'paper_studio_asset'
+       AND paper_studio_run_id = ?
+       AND deleted_at IS NULL
+       AND (
+         status IN ('processing','completed')
+         OR (status = 'failed' AND provider_attempted_at IS NOT NULL)
+       )`,
+  ).get(Number(runId))?.count || 0);
+}
+
+function reserveProviderCall(db, imageGenerationId, maxAttempts) {
+  return db.transaction(() => {
+    const row = db.prepare(
+      `SELECT id, status, provider_call_count, generation_authorization_id, paper_asset_slot_id
+       FROM image_generations WHERE id = ? AND deleted_at IS NULL`,
+    ).get(Number(imageGenerationId));
+    if (!row || !['processing', 'failed'].includes(row.status)) {
+      throw new PaperStudioError(
+        'PAPER_STUDIO_GENERATION_ATTEMPT_STATE_CONFLICT',
+        '图片生成记录当前不能继续调用模型',
+        { image_generation_id: Number(imageGenerationId), status: row?.status || null },
+        409,
+      );
+    }
+    const used = Number(row.provider_call_count || 0);
+    const limit = Math.max(1, Number(maxAttempts || 1));
+    if (used >= limit) {
+      throw new PaperStudioError(
+        'PAPER_STUDIO_GENERATION_AUTHORIZED_CALLS_EXHAUSTED',
+        '当前素材槽位已用完授权的图片模型调用次数',
+        {
+          image_generation_id: Number(imageGenerationId),
+          authorization_id: row.generation_authorization_id == null ? null : Number(row.generation_authorization_id),
+          slot_id: row.paper_asset_slot_id == null ? null : Number(row.paper_asset_slot_id),
+          used_calls: used,
+          max_attempts: limit,
+        },
+        409,
+      );
+    }
+    const now = nowIso();
+    db.prepare(
+      `UPDATE image_generations
+       SET status = 'processing', provider_call_count = provider_call_count + 1,
+           provider_attempted_at = COALESCE(provider_attempted_at, ?), updated_at = ?
+       WHERE id = ?`,
+    ).run(now, now, Number(imageGenerationId));
+    return used + 1;
+  })();
+}
+
+function isTransientProviderFailure(error) {
+  return /(?:502|503|504|timeout|timed out|ECONNRESET|socket hang up|upstream|temporarily unavailable)/i
+    .test(String(error?.message || error || ''));
+}
+
 async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
-  require('./paperGenerationAuthorizationService').assertUsable(db, authorizationId, {
+  const authorization = require('./paperGenerationAuthorizationService').assertUsable(db, authorizationId, {
     runId: run.id,
     shotId: shot.id,
     slotId: slot.id,
   });
   const maxImages = Number(run.budget_json?.max_images || 24);
-  const usedImages = Number(db.prepare(
-    `SELECT COUNT(*) AS count
-     FROM image_generations ig
-     JOIN paper_asset_versions pav ON pav.id = ig.paper_asset_version_id
-     JOIN paper_asset_slots pas ON pas.id = pav.slot_id
-     JOIN paper_source_families psf ON psf.id = pas.family_id
-     JOIN paper_studio_shots pss ON pss.id = psf.shot_id
-     WHERE ig.generation_kind = 'paper_studio_asset' AND pss.run_id = ?
-       AND ig.status IN ('processing','completed')
-       AND ig.deleted_at IS NULL`,
-  ).get(Number(run.id))?.count || 0);
-  if (usedImages >= maxImages) {
-    throw new PaperStudioError('PAPER_STUDIO_IMAGE_BUDGET_EXHAUSTED', '当前生产版本的图片预算已用完', { run_id: Number(run.id), shot_id: Number(shot.id), used_images: usedImages, max_images: maxImages }, 409);
-  }
   const provider = selectedProvider(db, run);
   const prompt = promptForSlot(db, shot, slot);
+  const transportUnit = slot.constraints_json?.ensemble_kind === 'transport_unit';
   const referenceImages = referenceImagesForSlot(db, shot, slot, provider);
   const sourceStoryboard = sourceService.storyboard(db, shot);
   const environmentOnly = Boolean(shot.plan_summary_json?.environment_only || sourceStoryboard?.environment_only);
-  const mapBase = Boolean(shot.plan_summary_json?.map_route || /map-route-reveal/.test(String(shot.plan_summary_json?.catalog_key || '')));
+  const pathBase = actionCatalogService.isPathRevealSummary(shot.plan_summary_json || {});
   const selectedStoryboardReference = sourceService.isPaperShot(shot)
     ? sourceService.referenceMedia(db, shot)
     : null;
@@ -693,14 +778,43 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
     && provider.capabilities?.transparent_background
     && !transparentUnsupportedProviders.has(capabilityKey);
   const backgroundStrategy = requireAlpha ? 'provider_alpha_then_local_matte' : 'opaque';
-  const fingerprint = sha256(canonicalJson({ shot_source: shot.source_revision_hash, slot: slot.slot_key, prompt, provider, reference_images: referenceImages, background_strategy: backgroundStrategy }));
-  const imageGenerationId = createImageGeneration(db, run, shot, slot, provider, prompt, fingerprint, referenceImages);
-  const versionId = insertVersion(db, slot, 'image_api', { provider_config_id: provider.config_id, request_fingerprint: fingerprint, prompt, reference_images: referenceImages });
+  const fingerprint = sha256(canonicalJson({ authorization_id: Number(authorization.id), shot_source: shot.source_revision_hash, slot: slot.slot_key, prompt, provider, reference_images: referenceImages, background_strategy: backgroundStrategy }));
+  const reservation = db.transaction(() => {
+    const existing = db.prepare(
+      `SELECT id, paper_asset_version_id, status
+       FROM image_generations
+       WHERE generation_kind = 'paper_studio_asset'
+         AND paper_studio_run_id = ? AND paper_asset_slot_id = ?
+         AND request_fingerprint = ? AND deleted_at IS NULL
+         AND status IN ('processing','completed')
+       ORDER BY id DESC LIMIT 1`,
+    ).get(Number(run.id), Number(slot.id), fingerprint);
+    if (existing) return { existing };
+    const usedImages = usedImageCount(db, run.id);
+    if (usedImages >= maxImages) {
+      throw new PaperStudioError('PAPER_STUDIO_IMAGE_BUDGET_EXHAUSTED', '当前生产版本的图片预算已用完', { run_id: Number(run.id), shot_id: Number(shot.id), used_images: usedImages, max_images: maxImages }, 409);
+    }
+    const versionId = insertVersion(db, slot, 'image_api', { provider_config_id: provider.config_id, request_fingerprint: fingerprint, prompt, reference_images: referenceImages, authorization_id: Number(authorization.id) });
+    const imageGenerationId = createImageGeneration(db, run, shot, slot, provider, prompt, fingerprint, referenceImages, { version_id: versionId, authorization_id: authorization.id });
+    db.prepare('UPDATE paper_asset_versions SET image_generation_id = ? WHERE id = ?').run(imageGenerationId, versionId);
+    db.prepare("UPDATE paper_asset_slots SET status = 'generating', version = version + 1, updated_at = ? WHERE id = ?")
+      .run(nowIso(), Number(slot.id));
+    return { imageGenerationId, versionId };
+  })();
+  if (reservation.existing) {
+    const existingVersion = reservation.existing.paper_asset_version_id == null ? null : db.prepare(
+      "SELECT id FROM paper_asset_versions WHERE id = ? AND slot_id = ? AND status = 'accepted'",
+    ).get(Number(reservation.existing.paper_asset_version_id), Number(slot.id));
+    if (reservation.existing.status === 'completed' && existingVersion) return Number(existingVersion.id);
+    throw new PaperStudioError(
+      'PAPER_STUDIO_GENERATION_ALREADY_PROCESSING',
+      '当前素材槽位已有相同图片生成请求正在处理',
+      { image_generation_id: Number(reservation.existing.id), slot_id: Number(slot.id) },
+      409,
+    );
+  }
+  const { imageGenerationId, versionId } = reservation;
   const previousVersionId = slot.current_version_id == null ? null : Number(slot.current_version_id);
-  db.prepare("UPDATE paper_asset_slots SET status = 'generating', version = version + 1, updated_at = ? WHERE id = ?")
-    .run(nowIso(), Number(slot.id));
-  db.prepare('UPDATE image_generations SET paper_asset_version_id = ? WHERE id = ?').run(versionId, imageGenerationId);
-  db.prepare('UPDATE paper_asset_versions SET image_generation_id = ? WHERE id = ?').run(imageGenerationId, versionId);
   try {
     const apiOptions = {
       prompt,
@@ -715,8 +829,8 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
       storage_local_path: storageRoot(cfg),
       reference_image_urls: referenceImages,
       system_prompt: referenceImages.map((_, index) => slot.asset_type === 'environment'
-        ? (mapBase
-          ? `Image ${index + 1}${index === 0 ? ' is the selected strategic-map composition and the primary visual authority' : ''}: preserve its complete map geometry, river, bridge, mountains, cities, paper boundary, tabletop framing, palette and camera. Remove all arrows, encirclement marks, people, title cards and readable text so they can be animated independently.`
+        ? (pathBase
+          ? `Image ${index + 1}${index === 0 ? ' is the selected flat-diagram composition and the primary visual authority' : ''}: preserve its complete fixed geometry, landmarks, boundaries, paper framing, palette and camera. Remove all path lines, arrows, changing markers, people, title cards and readable text so they can be animated independently.`
           : slot.constraints_json?.reference_role === 'style_only'
           ? `Image ${index + 1}: STYLE CONTINUITY reference only. Preserve era, weather family, lighting direction, palette, paper texture and rendering medium. Do not copy its place, architecture, subject layout, camera composition or perspective; build the different scene required by environment_description.`
           : environmentOnly
@@ -724,18 +838,42 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
           : `Image ${index + 1}${index === 0 ? ' is the selected storyboard reference and the primary visual authority' : ''}: preserve geography, perspective, era, weather, environmental damage, lighting and style. Remove only characters or hero props explicitly separated into independent animation layers.`)
         : `Image ${index + 1}: identity, historical form, silhouette or same-family pose reference only. Treat its background, lighting and rendering medium as obsolete. Do not copy photography, photorealistic surface rendering or CGI from the reference; redraw the subject from scratch in the mandatory PROJECT VISUAL STYLE and PAPER-ANIMATION MEDIUM.`).join('\n'),
       user_negative_prompt: slot.asset_type === 'environment'
-        ? (mapBase
-          ? 'route arrow, arrowhead, route line, encirclement ring, strategy dot, army marker, commander, person, silhouette, title card, label, readable text, Chinese character, changed geography, changed river, changed city position, changed composition, photorealism, smooth CGI, split panel, collage'
+        ? (pathBase
+          ? 'path arrow, arrowhead, route line, moving marker, subject marker, person, silhouette, title card, label, readable text, changed fixed geometry, changed landmark position, changed composition, photorealism, smooth CGI, split panel, collage'
           : slot.constraints_json?.reference_role === 'style_only'
           ? 'copied reference location, copied reference composition, wrong scene, hybrid indoor-outdoor location, independent foreground character, independent hero prop, subject-shaped hole, changed era, changed weather family, text, logo, split panel, collage'
           : environmentOnly
           ? 'reference drift, changed composition, changed era, changed location, changed weather, changed damage state, sunny generic landscape, clean peaceful beach, modern scenery, cheerful palette, photorealism, smooth CGI, text, logo, split panel, collage'
           : 'independent foreground character, independent hero prop, subject-shaped hole, changed composition, changed era, changed weather, text, logo, split panel, collage')
-        : 'background, scenery, floor, cast shadow, text, logo, split panel, collage, duplicate limbs, cropped body',
+        : transportUnit
+          ? 'unmanned vehicle, self-moving cart, missing pusher, missing puller, missing draft animal, detached hands, broken harness, floating wheel, background, scenery, floor, cast shadow, text, logo, split panel, collage, duplicate limbs, cropped vehicle, cropped operator'
+          : 'background, scenery, floor, cast shadow, text, logo, split panel, collage, duplicate limbs, cropped body',
     };
     let requestedBackground = canRequestTransparent ? 'transparent' : 'opaque';
     let providerTransparencyRejected = false;
     let result;
+    const callProvider = async (options) => {
+      let lastError;
+      while (Number(db.prepare('SELECT provider_call_count FROM image_generations WHERE id = ?').get(imageGenerationId)?.provider_call_count || 0) < Number(authorization.max_attempts || 1)) {
+        const callIndex = reserveProviderCall(db, imageGenerationId, authorization.max_attempts);
+        try {
+          const response = await imageClient.callImageApi(db, log, options);
+          if (response?.error && isTransientProviderFailure(response.error)) throw new Error(response.error);
+          return response;
+        } catch (error) {
+          lastError = error;
+          if (!isTransientProviderFailure(error)) throw error;
+          if (log) log.warn('Paper studio transient image provider failure; retrying authorized slot call', {
+            image_generation_id: imageGenerationId,
+            slot_id: Number(slot.id),
+            call_index: callIndex,
+            max_attempts: Number(authorization.max_attempts || 1),
+            error: error.message,
+          });
+        }
+      }
+      throw lastError || new PaperStudioError('PAPER_STUDIO_GENERATION_AUTHORIZED_CALLS_EXHAUSTED', '当前素材槽位已用完授权的图片模型调用次数', { slot_id: Number(slot.id) }, 409);
+    };
     const retryWithOpaqueMatte = async () => {
       transparentUnsupportedProviders.add(capabilityKey);
       providerTransparencyRejected = true;
@@ -746,10 +884,10 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
         shot_id: Number(shot.id),
         slot_key: slot.slot_key,
       });
-      return imageClient.callImageApi(db, log, { ...apiOptions, background: requestedBackground });
+      return callProvider({ ...apiOptions, background: requestedBackground });
     };
     try {
-      result = await imageClient.callImageApi(db, log, { ...apiOptions, background: requestedBackground });
+      result = await callProvider({ ...apiOptions, background: requestedBackground });
     } catch (error) {
       if (requestedBackground !== 'transparent' || !isTransparentBackgroundUnsupported(error)) throw error;
       result = await retryWithOpaqueMatte();
@@ -775,9 +913,9 @@ async function generateViaApi(db, cfg, log, run, shot, slot, authorizationId) {
       `UPDATE paper_asset_versions SET source_local_path = ?, alpha_local_path = ?, source_hash = ?, alpha_hash = ?,
          processing_json = ?, provenance_json = ?, quality_report_json = ?, status = 'accepted', accepted_at = ? WHERE id = ?`,
     ).run(
-      target.relative,
+      downloaded,
       requireAlpha ? target.relative : null,
-      requireAlpha ? sourceHash : hashFile(target.absolute),
+      sourceHash,
       alphaHash,
       JSON.stringify({
         matte_method: report.matte_method,
@@ -872,7 +1010,7 @@ async function produceSlot(db, cfg, log, run, shot, slot, force, authorizationId
   return { slot_id: Number(slot.id), version_id: Number(versionId), reused: false };
 }
 
-async function generateAssets(db, cfg, log, shotId, body = {}) {
+async function generateMissingSlots(db, cfg, log, shotId, body = {}) {
   revisionService.assertShotCurrent(db, shotId);
   schemaService.assertValid('apiShotAction', body, '生成纸片素材的参数无效');
   const shot = shotService.get(db, shotId);
@@ -958,25 +1096,9 @@ async function generateAssets(db, cfg, log, shotId, body = {}) {
       const force = Boolean(body.force) || Boolean(authorized?.force_regeneration) || (retryForContinuity && Boolean(authorized));
       results.push(await produceSlot(db, cfg, log, run, shot, slot, force, body.authorization_id));
     }
-    for (const family of shot.families) {
-      const missing = db.prepare("SELECT COUNT(*) AS count FROM paper_asset_slots WHERE family_id = ? AND required_for_gate = 1 AND (current_version_id IS NULL OR status != 'ready') AND deleted_at IS NULL").get(Number(family.id));
-      db.prepare("UPDATE paper_source_families SET status = ?, version = version + 1, updated_at = ? WHERE id = ?").run(Number(missing.count) ? 'failed' : 'review', nowIso(), Number(family.id));
-    }
-    const continuity = continuityService.evaluateForShot(db, shot.id);
-    if (!continuity.pass) {
-      throw new PaperStudioError(
-        'PAPER_STUDIO_CONTINUITY_GATE_FAILED',
-        '跨镜头身份连续性未通过；失败角色槽位将在重试时按前序素材重新生成',
-        { shot_id: Number(shot.id), ...continuity },
-        422,
-      );
-    }
-    db.prepare("UPDATE paper_studio_shots SET status = 'asset_review', version = version + 1, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.id));
-    db.prepare("UPDATE paper_studio_runs SET status = 'assets_processing', progress = 38, updated_at = ? WHERE id = ?").run(nowIso(), Number(run.id));
-    db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key IN ('generate_layout_master','generate_required_slots','matte_assets','register_assets')").run(JSON.stringify({ asset_versions: results.map((item) => item.version_id).filter(Boolean), manual_review_required: true }), nowIso(), nowIso(), Number(run.id), Number(shot.id));
+    db.prepare("UPDATE paper_studio_shots SET status = 'asset_pending', attention_required = 'none', version = version + 1, updated_at = ? WHERE id = ?").run(nowIso(), Number(shot.id));
     runAggregateService.sync(db, run.id);
-    require('./paperGenerationAuthorizationService').markConsumedIfFinished(db, body.authorization_id);
-    return { shot: shotService.get(db, shot.id), generated: results, continuity };
+    return { shot: shotService.get(db, shot.id), generated: results };
   } catch (error) {
     const liveRun = db.prepare('SELECT status FROM paper_studio_runs WHERE id = ?').get(Number(run.id));
     const liveShot = db.prepare('SELECT status FROM paper_studio_shots WHERE id = ?').get(Number(shot.id));
@@ -985,20 +1107,304 @@ async function generateAssets(db, cfg, log, shotId, body = {}) {
     const requiredMissing = Number(db.prepare(
       `SELECT COUNT(*) AS count FROM paper_asset_slots pas
        JOIN paper_source_families psf ON psf.id = pas.family_id
-       WHERE psf.shot_id = ? AND pas.required_for_gate = 1
+       WHERE psf.shot_id = ?
+         AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+         AND pas.required_for_gate = 1
          AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL
          AND (pas.current_version_id IS NULL OR pas.status != 'ready')`,
-    ).get(Number(shot.id))?.count || 0);
+    ).get(Number(shot.id), Number(shot.id))?.count || 0);
     const recoverableWithCurrent = requiredMissing === 0;
     db.prepare("UPDATE paper_studio_shots SET status = ?, attention_required = ?, last_error_json = ?, version = version + 1, updated_at = ? WHERE id = ?")
       .run(recoverableWithCurrent ? 'asset_review' : 'asset_failed', recoverableWithCurrent ? 'review_assets' : 'authorize_generation', JSON.stringify(failure), nowIso(), Number(shot.id));
     db.prepare("UPDATE paper_studio_runs SET status = ?, attention_required = ?, last_error_json = ?, updated_at = ? WHERE id = ?")
       .run(recoverableWithCurrent ? 'assets_processing' : 'partial', recoverableWithCurrent ? 'review_assets' : 'authorize_generation', JSON.stringify(failure), nowIso(), Number(run.id));
-    db.prepare("UPDATE paper_job_steps SET status = 'failed_retryable', error_json = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key IN ('generate_layout_master','generate_required_slots','matte_assets','register_assets','asset_gate') AND status != 'completed'").run(JSON.stringify(failure), nowIso(), Number(run.id), Number(shot.id));
     runAggregateService.sync(db, run.id);
-    require('./paperGenerationAuthorizationService').markConsumedIfFinished(db, body.authorization_id);
     throw error;
   }
+}
+
+function currentAssetVersionRows(db, shotId) {
+  return db.prepare(
+    `SELECT pav.*, pas.id AS slot_id, pas.slot_key, pas.asset_type, pas.required_for_gate,
+            pas.constraints_json, psf.id AS family_id
+     FROM paper_asset_slots pas
+     JOIN paper_source_families psf ON psf.id = pas.family_id
+     JOIN paper_asset_versions pav ON pav.id = pas.current_version_id
+     WHERE psf.shot_id = ?
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+       AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL
+     ORDER BY psf.id, pas.id`,
+  ).all(Number(shotId), Number(shotId)).map((row) => ({
+    ...row,
+    slot_id: Number(row.slot_id),
+    family_id: Number(row.family_id),
+    required_for_gate: Boolean(row.required_for_gate),
+    constraints_json: parseJson(row.constraints_json, {}),
+  }));
+}
+
+function assertLocalAssetStage(db, shotId, body, label) {
+  revisionService.assertShotCurrent(db, shotId);
+  schemaService.assertValid('apiShotAction', body, `${label}的参数无效`);
+  const shot = shotService.get(db, shotId);
+  assertExpectedVersion(shot.version, body.expected_version, '纸片动画镜头');
+  if (!['asset_pending', 'asset_failed', 'asset_review'].includes(shot.status)) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_SHOT_STATE_CONFLICT',
+      `当前镜头状态不允许${label}`,
+      { shot_id: Number(shot.id), status: shot.status },
+      409,
+    );
+  }
+  return shot;
+}
+
+async function mattePendingVersions(db, cfg, log, shotId, body = {}) {
+  const shot = assertLocalAssetStage(db, shotId, body, '处理素材透明通道');
+  const rows = currentAssetVersionRows(db, shot.id);
+  const processed = [];
+  const skipped = [];
+  for (const row of rows) {
+    const quality = parseJson(row.quality_report_json, {});
+    const requireAlpha = row.asset_type !== 'environment';
+    const outputRel = requireAlpha ? row.alpha_local_path : row.source_local_path;
+    const outputExists = outputRel && fs.existsSync(safeStorageFile(cfg, outputRel));
+    if (row.status === 'accepted' && quality.pass === true && quality.matte_method && outputExists) {
+      skipped.push(Number(row.id));
+      continue;
+    }
+    const generation = row.image_generation_id == null ? null : db.prepare(
+      'SELECT local_path FROM image_generations WHERE id = ? AND deleted_at IS NULL',
+    ).get(Number(row.image_generation_id));
+    const provenance = parseJson(row.provenance_json, {});
+    const sourceRel = provenance.raw_source_local_path || generation?.local_path || row.source_local_path;
+    if (!sourceRel) {
+      throw new PaperStudioError(
+        'PAPER_STUDIO_ASSET_SOURCE_MISSING',
+        '素材透明通道处理缺少原始图片',
+        { asset_version_id: Number(row.id), slot_id: Number(row.slot_id) },
+        422,
+      );
+    }
+    const sourceAbsolute = safeStorageFile(cfg, sourceRel);
+    if (!fs.existsSync(sourceAbsolute)) {
+      throw new PaperStudioError(
+        'PAPER_STUDIO_ASSET_SOURCE_MISSING',
+        '素材透明通道处理所需的原始图片不存在',
+        { asset_version_id: Number(row.id), local_path: sourceRel },
+        422,
+      );
+    }
+    const target = ensureVersionPath(db, cfg, shot, Number(row.id), row.slot_key);
+    const sameFile = path.resolve(sourceAbsolute) === path.resolve(target.absolute);
+    const outputAbsolute = sameFile ? `${target.absolute}.matte-${process.pid}-${Date.now()}.png` : target.absolute;
+    let report;
+    try {
+      report = await alphaReport(sourceAbsolute, outputAbsolute, { requireAlpha });
+      if (!report.pass) {
+        throw new PaperStudioError(
+          'PAPER_STUDIO_ASSET_GATE_FAILED',
+          '素材未通过透明通道技术门禁',
+          { asset_version_id: Number(row.id), slot_id: Number(row.slot_id), report },
+          422,
+        );
+      }
+      if (sameFile) fs.renameSync(outputAbsolute, target.absolute);
+    } catch (error) {
+      if (sameFile && fs.existsSync(outputAbsolute)) fs.unlinkSync(outputAbsolute);
+      throw error;
+    }
+    const sourceHash = hashFile(sourceAbsolute);
+    const outputHash = hashFile(target.absolute);
+    db.prepare(
+      `UPDATE paper_asset_versions
+       SET source_local_path = ?, alpha_local_path = ?, source_hash = ?, alpha_hash = ?,
+           processing_json = ?, quality_report_json = ?, status = 'accepted', accepted_at = COALESCE(accepted_at, ?)
+       WHERE id = ?`,
+    ).run(
+      sourceRel,
+      requireAlpha ? target.relative : null,
+      sourceHash,
+      requireAlpha ? outputHash : null,
+      JSON.stringify({ ...parseJson(row.processing_json, {}), matte_method: report.matte_method }),
+      JSON.stringify(report),
+      nowIso(),
+      Number(row.id),
+    );
+    db.prepare("UPDATE paper_asset_slots SET status = 'ready', version = version + 1, updated_at = ? WHERE id = ?")
+      .run(nowIso(), Number(row.slot_id));
+    processed.push(Number(row.id));
+  }
+  const now = nowIso();
+  db.prepare("UPDATE paper_studio_shots SET status = 'asset_pending', version = version + 1, updated_at = ? WHERE id = ?")
+    .run(now, Number(shot.id));
+  runAggregateService.sync(db, shot.run_id);
+  if (log) log.info('Paper studio asset matte stage completed', { shot_id: Number(shot.id), processed, skipped });
+  return { shot: shotService.get(db, shot.id), processed_asset_version_ids: processed, skipped_asset_version_ids: skipped };
+}
+
+async function registerVersions(db, cfg, log, shotId, body = {}) {
+  const shot = assertLocalAssetStage(db, shotId, body, '注册素材接触点');
+  const spatialContractService = require('./paperSpatialContractService');
+  const rows = currentAssetVersionRows(db, shot.id);
+  const registered = [];
+  for (const row of rows) {
+    if (row.status !== 'accepted') continue;
+    const registration = spatialContractService.rawRegistration(row);
+    if (!registration) continue;
+    db.prepare('UPDATE paper_asset_versions SET registration_json = ? WHERE id = ?')
+      .run(JSON.stringify(registration), Number(row.id));
+    registered.push(Number(row.id));
+  }
+  const now = nowIso();
+  db.prepare("UPDATE paper_studio_shots SET status = 'asset_pending', version = version + 1, updated_at = ? WHERE id = ?")
+    .run(now, Number(shot.id));
+  runAggregateService.sync(db, shot.run_id);
+  if (log) log.info('Paper studio asset registration stage completed', { shot_id: Number(shot.id), registered });
+  return { shot: shotService.get(db, shot.id), registered_asset_version_ids: registered };
+}
+
+async function runTechnicalAssetGate(db, cfg, log, shotId, body = {}) {
+  const shot = assertLocalAssetStage(db, shotId, body, '执行素材技术门禁');
+  const rows = currentAssetVersionRows(db, shot.id);
+  const missing = db.prepare(
+    `SELECT pas.id, pas.slot_key
+     FROM paper_asset_slots pas
+     JOIN paper_source_families psf ON psf.id = pas.family_id
+     LEFT JOIN paper_asset_versions pav ON pav.id = pas.current_version_id
+     WHERE psf.shot_id = ?
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+       AND pas.required_for_gate = 1
+       AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL
+       AND (pav.id IS NULL OR pav.status != 'accepted')`,
+  ).all(Number(shot.id), Number(shot.id));
+  const invalid = rows.filter((row) => {
+    const quality = parseJson(row.quality_report_json, {});
+    return row.required_for_gate && quality.pass !== true;
+  });
+  if (missing.length || invalid.length) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_ASSET_GATE_FAILED',
+      '部分必需素材尚未通过透明通道或尺寸技术门禁',
+      {
+        shot_id: Number(shot.id),
+        missing_slot_ids: missing.map((row) => Number(row.id)),
+        invalid_asset_version_ids: invalid.map((row) => Number(row.id)),
+      },
+      422,
+    );
+  }
+  const continuity = continuityService.evaluateForShot(db, shot.id);
+  if (!continuity.pass) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_CONTINUITY_GATE_FAILED',
+      '跨镜头身份连续性未通过；失败角色槽位将在重试时按前序素材重新生成',
+      { shot_id: Number(shot.id), ...continuity },
+      422,
+    );
+  }
+  const now = nowIso();
+  for (const family of shot.families) {
+    const familyMissing = db.prepare(
+      "SELECT COUNT(*) AS count FROM paper_asset_slots WHERE family_id = ? AND required_for_gate = 1 AND (current_version_id IS NULL OR status != 'ready') AND deleted_at IS NULL",
+    ).get(Number(family.id));
+    db.prepare("UPDATE paper_source_families SET status = ?, version = version + 1, updated_at = ? WHERE id = ?")
+      .run(Number(familyMissing.count) ? 'failed' : 'review', now, Number(family.id));
+  }
+  db.prepare("UPDATE paper_studio_shots SET status = 'asset_review', attention_required = 'review_assets', last_error_json = '{}', version = version + 1, updated_at = ? WHERE id = ?")
+    .run(now, Number(shot.id));
+  db.prepare("UPDATE paper_studio_runs SET status = 'assets_processing', progress = 38, attention_required = 'review_assets', updated_at = ? WHERE id = ?")
+    .run(now, Number(shot.run_id));
+  runAggregateService.sync(db, shot.run_id);
+  if (log) log.info('Paper studio technical asset gate passed', { shot_id: Number(shot.id), asset_version_ids: rows.map((row) => Number(row.id)) });
+  return { shot: shotService.get(db, shot.id), continuity, manual_review_required: true };
+}
+
+async function generateAssets(db, cfg, log, shotId, body = {}) {
+  let generated;
+  try {
+    generated = await generateMissingSlots(db, cfg, log, shotId, body);
+    let shot = shotService.get(db, shotId);
+    const matte = await mattePendingVersions(db, cfg, log, shotId, {
+      request_id: body.request_id,
+      expected_version: shot.version,
+    });
+    shot = shotService.get(db, shotId);
+    const registration = await registerVersions(db, cfg, log, shotId, {
+      request_id: body.request_id,
+      expected_version: shot.version,
+    });
+    shot = shotService.get(db, shotId);
+    const gate = await runTechnicalAssetGate(db, cfg, log, shotId, {
+      request_id: body.request_id,
+      expected_version: shot.version,
+    });
+    const now = nowIso();
+    const result = {
+      asset_versions: generated.generated.map((item) => item.version_id).filter(Boolean),
+      manual_review_required: true,
+    };
+    db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ? AND step_key IN ('generate_layout_master','generate_required_slots','matte_assets','register_assets','technical_asset_gate')")
+      .run(JSON.stringify(result), now, now, Number(gate.shot.run_id), Number(gate.shot.id), Number(gate.shot.current_plan_revision_id));
+    require('./paperGenerationAuthorizationService').markConsumedIfFinished(db, body.authorization_id);
+    return { shot: gate.shot, generated: generated.generated, matte, registration, continuity: gate.continuity };
+  } catch (error) {
+    const row = db.prepare('SELECT run_id FROM paper_studio_shots WHERE id = ?').get(Number(shotId));
+    if (row) {
+      const failure = { code: error.code || 'PAPER_STUDIO_ASSET_GENERATION_FAILED', message: error.message, at: nowIso() };
+      db.prepare("UPDATE paper_job_steps SET status = 'failed_retryable', error_json = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?) AND step_key IN ('generate_layout_master','generate_required_slots','matte_assets','register_assets','technical_asset_gate') AND status != 'completed'")
+        .run(JSON.stringify(failure), nowIso(), Number(row.run_id), Number(shotId), Number(shotId));
+    }
+    if (body.authorization_id) require('./paperGenerationAuthorizationService').markConsumedIfFinished(db, body.authorization_id);
+    throw error;
+  }
+}
+
+async function materializeZeroCallSlots(db, cfg, log, shotId, body = {}) {
+  revisionService.assertShotCurrent(db, shotId);
+  const shot = shotService.get(db, shotId);
+  assertExpectedVersion(shot.version, body.expected_version, '纸片动画镜头');
+  if (!['plan_confirmed', 'asset_failed', 'asset_review'].includes(shot.status)) {
+    throw new PaperStudioError('PAPER_STUDIO_SHOT_STATE_CONFLICT', '当前镜头状态不允许应用零调用素材', { shot_id: Number(shot.id), status: shot.status }, 409);
+  }
+  const run = runService.get(db, shot.run_id);
+  const slots = shot.families.flatMap((family) => family.slots);
+  const missingPaid = slots.filter((slot) => {
+    if (slot.current_version?.status === 'accepted') return false;
+    return !(slot.asset_type === 'occlusion-mask'
+      || slot.constraints_json?.derivation === 'registered_alpha_band'
+      || isProceduralStateFallback(slot)
+      || Boolean(sourceForSlot(db, shot, slot)));
+  });
+  if (missingPaid.length) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_ZERO_CALL_SCOPE_INCOMPLETE',
+      '仍有素材需要图片 API，零调用应用已停止；请查看差异报价',
+      { slot_ids: missingPaid.map((slot) => Number(slot.id)) },
+      409,
+    );
+  }
+  db.prepare("UPDATE paper_studio_shots SET status = 'asset_pending', attention_required = 'none', version = version + 1, updated_at = ? WHERE id = ?")
+    .run(nowIso(), Number(shot.id));
+  const produced = [];
+  for (const slot of slots) {
+    if (slot.current_version?.status === 'accepted') {
+      produced.push({ slot_id: Number(slot.id), version_id: Number(slot.current_version.id), reused: true });
+    } else {
+      produced.push(await produceSlot(db, cfg, log, run, shot, slot, false, null));
+    }
+  }
+  let current = shotService.get(db, shot.id);
+  const matte = await mattePendingVersions(db, cfg, log, shot.id, { request_id: body.request_id, expected_version: current.version });
+  current = shotService.get(db, shot.id);
+  const registration = await registerVersions(db, cfg, log, shot.id, { request_id: body.request_id, expected_version: current.version });
+  current = shotService.get(db, shot.id);
+  const gate = await runTechnicalAssetGate(db, cfg, log, shot.id, { request_id: body.request_id, expected_version: current.version });
+  const now = nowIso();
+  db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ? AND step_key IN ('generate_layout_master','generate_required_slots','matte_assets','register_assets','technical_asset_gate')")
+    .run(JSON.stringify({ zero_call: true, asset_versions: produced.map((item) => item.version_id).filter(Boolean) }), now, now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id));
+  if (log) log.info('Paper studio zero-call slots materialized', { shot_id: Number(shot.id), slot_count: produced.length });
+  return { shot: gate.shot, produced, matte, registration, continuity: gate.continuity };
 }
 
 async function rematteAssets(db, cfg, log, shotId, body = {}) {
@@ -1027,8 +1433,10 @@ async function rematteAssets(db, cfg, log, shotId, body = {}) {
      JOIN paper_source_families psf ON psf.id = pas.family_id
      JOIN paper_asset_versions pav ON pav.id = pas.current_version_id
      LEFT JOIN image_generations ig ON ig.id = pav.image_generation_id
-     WHERE psf.shot_id = ? AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL`,
-  ).all(Number(shot.id)).map((row) => ({ ...row, constraints_json: parseJson(row.constraints_json, {}) }));
+     WHERE psf.shot_id = ?
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+       AND pas.deleted_at IS NULL AND psf.deleted_at IS NULL`,
+  ).all(Number(shot.id), Number(shot.id)).map((row) => ({ ...row, constraints_json: parseJson(row.constraints_json, {}) }));
   const wanted = new Set(body.asset_version_ids.map(Number));
   const selected = currentRows.filter((row) => wanted.has(Number(row.current_version_id)));
   if (selected.length !== wanted.size) {
@@ -1110,7 +1518,7 @@ async function rematteAssets(db, cfg, log, shotId, body = {}) {
     );
     for (const item of prepared) {
       updateVersion.run(
-        item.target.relative,
+        item.sourceRel,
         item.target.relative,
         item.sourceHash,
         item.alphaHash,
@@ -1139,8 +1547,8 @@ async function rematteAssets(db, cfg, log, shotId, body = {}) {
       .run(Number(shot.id));
     db.prepare("UPDATE paper_proof_runs SET status = 'superseded' WHERE shot_id = ? AND status IN ('pending','running','passed','completed')")
       .run(Number(shot.id));
-    db.prepare("UPDATE paper_motion_plans SET status = 'draft', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ?")
-      .run(now, Number(shot.id));
+    db.prepare("UPDATE paper_motion_plans SET status = 'draft', compiled_tracks_json = '{}', version = version + 1, updated_at = ? WHERE shot_id = ? AND plan_revision_id = ?")
+      .run(now, Number(shot.id), Number(shot.current_plan_revision_id));
     db.prepare(`UPDATE paper_studio_shots
       SET status = 'asset_review', current_snapshot_id = NULL, approved_snapshot_id = NULL,
           last_error_json = '{}', version = version + 1, updated_at = ? WHERE id = ?`)
@@ -1148,12 +1556,12 @@ async function rematteAssets(db, cfg, log, shotId, body = {}) {
     db.prepare(`UPDATE paper_job_steps
       SET status = 'queued', result_json = '{}', error_json = '{}', lease_owner = NULL,
           lease_expires_at = NULL, started_at = NULL, completed_at = NULL, updated_at = ?
-      WHERE run_id = ? AND shot_id = ? AND step_key IN
+      WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ? AND step_key IN
         ('asset_gate','plan_motion','compile_snapshot','render_proof','dynamic_gate','render_preview',
          'wait_preview_approval','render_formal','publish_video')`)
-      .run(now, Number(shot.run_id), Number(shot.id));
-    db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND step_key IN ('matte_assets','register_assets')")
-      .run(JSON.stringify({ rematted_asset_version_ids: prepared.map((item) => Number(item.versionId)), algorithm_version: 'edge-defringe-v2' }), now, now, Number(shot.run_id), Number(shot.id));
+      .run(now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id));
+    db.prepare("UPDATE paper_job_steps SET status = 'completed', result_json = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND shot_id = ? AND plan_revision_id = ? AND step_key IN ('matte_assets','register_assets')")
+      .run(JSON.stringify({ rematted_asset_version_ids: prepared.map((item) => Number(item.versionId)), algorithm_version: 'edge-defringe-v2' }), now, now, Number(shot.run_id), Number(shot.id), Number(shot.current_plan_revision_id));
     db.prepare("UPDATE paper_studio_runs SET status = 'assets_processing', progress = 38, last_error_json = '{}', version = version + 1, updated_at = ? WHERE id = ?")
       .run(now, Number(shot.run_id));
   });
@@ -1192,6 +1600,8 @@ module.exports = {
   safeStorageFile,
   alphaReport,
   sourceForSlot,
+  usedImageCount,
+  reserveProviderCall,
   referenceImagesForSlot,
   styleLockForSlot,
   propStateInstruction,
@@ -1200,6 +1610,11 @@ module.exports = {
   isProceduralStateFallback,
   ensureProceduralStateFallbacks,
   deriveOccluder,
+  generateMissingSlots,
+  mattePendingVersions,
+  registerVersions,
+  runTechnicalAssetGate,
   generateAssets,
+  materializeZeroCallSlots,
   rematteAssets,
 };

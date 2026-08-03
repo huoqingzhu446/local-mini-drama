@@ -159,6 +159,7 @@
 
 <script setup>
 import { computed, reactive, watch } from 'vue'
+import { audioStatusLabel } from '@/utils/paperStudioLabels'
 
 const props = defineProps({
   storyboard: { type: Object, required: true },
@@ -285,7 +286,7 @@ function sourceLabel(value) {
 }
 
 function statusLabel(value) {
-  return { ready: '当前/可用', superseded: '历史版本', stale: '文本已变化', failed: '失败' }[value] || value
+  return audioStatusLabel(value)
 }
 
 function formatDuration(milliseconds) {

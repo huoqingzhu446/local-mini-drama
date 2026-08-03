@@ -25,6 +25,8 @@
 </template>
 
 <script setup>
+import { episodeStatusLabel } from '@/utils/paperStudioLabels'
+
 defineProps({
   episodes: { type: Array, default: () => [] },
   selectedId: { type: [Number, String], default: null },
@@ -32,7 +34,7 @@ defineProps({
 defineEmits(['select', 'create'])
 
 function statusLabel(status) {
-  return { draft: '草稿', merging: '合并中', merge_failed: '合并失败', published: '已发布', archived: '已归档' }[status] || status
+  return episodeStatusLabel(status)
 }
 </script>
 

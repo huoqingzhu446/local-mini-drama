@@ -3,7 +3,10 @@ const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStu
 const { nowIso, parseJson } = require('./paperStudioUtils');
 
 const RESTART_MESSAGE = '服务重启时纸片任务仍在执行；为避免重复计费，已停止自动重试';
-const LOCAL_RESTART_STEPS = new Set(['plan_motion', 'render_proof', 'render_preview', 'render_formal', 'publish_video']);
+const LOCAL_RESTART_STEPS = new Set([
+  'matte_assets', 'register_assets', 'technical_asset_gate',
+  'plan_motion', 'render_proof', 'render_preview', 'render_formal', 'publish_video',
+]);
 const LOCAL_STEP_STATES = Object.freeze({
   plan_motion: new Set(['asset_ready', 'motion_failed']),
   render_proof: new Set(['motion_ready', 'proof_failed']),
@@ -26,7 +29,7 @@ function recoverOnStartup(db, log) {
       .run(interruptedRender, now);
   }
   const orphanLocalVideos = db.prepare(
-    `SELECT vg.id, pss.run_id
+    `SELECT vg.id, pss.id AS shot_id, pss.run_id, pss.status AS shot_status
      FROM video_generations vg
      JOIN paper_studio_shots pss ON pss.id = vg.paper_studio_shot_id
      WHERE vg.generation_kind = 'paper_studio' AND vg.status = 'processing'
@@ -35,6 +38,13 @@ function recoverOnStartup(db, log) {
   for (const video of orphanLocalVideos) {
     db.prepare("UPDATE video_generations SET status = 'failed', error_msg = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = 'processing'")
       .run('本地正式渲染在服务重启时中断；可从已批准 snapshot 安全重渲染', now, now, Number(video.id));
+    if (video.shot_status === 'rendering') {
+      db.prepare(
+        `UPDATE paper_studio_shots
+         SET status = 'render_failed', last_error_json = ?, version = version + 1, updated_at = ?
+         WHERE id = ? AND status = 'rendering'`,
+      ).run(interruptedRender, now, Number(video.shot_id));
+    }
   }
   const running = db.prepare(
     `SELECT pjs.*, pss.status AS shot_status
@@ -61,6 +71,14 @@ function recoverOnStartup(db, log) {
     db.prepare("UPDATE paper_job_steps SET status = 'blocked_user_authorization', authorization_id = NULL, blocked_reason = 'restart_reauthorization_required', user_visible_status = 'waiting_for_authorization', error_json = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE authorization_id = ? AND status = 'queued'")
       .run(JSON.stringify(error), now, Number(authorization.id));
     if (authorizationShotIds.length) {
+      db.prepare(
+        `UPDATE paper_job_steps
+         SET status = 'blocked_user_authorization', authorization_id = NULL,
+             blocked_reason = 'restart_reauthorization_required', user_visible_status = 'waiting_for_authorization',
+             result_json = '{}', completed_at = NULL, error_json = ?, updated_at = ?
+         WHERE run_id = ? AND shot_id IN (${authorizationShotIds.map(() => '?').join(',')})
+           AND step_key = 'generate_layout_master'`,
+      ).run(JSON.stringify(error), now, Number(authorization.run_id), ...authorizationShotIds);
       db.prepare("UPDATE paper_studio_shots SET attention_required = 'authorize_generation', last_error_json = ?, version = version + 1, updated_at = ? WHERE run_id = ? AND id IN (" + authorizationShotIds.map(() => '?').join(',') + ")")
         .run(JSON.stringify(error), now, Number(authorization.run_id), ...authorizationShotIds);
     }
@@ -92,7 +110,7 @@ function recoverOnStartup(db, log) {
         .run(now, Number(step.id));
       requeued += 1;
     } else if (Number(step.attempt || 1) < Number(step.max_attempts || 2)) {
-      if (step.step_key === 'generate_layout_master') {
+      if (step.step_key === 'generate_required_slots') {
         const error = { code: 'PAPER_STUDIO_GENERATION_REAUTHORIZATION_REQUIRED', message: '服务重启后不会自动恢复付费图片任务，请重新查看费用并授权', step_key: step.step_key, at: now };
         db.prepare("UPDATE paper_job_steps SET status = 'blocked_user_authorization', authorization_id = NULL, blocked_reason = 'restart_reauthorization_required', user_visible_status = 'waiting_for_authorization', lease_owner = NULL, lease_expires_at = NULL, error_json = ?, updated_at = ? WHERE id = ?")
           .run(JSON.stringify(error), now, Number(step.id));
@@ -125,6 +143,30 @@ function recoverOnStartup(db, log) {
     requeued += 1;
   }
 
+  const strandedRenderShots = db.prepare(
+    `SELECT pss.id, pss.run_id
+     FROM paper_studio_shots pss
+     WHERE pss.status = 'rendering' AND pss.deleted_at IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM video_generations vg
+         WHERE vg.paper_studio_shot_id = pss.id AND vg.generation_kind = 'paper_studio'
+           AND vg.status = 'processing' AND vg.deleted_at IS NULL
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM paper_job_steps pjs
+         WHERE pjs.shot_id = pss.id AND pjs.plan_revision_id = pss.current_plan_revision_id
+           AND pjs.step_key = 'render_formal' AND pjs.status = 'running'
+       )`,
+  ).all();
+  for (const shot of strandedRenderShots) {
+    db.prepare(
+      `UPDATE paper_studio_shots
+       SET status = 'render_failed', last_error_json = ?, version = version + 1, updated_at = ?
+       WHERE id = ? AND status = 'rendering'`,
+    ).run(interruptedRender, now, Number(shot.id));
+    affectedRuns.add(Number(shot.run_id));
+  }
+
   orphanProofRuns.forEach((row) => affectedRuns.add(Number(row.run_id)));
   orphanLocalVideos.forEach((row) => affectedRuns.add(Number(row.run_id)));
 
@@ -136,7 +178,7 @@ function recoverOnStartup(db, log) {
   for (const shot of orphanShots) {
     const error = { code: 'PAPER_STUDIO_ASSET_WORK_INTERRUPTED', message: RESTART_MESSAGE, at: now };
     db.prepare("UPDATE paper_studio_shots SET status = 'asset_failed', last_error_json = ?, version = version + 1, updated_at = ? WHERE id = ?").run(JSON.stringify(error), now, Number(shot.id));
-    db.prepare("UPDATE paper_job_steps SET status = CASE WHEN step_key = 'generate_layout_master' THEN 'blocked_user_authorization' ELSE 'failed_retryable' END, authorization_id = CASE WHEN step_key = 'generate_layout_master' THEN NULL ELSE authorization_id END, blocked_reason = CASE WHEN step_key = 'generate_layout_master' THEN 'restart_reauthorization_required' ELSE blocked_reason END, error_json = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE shot_id = ? AND status IN ('queued','running') AND step_key IN ('generate_layout_master','generate_required_slots','matte_assets','register_assets','asset_gate')").run(JSON.stringify(error), now, Number(shot.id));
+    db.prepare("UPDATE paper_job_steps SET status = CASE WHEN step_key = 'generate_required_slots' THEN 'blocked_user_authorization' ELSE 'failed_retryable' END, authorization_id = CASE WHEN step_key = 'generate_required_slots' THEN NULL ELSE authorization_id END, blocked_reason = CASE WHEN step_key = 'generate_required_slots' THEN 'restart_reauthorization_required' ELSE blocked_reason END, error_json = ?, lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE shot_id = ? AND status IN ('queued','running') AND step_key IN ('generate_required_slots','matte_assets','register_assets','technical_asset_gate')").run(JSON.stringify(error), now, Number(shot.id));
     affectedRuns.add(Number(shot.run_id));
     blocked += 1;
   }
@@ -164,13 +206,14 @@ function recoverOnStartup(db, log) {
     stalePlans += 1;
   }
   affectedRuns.forEach((runId) => aggregateService.sync(db, runId));
-  if ((running.length || orphanShots.length || stalePlans || orphanProofRuns.length || orphanLocalVideos.length || strandedLocalSteps.length) && log) {
+  if ((running.length || orphanShots.length || stalePlans || orphanProofRuns.length || orphanLocalVideos.length || strandedLocalSteps.length || strandedRenderShots.length) && log) {
     log.warn('Paper studio startup recovery completed', {
       running_steps: running.length,
       orphan_shots: orphanShots.length,
       orphan_proof_runs: orphanProofRuns.length,
       orphan_local_videos: orphanLocalVideos.length,
       stranded_local_steps: strandedLocalSteps.length,
+      stranded_render_shots: strandedRenderShots.length,
       stale_plans: stalePlans,
       requeued,
       blocked,
@@ -184,6 +227,7 @@ function recoverOnStartup(db, log) {
     orphan_proof_runs: orphanProofRuns.length,
     orphan_local_videos: orphanLocalVideos.length,
     stranded_local_steps: strandedLocalSteps.length,
+    stranded_render_shots: strandedRenderShots.length,
     stale_plans: stalePlans,
     requeued,
     blocked,

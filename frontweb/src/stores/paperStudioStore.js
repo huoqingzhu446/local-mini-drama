@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import { dramaAPI } from '@/api/drama'
 import { paperStudioAPI } from '@/api/paperStudio'
@@ -17,6 +17,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
   const project = ref(null)
   const runs = ref([])
   const providers = ref([])
+  const actions = ref([])
   const paperEpisodes = ref([])
   const paperStoryboards = ref([])
   const episodeMerges = ref([])
@@ -52,6 +53,17 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
   const acting = ref(false)
   const authoring = ref(false)
   const error = ref(null)
+  const errorContext = ref(null)
+
+  watch(error, (message) => {
+    if (!message) errorContext.value = null
+  }, { flush: 'sync' })
+
+  function captureErrorContext(cause) {
+    const code = cause?.apiCode || cause?.code || null
+    const details = cause?.apiDetails || cause?.details || null
+    errorContext.value = code || details ? { code, details } : null
+  }
 
   const episodes = computed(() => paperEpisodes.value)
   const legacyEpisodes = computed(() => drama.value?.episodes || [])
@@ -216,14 +228,16 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     loading.value = true
     error.value = null
     try {
-      const [dramaResult, doctorResult, providerResult] = await Promise.all([
+      const [dramaResult, doctorResult, providerResult, actionResult] = await Promise.all([
         dramaAPI.get(dramaId),
         paperStudioAPI.doctor(),
         paperStudioAPI.listProviders(),
+        paperStudioAPI.listActions(),
       ])
       drama.value = dramaResult
       doctor.value = doctorResult
       providers.value = providerResult.providers || []
+      actions.value = actionResult.actions || []
       await ensureProject(dramaId)
       await Promise.all([loadPaperEpisodes(), loadRuns(), loadLibrary()])
       const requestedEpisode = Number(options.episodeId)
@@ -346,22 +360,6 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     } catch (cause) {
       error.value = cause.message || '创建示例草稿失败'
       throw cause
-    } finally {
-      authoring.value = false
-    }
-  }
-
-  async function updatePaperEpisode(payload = {}) {
-    if (!currentEpisode.value || authoring.value) return null
-    authoring.value = true
-    try {
-      const response = await paperStudioAPI.updatePaperEpisode(currentEpisode.value.id, {
-        request_id: requestId(),
-        expected_version: Number(currentEpisode.value.version),
-        ...payload,
-      })
-      await loadPaperEpisodes(response.episode.id)
-      return response.episode
     } finally {
       authoring.value = false
     }
@@ -617,6 +615,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
       const response = await paperStudioAPI.generateStoryboardsFromScript(selectedEpisodeId.value, {
         request_id: requestId(),
         ...(params.script_version_id ? { script_version_id: Number(params.script_version_id) } : {}),
+        ...(params.generation_mode ? { generation_mode: params.generation_mode } : {}),
         ...(params.target_shot_count ? { target_shot_count: Number(params.target_shot_count) } : {}),
       })
       storyboardDraft.value = response
@@ -1031,17 +1030,31 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     const previousDeliverySignature = JSON.stringify((currentRun.value.shots || []).map((shot) => [
       shot.id, shot.status, shot.published_video_generation_id,
     ]))
+    const previousRunSignature = JSON.stringify([
+      currentRun.value.version, currentRun.value.status, currentRun.value.progress, currentRun.value.attention_required,
+    ])
     const response = await paperStudioAPI.getRun(runId)
     const nextRun = response.run
     const preferred = nextRun?.shots?.find((shot) => Number(shot.id) === shotId)
       || nextRun?.shots?.[0]
       || null
     let nextShot = preferred
-    if (preferred?.id) {
+    const previousShotSignature = JSON.stringify([
+      currentShot.value?.id, currentShot.value?.status, currentShot.value?.version,
+      currentShot.value?.published_video_generation_id,
+    ])
+    const preferredShotSignature = JSON.stringify([
+      preferred?.id, preferred?.status, preferred?.version, preferred?.published_video_generation_id,
+    ])
+    if (preferred?.id && previousShotSignature !== preferredShotSignature) {
       const detail = await paperStudioAPI.getShot(preferred.id)
       nextShot = detail.shot
       const index = nextRun.shots.findIndex((shot) => Number(shot.id) === Number(preferred.id))
       if (index >= 0) nextRun.shots[index] = detail.shot
+    } else if (preferred?.id && Number(currentShot.value?.id) === Number(preferred.id)) {
+      nextShot = currentShot.value
+      const index = nextRun.shots.findIndex((shot) => Number(shot.id) === Number(preferred.id))
+      if (index >= 0) nextRun.shots[index] = currentShot.value
     }
     if (Number(currentRun.value?.id) !== runId) return currentRun.value
     if (Number(currentShot.value?.id || 0) !== shotId) {
@@ -1055,7 +1068,12 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     const nextDeliverySignature = JSON.stringify((nextRun.shots || []).map((shot) => [
       shot.id, shot.status, shot.published_video_generation_id,
     ]))
-    await Promise.all([loadRuns({ taskCenterSilent: true }), loadRunEvents()])
+    const nextRunSignature = JSON.stringify([
+      nextRun.version, nextRun.status, nextRun.progress, nextRun.attention_required,
+    ])
+    if (previousRunSignature !== nextRunSignature) {
+      await Promise.all([loadRuns({ taskCenterSilent: true }), loadRunEvents()])
+    }
     if (previousDeliverySignature !== nextDeliverySignature) {
       await Promise.all([
         loadPaperEpisodes(selectedEpisodeId.value),
@@ -1153,6 +1171,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
       return response.blueprint
     } catch (cause) {
       error.value = cause.message || '保存生产蓝图失败'
+      captureErrorContext(cause)
       try { await openRun(runId); await openShot(shotId) } catch (_) {}
       throw cause
     } finally {
@@ -1177,6 +1196,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
       return response
     } catch (cause) {
       error.value = cause.message || '确认生产蓝图失败'
+      captureErrorContext(cause)
       try { await openRun(runId); await openShot(shotId) } catch (_) {}
       throw cause
     } finally {
@@ -1206,7 +1226,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
           expected_version: Number(currentShot.value.version),
         })
       } else if (action === 'review_assets') {
-        return { attention_required: 'review_assets', shot: currentShot.value }
+        return { noop: true, attention_required: 'review_assets', action, shot: currentShot.value }
       } else if (action === 'plan_motion' || action === 'revise_motion') {
         response = await paperStudioAPI.planMotion(currentShot.value.id, {
           request_id: requestId(),
@@ -1233,7 +1253,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
           request_id: requestId(), expected_version: Number(currentShot.value.version),
         })
       } else {
-        return null
+        return { noop: true, action, reason: 'no_client_handler' }
       }
       if (response.run) currentRun.value = response.run
       if (response.shot) {
@@ -1257,6 +1277,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
       return response
     } catch (cause) {
       error.value = cause.message || '执行纸片动画步骤失败'
+      captureErrorContext(cause)
       try {
         if (currentRun.value?.id) await openRun(currentRun.value.id)
         if (currentShot.value?.id) await openShot(currentShot.value.id)
@@ -1292,6 +1313,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
       return response
     } catch (cause) {
       error.value = cause.message || '批量推进纸片生产失败'
+      captureErrorContext(cause)
       try {
         await openRun(currentRun.value.id)
         await loadRuns()
@@ -1496,6 +1518,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     project,
     runs,
     providers,
+    actions,
     paperEpisodes,
     paperStoryboards,
     episodeMerges,
@@ -1519,6 +1542,7 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     acting,
     authoring,
     error,
+    errorContext,
     episodes,
     legacyEpisodes,
     currentEpisode,
@@ -1538,7 +1562,6 @@ export const usePaperStudioStore = defineStore('paperStudio', () => {
     toggleStoryboard,
     createPaperEpisode,
     createExampleDraft,
-    updatePaperEpisode,
     createPaperStoryboard,
     selectPaperStoryboard,
     savePaperStoryboard,

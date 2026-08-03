@@ -3,6 +3,7 @@ const runService = require('./paperStudioRunService');
 const shotService = require('./paperStudioShotService');
 const providerService = require('./paperProviderCapabilityService');
 const assetService = require('./paperAssetProductionService');
+const reuseService = require('./paperAssetReuseService');
 const eventService = require('./paperStudioEventService');
 const { CURRENT_PLANNER_VERSION, isCurrentPlannerVersion } = require('./paperStudioPlannerVersion');
 const {
@@ -88,10 +89,12 @@ function assertNoActiveGenerationSteps(db, runId, shotIds, { ignoreAuthorization
     `SELECT id, shot_id, status, authorization_id
      FROM paper_job_steps
      WHERE run_id = ? AND shot_id IN (${ids.map(() => '?').join(',')})
-       AND step_key = 'generate_layout_master'
+       AND plan_revision_id IN (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id IN (${ids.map(() => '?').join(',')}))
+       AND step_key = 'generate_required_slots'
        AND status IN ('queued', 'running')`,
-  ).all(Number(runId), ...ids).filter((step) => (
-    ignoreAuthorizationId == null || Number(step.authorization_id) !== Number(ignoreAuthorizationId)
+  ).all(Number(runId), ...ids, ...ids).filter((step) => (
+    (step.status === 'running' || step.authorization_id != null)
+    && (ignoreAuthorizationId == null || Number(step.authorization_id) !== Number(ignoreAuthorizationId))
   ));
   if (!active.length) return;
   throw new PaperStudioError(
@@ -110,7 +113,7 @@ function assertNoActiveGenerationSteps(db, runId, shotIds, { ignoreAuthorization
   );
 }
 
-function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
+function buildQuote(db, runId, body = {}, { validateSchema = true, cfg = {} } = {}) {
   if (validateSchema) schemaService.assertValid('apiRunAction', body, '图片生成报价参数无效');
   const run = runService.get(db, runId);
   assertExpectedVersion(run.version, body.expected_version, '纸片动画生产版本');
@@ -137,6 +140,26 @@ function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
   const wantedSlotIds = body.slot_ids?.length ? new Set(body.slot_ids.map(Number)) : null;
   const providerConfigId = run.selection_json?.image_provider_config_id || null;
   const provider = providerService.select(db, providerConfigId);
+  const reusePreview = reuseService.buildReusePreview(db, cfg, run.id, {
+    expected_version: run.version,
+    shot_ids: shots.map((shot) => Number(shot.id)),
+    ...(body.slot_ids?.length ? { slot_ids: body.slot_ids } : {}),
+    ...(body.slot_ids?.length ? { force_regeneration: true } : {}),
+  });
+  if (reusePreview.history_review_count > 0) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_REUSE_REVIEW_PENDING',
+      `还有 ${reusePreview.history_review_count} 张历史图片需要人工确认，请处理后再生成最终报价`,
+      {
+        history_review_count: reusePreview.history_review_count,
+        provider_call_min: reusePreview.provider_call_min,
+        provider_call_max: reusePreview.provider_call_max,
+        reuse_preview_fingerprint: reusePreview.reuse_preview_fingerprint,
+        slots: reusePreview.slots.filter((slot) => slot.source_kind === 'history_review_required'),
+      },
+      409,
+    );
+  }
   const allShotSlots = shots.flatMap((summary) => {
     const shot = shotService.get(db, summary.id);
     return shot.families.flatMap((family) => family.slots)
@@ -159,6 +182,9 @@ function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
   }
   const slots = allShotSlots
     .filter((slot) => (!wantedSlotIds || wantedSlotIds.has(Number(slot.id)))
+      && reusePreview.slots.some((previewSlot) => (
+        Number(previewSlot.slot_id) === Number(slot.id) && previewSlot.source_kind === 'needs_image_api'
+      ))
       && slotNeedsImageApi(db, slot.shot, slot, { force: Boolean(wantedSlotIds) }))
     .map((slot) => ({
         slot_id: Number(slot.id),
@@ -196,6 +222,7 @@ function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
     max_attempts: maxAttempts,
     max_authorized_calls: slots.length * maxAttempts,
     budget_limit: run.budget_json,
+    reuse_preview_fingerprint: reusePreview.reuse_preview_fingerprint,
   };
   const libraryReuseSlots = allShotSlots
     .filter((slot) => (!wantedSlotIds || wantedSlotIds.has(Number(slot.id))))
@@ -219,10 +246,26 @@ function buildQuote(db, runId, body = {}, { validateSchema = true } = {}) {
     ...quoteCore,
     quote_fingerprint: sha256(canonicalJson(quoteCore)),
     library_reuse: { count: libraryReuseSlots.length, calls: 0, slots: libraryReuseSlots },
+    required_slot_count: reusePreview.required_slot_count,
+    current_reuse_count: reusePreview.current_reuse_count,
+    history_reuse_count: reusePreview.history_reuse_count,
+    history_review_count: reusePreview.history_review_count,
+    blocked_history_count: reusePreview.blocked_history_count,
+    library_reuse_count: reusePreview.library_reuse_count,
+    local_derivation_count: reusePreview.local_derivation_count,
+    reuse_slots: reusePreview.slots,
   };
 }
 
-function authorize(db, log, runId, body = {}) {
+function authorize(db, cfg, log, runId, body = {}) {
+  // Backward-compatible service signature for existing internal callers/tests:
+  // authorize(db, log, runId, body).
+  if (typeof log === 'number' && runId && typeof runId === 'object') {
+    body = runId;
+    runId = log;
+    log = cfg;
+    cfg = {};
+  }
   schemaService.assertValid('apiGenerationAuthorization', body, '创建图片生成授权的参数无效');
   const run = runService.get(db, runId);
   assertExpectedVersion(run.version, body.expected_version, '纸片动画生产版本');
@@ -235,7 +278,19 @@ function authorize(db, log, runId, body = {}) {
     expected_version: Number(run.version),
     ...(body.shot_ids?.length ? { shot_ids: body.shot_ids } : {}),
     ...(body.slot_ids?.length ? { slot_ids: body.slot_ids } : {}),
-  });
+  }, { cfg });
+  if (quote.history_reuse_count > 0 || quote.history_review_count > 0) {
+    throw new PaperStudioError(
+      'PAPER_STUDIO_REUSE_REVIEW_REQUIRED',
+      '还有历史素材尚未完成复用确认，请先处理后再生成差异报价',
+      {
+        history_reuse_count: quote.history_reuse_count,
+        history_review_count: quote.history_review_count,
+        reuse_preview_fingerprint: quote.reuse_preview_fingerprint,
+      },
+      409,
+    );
+  }
   if (quote.quote_fingerprint !== body.quote_fingerprint) {
     throw new PaperStudioError(
       'PAPER_STUDIO_GENERATION_QUOTE_STALE',
@@ -316,10 +371,20 @@ function execute(db, log, authorizationId, body = {}) {
   const shotIds = authorization.shot_scope_json.map(Number);
   assertNoActiveGenerationSteps(db, authorization.run_id, shotIds, { ignoreAuthorizationId: authorization.id });
   const forceRegeneration = authorization.slot_scope_json.some((slot) => Boolean(slot.force_regeneration));
+  const stepMaxAttempts = Math.max(1, Number(authorization.max_attempts || 1));
   const transaction = db.transaction(() => {
     db.prepare(
       "UPDATE paper_generation_authorizations SET status = 'executing', executed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND status = 'authorized'",
     ).run(now, now, authorization.id);
+    db.prepare(
+      `UPDATE paper_job_steps
+       SET status = 'completed', authorization_id = ?, blocked_reason = NULL,
+           user_visible_status = 'completed', result_json = ?, error_json = '{}',
+           completed_at = ?, updated_at = ?
+       WHERE run_id = ? AND shot_id IN (${shotIds.map(() => '?').join(',')})
+         AND plan_revision_id IN (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id IN (${shotIds.map(() => '?').join(',')}))
+         AND step_key = 'generate_layout_master'`,
+    ).run(authorization.id, JSON.stringify({ authorization_id: authorization.id, role: 'authorization_milestone' }), now, now, authorization.run_id, ...shotIds, ...shotIds);
     db.prepare(
       `UPDATE paper_job_steps
        SET status = 'queued', authorization_id = ?, blocked_reason = NULL,
@@ -327,9 +392,10 @@ function execute(db, log, authorizationId, body = {}) {
            lease_owner = NULL, lease_expires_at = NULL, started_at = NULL,
            completed_at = NULL, updated_at = ?
        WHERE run_id = ? AND shot_id IN (${shotIds.map(() => '?').join(',')})
-         AND step_key = 'generate_layout_master'
-         AND status IN ('blocked_user_authorization','failed_retryable','failed_terminal','cancelled')`,
-    ).run(authorization.id, now, authorization.run_id, ...shotIds);
+         AND plan_revision_id IN (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id IN (${shotIds.map(() => '?').join(',')}))
+         AND step_key = 'generate_required_slots'
+         AND status IN ('queued','blocked_user_authorization','failed_retryable','failed_terminal','cancelled','completed')`,
+    ).run(authorization.id, now, authorization.run_id, ...shotIds, ...shotIds);
     if (forceRegeneration) {
       db.prepare(
         `UPDATE paper_job_steps
@@ -338,9 +404,17 @@ function execute(db, log, authorizationId, body = {}) {
              lease_owner = NULL, lease_expires_at = NULL, started_at = NULL,
              completed_at = NULL, updated_at = ?
          WHERE run_id = ? AND shot_id IN (${shotIds.map(() => '?').join(',')})
-           AND step_key = 'generate_layout_master'`,
-      ).run(authorization.id, now, authorization.run_id, ...shotIds);
+           AND plan_revision_id IN (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id IN (${shotIds.map(() => '?').join(',')}))
+           AND step_key = 'generate_required_slots'`,
+      ).run(authorization.id, now, authorization.run_id, ...shotIds, ...shotIds);
     }
+    db.prepare(
+      `UPDATE paper_job_steps
+       SET max_attempts = ?, updated_at = ?
+       WHERE run_id = ? AND shot_id IN (${shotIds.map(() => '?').join(',')})
+         AND plan_revision_id IN (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id IN (${shotIds.map(() => '?').join(',')}))
+         AND step_key IN ('generate_layout_master','generate_required_slots','matte_assets','register_assets','technical_asset_gate')`,
+    ).run(stepMaxAttempts, now, authorization.run_id, ...shotIds, ...shotIds);
     db.prepare(
       `UPDATE paper_studio_shots
        SET attention_required = 'none', version = version + 1, updated_at = ?

@@ -29,10 +29,14 @@ const referenceService = require('../services/paper-studio/paperStoryboardRefere
 const episodeMergeService = require('../services/paper-studio/paperEpisodeMergeService');
 const legacySyncService = require('../services/paper-studio/paperLegacySyncService');
 const generationAuthorizationService = require('../services/paper-studio/paperGenerationAuthorizationService');
+const assetReuseService = require('../services/paper-studio/paperAssetReuseService');
 const eventService = require('../services/paper-studio/paperStudioEventService');
 const taskCenterService = require('../services/paper-studio/paperTaskCenterService');
 const productEventService = require('../services/paper-studio/paperProductEventService');
 const exampleDraftService = require('../services/paper-studio/paperExampleDraftService');
+const storyboardHistoryService = require('../services/paper-studio/paperStoryboardHistoryService');
+const storyboardHistoryForkService = require('../services/paper-studio/paperStoryboardHistoryForkService');
+const continuityRepairService = require('../services/paper-studio/paperContinuityRepairService');
 
 function sendError(res, error) {
   response.error(
@@ -106,6 +110,31 @@ module.exports = function paperStudioRoutes(db, cfg, log) {
     }),
     getStoryboard: handle('paper storyboard get', (req, res) => {
       response.success(res, { storyboard: storyboardService.get(db, req.params.id) });
+    }),
+    getStoryboardHistory: handle('paper storyboard history list', (req, res) => {
+      response.success(res, { history: storyboardHistoryService.list(db, req.params.id, req.query || {}) });
+    }),
+    getStoryboardHistoryRevision: handle('paper storyboard history revision', (req, res) => {
+      response.success(res, { revision: storyboardHistoryService.revisionDetail(db, req.params.id, req.params.revision_id) });
+    }),
+    previewStoryboardHistoryFork: handle('paper storyboard history fork preview', (req, res) => {
+      response.success(res, { preview: storyboardHistoryForkService.buildPreview(db, req.params.id, req.body || {}, { cfg }) });
+    }),
+    forkStoryboardHistoryDraft: handle('paper storyboard history fork draft', (req, res) => {
+      const result = storyboardHistoryForkService.forkDraft(db, log, req.params.id, req.body || {});
+      if (result.created) return response.created(res, result);
+      response.success(res, result);
+    }),
+    forkStoryboardHistoryRun: handle('paper storyboard history fork run', (req, res) => {
+      const result = storyboardHistoryForkService.forkRun(db, cfg, log, req.params.id, req.body || {});
+      if (result.created) return response.created(res, result);
+      response.success(res, result);
+    }),
+    getStoryboardHistoryRun: handle('paper storyboard history run', (req, res) => {
+      response.success(res, { history_run: storyboardHistoryService.runDetail(db, req.params.id, req.params.run_id) });
+    }),
+    getStoryboardHistoryAsset: handle('paper storyboard history asset', (req, res) => {
+      response.success(res, { asset_history: storyboardHistoryService.assetDetail(db, cfg, req.params.id, req.params.asset_version_id) });
     }),
     updateStoryboard: handle('paper storyboard update', (req, res) => {
       response.success(res, { storyboard: storyboardService.update(db, log, req.params.id, req.body || {}) });
@@ -236,10 +265,16 @@ module.exports = function paperStudioRoutes(db, cfg, log) {
       response.success(res, analyzerService.confirmPlan(db, log, req.params.id, req.body || {}));
     }),
     generationQuote: handle('paper studio generation quote', (req, res) => {
-      response.success(res, { quote: generationAuthorizationService.buildQuote(db, req.params.id, req.body || {}) });
+      response.success(res, { quote: generationAuthorizationService.buildQuote(db, req.params.id, req.body || {}, { cfg }) });
+    }),
+    reusePreview: handle('paper studio asset reuse preview', (req, res) => {
+      response.success(res, { preview: assetReuseService.buildReusePreview(db, cfg, req.params.id, req.body || {}) });
+    }),
+    applyReuse: handle('paper studio asset reuse apply', async (req, res) => {
+      response.success(res, await assetReuseService.applyReusePreview(db, cfg, log, req.params.id, req.body || {}));
     }),
     authorizeGeneration: handle('paper studio generation authorize', (req, res) => {
-      const result = generationAuthorizationService.authorize(db, log, req.params.id, req.body || {});
+      const result = generationAuthorizationService.authorize(db, cfg, log, req.params.id, req.body || {});
       if (result.created) return response.created(res, result);
       response.success(res, result);
     }),
@@ -314,6 +349,12 @@ module.exports = function paperStudioRoutes(db, cfg, log) {
     }),
     syncAudioTiming: handle('paper studio audio timing sync', (req, res) => {
       response.success(res, audioTimingRecoveryService.reopen(db, cfg, log, req.params.id, req.body || {}));
+    }),
+    continuityRepairPreview: handle('paper studio continuity repair preview', (req, res) => {
+      response.success(res, { preview: continuityRepairService.preview(db, cfg, req.params.id, req.body || {}) });
+    }),
+    continuityRepair: handle('paper studio continuity repair apply', (req, res) => {
+      response.success(res, continuityRepairService.apply(db, cfg, log, req.params.id, req.body || {}));
     }),
     reviseMotion: handle('paper studio motion revise', (req, res) => {
       response.success(res, motionRevisionService.revise(db, cfg, log, req.params.id, req.body || {}));

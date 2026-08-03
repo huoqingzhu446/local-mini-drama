@@ -81,7 +81,7 @@ const registeredBoundary = (node, snapshot) => {
   };
 };
 
-const RouteReveal = ({ node, progress, amount, theme }) => {
+const PathReveal = ({ node, progress, amount, theme }) => {
   const points = (node.relation?.points || []).map(([x, y]) => [Number(x) * 1000, Number(y) * 600]);
   const pointString = points.map((point) => point.join(',')).join(' ');
   const encirclement = node.relation?.appearance === 'encirclement';
@@ -106,7 +106,7 @@ const RouteReveal = ({ node, progress, amount, theme }) => {
   );
 };
 
-const MapTitleCard = ({ node, theme }) => {
+const LabelCard = ({ node, theme }) => {
   const appearance = node.relation?.appearance || 'commander';
   const parts = String(node.relation?.text || '').split(/[｜|]/).map((item) => item.trim()).filter(Boolean);
   const ink = safeColor(theme?.palette?.ink, '#241C16');
@@ -126,7 +126,7 @@ const MapTitleCard = ({ node, theme }) => {
   );
 };
 
-const EmberField = ({ amount, frame }) => {
+const EmberDrift = ({ amount, frame }) => {
   const strength = clamp(Number(amount || 0));
   return (
     <div style={{ position: 'absolute', inset: 0, opacity: strength, background: `radial-gradient(ellipse at 72% 92%, rgba(167,52,24,${0.42 * strength}) 0%, rgba(114,45,21,${0.2 * strength}) 24%, transparent 58%)` }}>
@@ -141,7 +141,7 @@ const EmberField = ({ amount, frame }) => {
   );
 };
 
-const ArmyFormation = ({ amount, theme }) => {
+const CrowdFormation = ({ amount, theme }) => {
   const strength = clamp(Number(amount || 0));
   const ink = safeColor(theme?.palette?.ink, '#241C16');
   return (
@@ -165,7 +165,13 @@ const ArmyFormation = ({ amount, theme }) => {
 };
 
 export const ProceduralLayer = ({ node, motion, frame, style, theme, assetMap, snapshot, debug }) => {
-  const kind = node.relation?.procedural_kind || '';
+  const rawKind = node.relation?.procedural_kind || '';
+  const kind = ({
+    'route-reveal': 'path-reveal',
+    'map-title-card': 'label-card',
+    'army-formation': 'crowd-formation',
+    'ember-field': 'ember-drift',
+  })[rawKind] || rawKind;
   const appearance = node.relation?.appearance || 'neutral';
   const amount = clamp(Number(motion.procedural_amount || 0));
   const progress = clamp(Number(motion.clip_progress || 0));
@@ -181,17 +187,17 @@ export const ProceduralLayer = ({ node, motion, frame, style, theme, assetMap, s
   if (kind === 'ambient-flow') {
     return <div data-paper-node={node.key} data-paper-kind="procedural-ambient-flow" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,235,235,.5)' : 'none' }}><AmbientFlow amount={amount} frame={frame} /></div>;
   }
-  if (kind === 'route-reveal') {
-    return <div data-paper-node={node.key} data-paper-kind="procedural-route-reveal" data-proof-progress={progress.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><RouteReveal node={node} progress={progress} amount={amount} theme={theme} /></div>;
+  if (kind === 'path-reveal') {
+    return <div data-paper-node={node.key} data-paper-kind="procedural-path-reveal" data-proof-progress={progress.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><PathReveal node={node} progress={progress} amount={amount} theme={theme} /></div>;
   }
-  if (kind === 'map-title-card') {
-    return <div data-paper-node={node.key} data-paper-kind="procedural-map-title-card" style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><MapTitleCard node={node} theme={theme} /></div>;
+  if (kind === 'label-card') {
+    return <div data-paper-node={node.key} data-paper-kind="procedural-label-card" style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><LabelCard node={node} theme={theme} /></div>;
   }
-  if (kind === 'ember-field') {
-    return <div data-paper-node={node.key} data-paper-kind="procedural-ember-field" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(222,104,61,.55)' : 'none' }}><EmberField amount={amount} frame={frame} /></div>;
+  if (kind === 'ember-drift') {
+    return <div data-paper-node={node.key} data-paper-kind="procedural-ember-drift" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(222,104,61,.55)' : 'none' }}><EmberDrift amount={amount} frame={frame} /></div>;
   }
-  if (kind === 'army-formation') {
-    return <div data-paper-node={node.key} data-paper-kind="procedural-army-formation" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><ArmyFormation amount={amount} theme={theme} /></div>;
+  if (kind === 'crowd-formation') {
+    return <div data-paper-node={node.key} data-paper-kind="procedural-crowd-formation" data-proof-amount={amount.toFixed(4)} style={{ ...style, outline: debug ? '2px solid rgba(216,180,90,.55)' : 'none' }}><CrowdFormation amount={amount} theme={theme} /></div>;
   }
   const foreground = kind === 'boundary-front' || kind === 'foreground-layer';
   const boundary = registeredBoundary(node, snapshot);

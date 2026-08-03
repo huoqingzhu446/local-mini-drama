@@ -102,9 +102,11 @@ function acceptedSubjectAssets(db, shotId, subjectKey) {
      FROM paper_source_families psf
      JOIN paper_asset_slots pas ON pas.family_id = psf.id
      JOIN paper_asset_versions pav ON pav.id = pas.current_version_id
-     WHERE psf.shot_id = ? AND pav.status = 'accepted' AND pas.deleted_at IS NULL
+     WHERE psf.shot_id = ?
+       AND psf.plan_revision_id = (SELECT current_plan_revision_id FROM paper_studio_shots WHERE id = ?)
+       AND pav.status = 'accepted' AND pas.deleted_at IS NULL
      ORDER BY pas.id`,
-  ).all(Number(shotId));
+  ).all(Number(shotId), Number(shotId));
   return rows.filter((row) => parseJson(row.constraints_json, {}).subject_key === subjectKey).map((row) => ({
     ...row,
     version_id: Number(row.version_id),
